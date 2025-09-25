@@ -95,6 +95,7 @@ class MarketDataManager:
     - Детальный мониторинг производительности
     - Graceful shutdown
     - Error recovery
+    - Thread-safe WebSocket callbacks
     """
     
     def __init__(self, symbol: str = None, testnet: bool = None, 
@@ -136,9 +137,13 @@ class MarketDataManager:
         self.is_running = False
         self.initialization_complete = False
         self.shutdown_event = asyncio.Event()
+        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
         
         # Задачи фонового выполнения
         self.background_tasks: List[asyncio.Task] = []
+        
+        # Thread-safe очередь для WebSocket событий
+        self._websocket_event_queue: Optional[asyncio.Queue] = None
         
         # Статистика и мониторинг
         self.stats = {
@@ -150,6 +155,7 @@ class MarketDataManager:
             "cache_hits": 0,
             "cache_misses": 0,
             "subscriber_notifications": 0,
+            "websocket_callback_errors": 0,
             "start_time": datetime.now(),
             "last_error": None,
             "last_websocket_data": None,
@@ -173,6 +179,12 @@ class MarketDataManager:
         try:
             logger.info(f"🚀 Запуск MarketDataManager для {self.symbol}")
             self.stats["start_time"] = datetime.now()
+            
+            # Сохраняем ссылку на основной event loop
+            self._main_loop = asyncio.get_running_loop()
+            
+            # Создаем очередь для WebSocket событий
+            self._websocket_event_queue = asyncio.Queue(maxsize=1000)
             
             providers_started = 0
             initialization_errors = []
@@ -268,7 +280,7 @@ class MarketDataManager:
                 testnet=self.testnet
             )
             
-            # Подписываемся на обновления
+            # Подписываемся на обновления с thread-safe callback'ами
             self.websocket_provider.add_ticker_callback(self._on_websocket_ticker_update)
             self.websocket_provider.add_orderbook_callback(self._on_websocket_orderbook_update)
             self.websocket_provider.add_trades_callback(self._on_websocket_trades_update)
@@ -301,6 +313,11 @@ class MarketDataManager:
     async def _start_background_tasks(self):
         """Запуск фоновых задач"""
         try:
+            # Задача обработки WebSocket событий
+            websocket_processor_task = asyncio.create_task(self._websocket_event_processor())
+            self.background_tasks.append(websocket_processor_task)
+            logger.info("🔄 Запущен процессор WebSocket событий")
+            
             # Задача мониторинга WebSocket соединения
             if self.websocket_reconnect and self.websocket_provider:
                 monitor_task = asyncio.create_task(self._websocket_monitor_task())
@@ -316,6 +333,126 @@ class MarketDataManager:
             
         except Exception as e:
             logger.error(f"❌ Ошибка запуска фоновых задач: {e}")
+    
+    async def _websocket_event_processor(self):
+        """Фоновая задача для обработки WebSocket событий"""
+        while self.is_running and not self.shutdown_event.is_set():
+            try:
+                if not self._websocket_event_queue:
+                    await asyncio.sleep(1)
+                    continue
+                
+                # Ждем события из очереди с таймаутом
+                try:
+                    event = await asyncio.wait_for(
+                        self._websocket_event_queue.get(), 
+                        timeout=1.0
+                    )
+                    
+                    # Обрабатываем событие
+                    await self._process_websocket_event(event)
+                    
+                except asyncio.TimeoutError:
+                    continue  # Продолжаем цикл
+                    
+            except asyncio.CancelledError:
+                logger.info("🔄 Процессор WebSocket событий отменен")
+                break
+            except Exception as e:
+                logger.error(f"❌ Ошибка в процессоре WebSocket событий: {e}")
+                self.stats["errors"] += 1
+                await asyncio.sleep(1)
+    
+    async def _process_websocket_event(self, event: Dict[str, Any]):
+        """Обрабатывает событие от WebSocket"""
+        try:
+            event_type = event.get("type")
+            
+            if event_type == "ticker":
+                # Уведомляем подписчиков о новых данных
+                if self.data_subscribers:
+                    await self._notify_subscribers_async()
+                    
+            elif event_type == "orderbook":
+                # Обработка событий ордербука при необходимости
+                pass
+                
+            elif event_type == "trades":
+                # Обработка событий трейдов при необходимости
+                pass
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки WebSocket события: {e}")
+            self.stats["errors"] += 1
+    
+    def _on_websocket_ticker_update(self, ticker_data: dict):
+        """Thread-safe callback для обновлений тикера от WebSocket"""
+        try:
+            self.stats["websocket_updates"] += 1
+            self.stats["last_websocket_data"] = datetime.now()
+            
+            # Помещаем событие в thread-safe очередь для обработки в основном loop
+            if self._websocket_event_queue and self._main_loop:
+                try:
+                    # Используем call_soon_threadsafe для безопасного добавления в очередь
+                    self._main_loop.call_soon_threadsafe(
+                        self._add_websocket_event_sync, 
+                        {"type": "ticker", "data": ticker_data}
+                    )
+                except RuntimeError as e:
+                    # Event loop может быть закрыт
+                    logger.debug(f"Loop недоступен для WebSocket callback: {e}")
+                    
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки WebSocket ticker: {e}")
+            self.stats["websocket_callback_errors"] += 1
+            self.stats["errors"] += 1
+            self.stats["last_error"] = str(e)
+    
+    def _on_websocket_orderbook_update(self, orderbook_data: dict):
+        """Thread-safe callback для обновлений ордербука от WebSocket"""
+        try:
+            if self._websocket_event_queue and self._main_loop:
+                try:
+                    self._main_loop.call_soon_threadsafe(
+                        self._add_websocket_event_sync,
+                        {"type": "orderbook", "data": orderbook_data}
+                    )
+                except RuntimeError as e:
+                    logger.debug(f"Loop недоступен для WebSocket orderbook callback: {e}")
+                    
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки WebSocket orderbook: {e}")
+            self.stats["websocket_callback_errors"] += 1
+            self.stats["errors"] += 1
+    
+    def _on_websocket_trades_update(self, trades_data: list):
+        """Thread-safe callback для обновлений трейдов от WebSocket"""
+        try:
+            if self._websocket_event_queue and self._main_loop:
+                try:
+                    self._main_loop.call_soon_threadsafe(
+                        self._add_websocket_event_sync,
+                        {"type": "trades", "data": trades_data}
+                    )
+                except RuntimeError as e:
+                    logger.debug(f"Loop недоступен для WebSocket trades callback: {e}")
+                    
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки WebSocket trades: {e}")
+            self.stats["websocket_callback_errors"] += 1
+            self.stats["errors"] += 1
+    
+    def _add_websocket_event_sync(self, event: Dict[str, Any]):
+        """Синхронная функция для добавления события в очередь"""
+        try:
+            if self._websocket_event_queue:
+                # Используем put_nowait для неблокирующего добавления
+                self._websocket_event_queue.put_nowait(event)
+        except asyncio.QueueFull:
+            logger.warning("⚠️ Очередь WebSocket событий переполнена")
+        except Exception as e:
+            logger.error(f"❌ Ошибка добавления WebSocket события: {e}")
     
     async def _websocket_monitor_task(self):
         """Фоновая задача мониторинга WebSocket соединения"""
@@ -383,43 +520,19 @@ class MarketDataManager:
                     logger.info("🧹 Сброс счетчика ошибок для оптимизации памяти")
                     self.stats["errors"] = 10
                 
+                # Очищаем очередь WebSocket событий если она слишком заполнена
+                if self._websocket_event_queue and self._websocket_event_queue.qsize() > 500:
+                    logger.warning("🧹 Очищаю переполненную очередь WebSocket событий")
+                    while not self._websocket_event_queue.empty():
+                        try:
+                            self._websocket_event_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"❌ Ошибка в задаче очистки: {e}")
-    
-    def _on_websocket_ticker_update(self, ticker_data: dict):
-        """Callback для обновлений тикера от WebSocket"""
-        try:
-            self.stats["websocket_updates"] += 1
-            self.stats["last_websocket_data"] = datetime.now()
-            
-            # Создаем снимок данных для подписчиков (асинхронно)
-            if self.data_subscribers:
-                asyncio.create_task(self._notify_subscribers_async())
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки WebSocket ticker: {e}")
-            self.stats["errors"] += 1
-            self.stats["last_error"] = str(e)
-    
-    def _on_websocket_orderbook_update(self, orderbook_data: dict):
-        """Callback для обновлений ордербука от WebSocket"""
-        try:
-            # При необходимости можно добавить специфичную логику
-            pass
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки WebSocket orderbook: {e}")
-            self.stats["errors"] += 1
-    
-    def _on_websocket_trades_update(self, trades_data: list):
-        """Callback для обновлений трейдов от WebSocket"""
-        try:
-            # При необходимости можно добавить специфичную логику
-            pass
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки WebSocket trades: {e}")
-            self.stats["errors"] += 1
     
     async def _notify_subscribers_async(self):
         """Асинхронное уведомление подписчиков о новых данных"""
@@ -747,6 +860,10 @@ class MarketDataManager:
             "background_tasks_count": len(self.background_tasks),
             "background_tasks_active": sum(1 for task in self.background_tasks if not task.done()),
             
+            # WebSocket очередь
+            "websocket_queue_size": self._websocket_event_queue.qsize() if self._websocket_event_queue else 0,
+            "websocket_queue_maxsize": self._websocket_event_queue.maxsize if self._websocket_event_queue else 0,
+            
             # Переподключения
             "reconnect_attempts_current": self.current_reconnect_attempts,
             "reconnect_attempts_max": self.max_reconnect_attempts
@@ -766,6 +883,8 @@ class MarketDataManager:
             overall_status = HealthStatus.DEGRADED
         elif self.stats["errors"] > 50:  # Много ошибок
             overall_status = HealthStatus.DEGRADED
+        elif self.stats["websocket_callback_errors"] > 10:  # Много ошибок в callback'ах
+            overall_status = HealthStatus.DEGRADED
         else:
             overall_status = HealthStatus.HEALTHY
         
@@ -780,11 +899,21 @@ class MarketDataManager:
             else:
                 data_freshness = "very_stale"
         
+        # Статус очереди WebSocket событий
+        queue_status = "healthy"
+        if self._websocket_event_queue:
+            queue_size = self._websocket_event_queue.qsize()
+            if queue_size > 800:
+                queue_status = "critical"
+            elif queue_size > 500:
+                queue_status = "degraded"
+        
         return {
             "overall_status": overall_status.value,
             "components": {
                 "websocket_provider": websocket_status,
                 "rest_api_provider": rest_api_status,
+                "websocket_event_queue": queue_status,
                 "background_tasks": "active" if any(not task.done() for task in self.background_tasks) else "inactive"
             },
             "data_status": {
@@ -796,6 +925,7 @@ class MarketDataManager:
             },
             "performance": {
                 "error_count": self.stats["errors"],
+                "websocket_callback_errors": self.stats["websocket_callback_errors"],
                 "reconnect_attempts": self.current_reconnect_attempts,
                 "cache_hit_rate": round((self.stats["cache_hits"] / (self.stats["cache_hits"] + self.stats["cache_misses"]) * 100), 2) if (self.stats["cache_hits"] + self.stats["cache_misses"]) > 0 else 0
             },
@@ -841,9 +971,22 @@ class MarketDataManager:
             if subscribers_count > 0:
                 logger.info(f"🧹 Очищено {subscribers_count} подписчиков")
             
+            # Очищаем WebSocket очередь
+            if self._websocket_event_queue:
+                events_cleared = 0
+                while not self._websocket_event_queue.empty():
+                    try:
+                        self._websocket_event_queue.get_nowait()
+                        events_cleared += 1
+                    except asyncio.QueueEmpty:
+                        break
+                if events_cleared > 0:
+                    logger.info(f"🧹 Очищено {events_cleared} WebSocket событий из очереди")
+            
             # Очищаем кэш
             self.cached_rest_data = None
             self.last_snapshot = None
+            self._main_loop = None
             
             # Логируем финальную статистику
             final_stats = self.get_stats()
@@ -853,6 +996,7 @@ class MarketDataManager:
             logger.info(f"   • REST API вызовов: {final_stats['rest_api_calls']}")
             logger.info(f"   • Снимков данных создано: {final_stats['data_snapshots_created']}")
             logger.info(f"   • Ошибок: {final_stats['errors']}")
+            logger.info(f"   • WebSocket callback ошибок: {final_stats['websocket_callback_errors']}")
             logger.info(f"   • Успешность: {final_stats['success_rate_percent']:.1f}%")
             
             logger.info("🛑 MarketDataManager успешно остановлен")
@@ -881,4 +1025,5 @@ class MarketDataManager:
         stats = self.get_stats()
         return (f"MarketDataManager(symbol='{self.symbol}', testnet={self.testnet}, "
                 f"running={self.is_running}, ws_updates={stats['websocket_updates']}, "
-                f"rest_calls={stats['rest_api_calls']}, errors={stats['errors']})")
+                f"rest_calls={stats['rest_api_calls']}, errors={stats['errors']}, "
+                f"ws_callback_errors={stats['websocket_callback_errors']})")
