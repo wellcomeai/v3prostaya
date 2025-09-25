@@ -5,8 +5,13 @@ import os
 from aiohttp import web
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from telegram_bot import TelegramBot
-from websocket_strategy import WebSocketStrategy  # 🆕 НОВЫЙ ИМПОРТ
 from config import Config
+
+# 🆕 НОВЫЕ ИМПОРТЫ - Модульная архитектура
+from market_data import MarketDataManager
+from core import SignalManager, StrategyOrchestrator
+from core.data_models import SystemConfig, StrategyConfig, create_default_system_config
+from strategies import MomentumStrategy
 
 # Настройка логирования
 logging.basicConfig(
@@ -24,9 +29,12 @@ WEBHOOK_SECRET = "bybit_trading_bot_secret_2025"
 # URL вашего сервера
 BASE_WEBHOOK_URL = "https://bybitmybot.onrender.com"
 
-# Глобальные переменные
+# Глобальные переменные для новой архитектуры
 bot_instance = None
-websocket_strategy = None  # 🆕 НОВАЯ ГЛОБАЛЬНАЯ ПЕРЕМЕННАЯ
+market_data_manager = None
+signal_manager = None
+strategy_orchestrator = None
+system_config = None
 
 async def health_check(request):
     """Health check endpoint для Render и мониторинга"""
@@ -35,18 +43,22 @@ async def health_check(request):
         if bot_instance and bot_instance.bot:
             bot_info = await bot_instance.bot.get_me()
             
-            # 🆕 НОВОЕ: Проверяем статус WebSocket стратегии
-            websocket_status = "active" if (websocket_strategy and websocket_strategy.running) else "inactive"
-            subscribers_count = len(bot_instance.signal_subscribers) if bot_instance else 0
-            
-            return web.json_response({
+            # 🆕 НОВОЕ: Проверяем статус новой архитектуры
+            health_status = {
                 "status": "ok",
                 "bot_username": bot_info.username,
                 "bot_id": bot_info.id,
-                "websocket_strategy": websocket_status,
-                "signal_subscribers": subscribers_count,
-                "timestamp": asyncio.get_event_loop().time()
-            })
+                "timestamp": asyncio.get_event_loop().time(),
+                "signal_subscribers": len(bot_instance.signal_subscribers) if bot_instance else 0,
+                "components": {
+                    "market_data_manager": market_data_manager.get_health_status()["overall_status"] if market_data_manager else "inactive",
+                    "signal_manager": "running" if signal_manager and signal_manager.is_running else "inactive",
+                    "strategy_orchestrator": strategy_orchestrator.status.value if strategy_orchestrator else "inactive",
+                    "strategies_active": strategy_orchestrator._count_active_strategies() if strategy_orchestrator else 0
+                }
+            }
+            
+            return web.json_response(health_status)
         else:
             return web.json_response({
                 "status": "initializing",
@@ -112,55 +124,131 @@ async def on_shutdown(bot) -> None:
         logger.error(f"❌ Ошибка при остановке: {e}")
 
 async def cleanup_resources():
-    """Освобождение всех ресурсов"""
-    global bot_instance, websocket_strategy
+    """Освобождение всех ресурсов новой архитектуры"""
+    global bot_instance, market_data_manager, signal_manager, strategy_orchestrator
     
     try:
-        # 🆕 НОВОЕ: Останавливаем WebSocket стратегию
-        if websocket_strategy:
-            logger.info("🔄 Остановка WebSocket стратегии...")
-            await websocket_strategy.stop()
-            logger.info("✅ WebSocket стратегия остановлена")
+        # Останавливаем оркестратор стратегий
+        if strategy_orchestrator:
+            logger.info("🔄 Остановка StrategyOrchestrator...")
+            await strategy_orchestrator.stop()
+            logger.info("✅ StrategyOrchestrator остановлен")
         
+        # Останавливаем менеджер сигналов
+        if signal_manager:
+            logger.info("🔄 Остановка SignalManager...")
+            await signal_manager.stop()
+            logger.info("✅ SignalManager остановлен")
+        
+        # Останавливаем менеджер данных
+        if market_data_manager:
+            logger.info("🔄 Остановка MarketDataManager...")
+            await market_data_manager.stop()
+            logger.info("✅ MarketDataManager остановлен")
+        
+        # Закрываем Telegram бот
         if bot_instance:
-            # Закрываем HTTP сессии в BybitClient
-            if hasattr(bot_instance, 'bybit_client'):
-                await bot_instance.bybit_client.close()
-                logger.info("✅ BybitClient сессии закрыты")
-            
-            # Закрываем бота
             await bot_instance.close()
             logger.info("✅ Telegram бот закрыт")
             
     except Exception as e:
         logger.error(f"❌ Ошибка освобождения ресурсов: {e}")
 
+async def initialize_trading_system():
+    """Инициализация торговой системы"""
+    global market_data_manager, signal_manager, strategy_orchestrator, system_config
+    
+    try:
+        logger.info("🚀 Инициализация торговой системы...")
+        
+        # 1. Создаем конфигурацию системы
+        system_config = create_default_system_config()
+        system_config.trading_mode = system_config.trading_mode.PAPER  # Тестовый режим
+        system_config.bybit_testnet = Config.BYBIT_TESTNET
+        system_config.default_symbol = Config.SYMBOL
+        
+        # 2. Инициализируем менеджер рыночных данных
+        logger.info("📊 Инициализация MarketDataManager...")
+        market_data_manager = MarketDataManager(
+            symbol=Config.SYMBOL,
+            testnet=Config.BYBIT_TESTNET,
+            enable_websocket=True,
+            enable_rest_api=True
+        )
+        
+        # 3. Инициализируем менеджер сигналов
+        logger.info("🎛️ Инициализация SignalManager...")
+        signal_manager = SignalManager(
+            max_queue_size=1000,
+            notification_settings=system_config.notification_settings
+        )
+        
+        # Подписываем Telegram бота на сигналы
+        if bot_instance:
+            signal_manager.add_subscriber(bot_instance.broadcast_signal)
+            logger.info("📡 Telegram бот подписан на торговые сигналы")
+        
+        # 4. Инициализируем оркестратор стратегий
+        logger.info("🎭 Инициализация StrategyOrchestrator...")
+        strategy_orchestrator = StrategyOrchestrator(
+            market_data_manager=market_data_manager,
+            signal_manager=signal_manager,
+            system_config=system_config,
+            analysis_interval=30.0,  # 30 секунд между анализами
+            max_concurrent_analyses=3,
+            enable_performance_monitoring=True
+        )
+        
+        # 5. Запускаем все компоненты
+        logger.info("▶️ Запуск торговой системы...")
+        
+        # Запускаем менеджер данных
+        market_data_started = await market_data_manager.start()
+        if not market_data_started:
+            raise Exception("Не удалось запустить MarketDataManager")
+        
+        # Запускаем менеджер сигналов
+        await signal_manager.start()
+        
+        # Запускаем оркестратор стратегий
+        orchestrator_started = await strategy_orchestrator.start()
+        if not orchestrator_started:
+            raise Exception("Не удалось запустить StrategyOrchestrator")
+        
+        logger.info("✅ Торговая система запущена успешно!")
+        logger.info(f"📊 MarketDataManager: {market_data_manager}")
+        logger.info(f"🎛️ SignalManager: {signal_manager}")
+        logger.info(f"🎭 StrategyOrchestrator: {strategy_orchestrator}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"💥 Критическая ошибка инициализации торговой системы: {e}")
+        return False
+
 async def create_app():
     """Создание веб-приложения"""
-    global bot_instance, websocket_strategy
+    global bot_instance
     
     # Создаем экземпляр бота
     bot_instance = TelegramBot(Config.TELEGRAM_BOT_TOKEN)
     
-    # 🆕 НОВОЕ: Создаем и запускаем WebSocket стратегию
+    # 🆕 НОВОЕ: Инициализируем торговую систему вместо старой WebSocket стратегии
     try:
-        logger.info("🚀 Инициализация WebSocket стратегии...")
-        websocket_strategy = WebSocketStrategy(bot_instance)
+        logger.info("🚀 Инициализация новой торговой системы...")
+        trading_system_started = await initialize_trading_system()
         
-        # Запускаем стратегию в фоне
-        logger.info("⚡ Запуск WebSocket стратегии в фоновом режиме...")
-        asyncio.create_task(websocket_strategy.start())
-        
-        # Небольшая пауза для инициализации
-        await asyncio.sleep(2)
-        
-        logger.info("✅ WebSocket стратегия инициализирована")
-        
+        if trading_system_started:
+            logger.info("🚨 ✅ Новая торговая система активна")
+            logger.info(f"📊 Мониторинг символа: {Config.SYMBOL}")
+            logger.info(f"🔧 Режим: {'Testnet' if Config.BYBIT_TESTNET else 'Mainnet'}")
+        else:
+            logger.warning("⚠️ Торговая система не активна")
+            
     except Exception as e:
-        logger.error(f"💥 Ошибка запуска WebSocket стратегии: {e}")
-        logger.warning("⚠️ Продолжаем работу без WebSocket стратегии")
-        # Продолжаем работу без стратегии - бот все равно будет работать
-        websocket_strategy = None
+        logger.error(f"💥 Ошибка запуска торговой системы: {e}")
+        logger.warning("⚠️ Продолжаем работу без торговой системы")
+        # Продолжаем работу без торговой системы - бот все равно будет работать
     
     # Устанавливаем webhook при запуске
     await on_startup(bot_instance.bot)
@@ -173,65 +261,59 @@ async def create_app():
     
     # Root endpoint для проверки
     async def root_handler(request):
-        # 🆕 НОВОЕ: Добавляем информацию о WebSocket стратегии
-        websocket_info = {
-            "websocket_strategy_active": websocket_strategy.running if websocket_strategy else False,
+        # 🆕 НОВОЕ: Информация о новой торговой системе
+        trading_system_info = {
+            "trading_system_active": bool(strategy_orchestrator and strategy_orchestrator.is_running),
+            "market_data_status": market_data_manager.get_health_status()["overall_status"] if market_data_manager else "inactive",
+            "active_strategies": strategy_orchestrator._count_active_strategies() if strategy_orchestrator else 0,
             "signal_subscribers": len(bot_instance.signal_subscribers) if bot_instance else 0
         }
         
         return web.json_response({
-            "message": "Bybit Trading Bot v2.1 is running",
+            "message": "Bybit Trading Bot v2.1 - Modular Architecture",
             "features": [
-                "REST API Market Analysis",
+                "Modular Market Data Management",
+                "Strategy Orchestration System", 
+                "Advanced Signal Management",
+                "REST API + WebSocket Integration",
                 "OpenAI Integration", 
-                "WebSocket Real-time Signals",
                 "Telegram Notifications"
             ],
             "webhook_path": WEBHOOK_PATH,
             "status": "active",
-            **websocket_info
+            **trading_system_info
         })
     
     app.router.add_get("/", root_handler)
     
-    # 🆕 НОВОЕ: Дополнительный endpoint для статуса сигналов
-    async def signals_status_handler(request):
-        """Endpoint для проверки статуса торговых сигналов"""
+    # 🆕 НОВОЕ: Дополнительный endpoint для статуса торговой системы
+    async def trading_system_status_handler(request):
+        """Endpoint для проверки статуса торговой системы"""
         try:
-            if not bot_instance or not websocket_strategy:
+            if not market_data_manager or not signal_manager or not strategy_orchestrator:
                 return web.json_response({
                     "status": "inactive",
-                    "message": "WebSocket strategy not initialized"
+                    "message": "Trading system not initialized"
                 }, status=503)
             
             return web.json_response({
-                "websocket_strategy": {
-                    "status": "active" if websocket_strategy.running else "inactive",
-                    "symbol": Config.SYMBOL,
-                    "testnet": Config.BYBIT_TESTNET,
-                    "min_signal_strength": websocket_strategy.min_signal_strength,
-                    "signal_cooldown_minutes": websocket_strategy.signal_cooldown.total_seconds() / 60,
-                    "price_data_points": len(websocket_strategy.market_data.prices) if websocket_strategy.market_data else 0,
-                    "last_signals_count": len(websocket_strategy.last_signals) if websocket_strategy.last_signals else 0
-                },
-                "subscribers": {
-                    "count": len(bot_instance.signal_subscribers),
-                    "active": True
-                },
-                "market_data": {
-                    "current_price": websocket_strategy.market_data.get_current_price() if websocket_strategy and websocket_strategy.market_data else 0,
-                    "data_available": len(websocket_strategy.market_data.prices) > 0 if websocket_strategy and websocket_strategy.market_data else False
+                "market_data_manager": market_data_manager.get_stats(),
+                "signal_manager": signal_manager.get_stats(),
+                "strategy_orchestrator": strategy_orchestrator.get_stats(),
+                "system_health": {
+                    "market_data": market_data_manager.get_health_status(),
+                    "strategies": strategy_orchestrator.get_health_status()
                 }
             })
             
         except Exception as e:
-            logger.error(f"❌ Ошибка в signals_status: {e}")
+            logger.error(f"❌ Ошибка в trading_system_status: {e}")
             return web.json_response({
                 "status": "error",
                 "message": str(e)
             }, status=500)
     
-    app.router.add_get("/signals/status", signals_status_handler)
+    app.router.add_get("/trading/status", trading_system_status_handler)
     
     # Создаем обработчик webhook запросов
     webhook_requests_handler = SimpleRequestHandler(
@@ -258,19 +340,19 @@ async def main():
     """Главная функция приложения"""
     
     try:
-        logger.info("🚀 Запуск Bybit Trading Bot v2.1 (webhook режим)...")
+        logger.info("🚀 Запуск Bybit Trading Bot v2.1 (modular architecture)...")
         logger.info(f"🔧 Порт: {WEB_SERVER_PORT}")
         logger.info(f"🔧 Webhook URL: {BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
         logger.info(f"🔧 Testnet: {Config.BYBIT_TESTNET}")
         logger.info(f"🔧 Symbol: {Config.SYMBOL}")
         
-        # 🆕 НОВОЕ: Логируем WebSocket настройки
-        logger.info("🚨 WebSocket Features:")
-        logger.info("   • Real-time price monitoring")
-        logger.info("   • Orderbook analysis")
-        logger.info("   • Trade flow analysis")
-        logger.info("   • Momentum detection")
-        logger.info("   • Automatic signal distribution")
+        # 🆕 НОВОЕ: Логируем новую архитектуру
+        logger.info("🏗️ Modular Architecture Features:")
+        logger.info("   • MarketDataManager с WebSocket + REST API")
+        logger.info("   • StrategyOrchestrator для управления стратегиями")
+        logger.info("   • SignalManager для фильтрации и рассылки сигналов")
+        logger.info("   • Импульсная MomentumStrategy")
+        logger.info("   • Автоматическая рассылка торговых сигналов")
         
         # Создаем приложение
         app = await create_app()
@@ -285,49 +367,27 @@ async def main():
         logger.info(f"🌐 Веб-сервер запущен на {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
         logger.info("🤖 Telegram бот готов к работе через webhook!")
         logger.info(f"🏥 Health check доступен по адресу: {BASE_WEBHOOK_URL}/health")
-        logger.info(f"📊 Статус сигналов: {BASE_WEBHOOK_URL}/signals/status")
-        
-        # Проверяем подключение к Bybit
-        try:
-            if bot_instance and bot_instance.bybit_client:
-                connection_ok = await bot_instance.bybit_client.check_connection()
-                if connection_ok:
-                    logger.info("✅ Подключение к Bybit API успешно")
-                else:
-                    logger.warning("⚠️ Проблемы с подключением к Bybit API")
-        except Exception as e:
-            logger.error(f"❌ Ошибка проверки Bybit API: {e}")
-        
-        # 🆕 НОВОЕ: Проверяем статус WebSocket стратегии
-        if websocket_strategy:
-            await asyncio.sleep(5)  # Ждем инициализации WebSocket
-            if websocket_strategy.running:
-                logger.info("🚨 ✅ WebSocket стратегия торговых сигналов активна")
-                logger.info(f"📊 Мониторинг символа: {Config.SYMBOL}")
-                logger.info(f"🔧 Режим: {'Testnet' if Config.BYBIT_TESTNET else 'Mainnet'}")
-            else:
-                logger.warning("⚠️ WebSocket стратегия не активна")
-        else:
-            logger.warning("⚠️ WebSocket стратегия не инициализирована")
+        logger.info(f"📊 Статус торговой системы: {BASE_WEBHOOK_URL}/trading/status")
         
         # Держим приложение запущенным
         try:
             while True:
                 await asyncio.sleep(3600)  # Проверяем каждый час
                 
-                # 🆕 НОВОЕ: Периодическая проверка WebSocket стратегии
-                if websocket_strategy and not websocket_strategy.running:
-                    logger.warning("⚠️ WebSocket стратегия остановилась, перезапуск...")
+                # 🆕 НОВОЕ: Периодическая проверка торговой системы
+                if strategy_orchestrator and not strategy_orchestrator.is_running:
+                    logger.warning("⚠️ StrategyOrchestrator остановился, перезапуск...")
                     try:
-                        await websocket_strategy.start()
-                        logger.info("✅ WebSocket стратегия перезапущена")
+                        await strategy_orchestrator.start()
+                        logger.info("✅ StrategyOrchestrator перезапущен")
                     except Exception as e:
-                        logger.error(f"❌ Не удалось перезапустить WebSocket стратегию: {e}")
+                        logger.error(f"❌ Не удалось перезапустить StrategyOrchestrator: {e}")
                 
                 # Логируем статистику
                 if bot_instance:
                     subscribers_count = len(bot_instance.signal_subscribers)
-                    logger.info(f"📊 Статистика: {subscribers_count} подписчиков на сигналы")
+                    strategies_active = strategy_orchestrator._count_active_strategies() if strategy_orchestrator else 0
+                    logger.info(f"📊 Статистика: {subscribers_count} подписчиков, {strategies_active} активных стратегий")
                 
         except asyncio.CancelledError:
             logger.info("📡 Получен сигнал отмены")
