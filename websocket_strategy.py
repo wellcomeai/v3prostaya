@@ -148,8 +148,14 @@ class WebSocketStrategy:
                 data = message['data']
                 self.market_data.update_ticker(data)
                 
-                # Проверяем на экстремальные движения в реальном времени
-                asyncio.create_task(self.check_extreme_movement())
+                # ✅ ИСПРАВЛЕННЫЙ КОД: Проверяем на экстремальные движения в реальном времени
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop and loop.is_running():
+                        loop.create_task(self.check_extreme_movement())
+                except:
+                    # Если нет event loop - пропускаем, не критично
+                    pass
                 
         except Exception as e:
             logger.error(f"❌ Ошибка обработки тикера: {e}")
