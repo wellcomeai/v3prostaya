@@ -1,4 +1,6 @@
 import logging
+import asyncio
+from typing import Set
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -20,6 +22,9 @@ class TelegramBot:
         # Инициализируем клиенты
         self.bybit_client = BybitClient()
         self.openai_analyzer = OpenAIAnalyzer()
+        
+        # 🆕 НОВОЕ: Список пользователей для сигналов
+        self.signal_subscribers: Set[int] = set()
         
         # Регистрируем все обработчики
         self._register_handlers()
@@ -43,6 +48,19 @@ class TelegramBot:
         self.router.callback_query.register(
             self.handle_about, 
             F.data == "about"
+        )
+        # 🆕 НОВОЕ: Обработчики сигналов
+        self.router.callback_query.register(
+            self.handle_signals_menu,
+            F.data == "signals_menu"
+        )
+        self.router.callback_query.register(
+            self.handle_subscribe_signals,
+            F.data == "subscribe_signals"
+        )
+        self.router.callback_query.register(
+            self.handle_unsubscribe_signals,
+            F.data == "unsubscribe_signals"
         )
         self.router.callback_query.register(
             self.handle_back_to_menu,
@@ -68,7 +86,7 @@ class TelegramBot:
             # Создаем главное меню
             keyboard = self._create_main_menu()
             
-            welcome_text = f"""🤖 *Bybit Trading Bot*
+            welcome_text = f"""🤖 *Bybit Trading Bot v2.1*
 
 Привет, {user_name}! Я помогу тебе анализировать рынок криптовалют.
 
@@ -76,6 +94,7 @@ class TelegramBot:
 • Получать актуальные данные с Bybit
 • Анализировать рынок BTC/USDT с помощью ИИ
 • Предоставлять статистику за 24 часа
+• 🆕 Отправлять торговые сигналы в реальном времени
 
 Нажми кнопку ниже, чтобы начать! 👇"""
             
@@ -103,6 +122,14 @@ class TelegramBot:
 • 🤖 ИИ-прогнозы на основе данных Bybit
 • 📊 Статистика волатильности и объемов
 • 🕐 Данные за последние 24 часа
+• 🆕 🚨 Торговые сигналы WebSocket в реальном времени
+
+🆕 *Торговые сигналы:*
+• Мониторинг в реальном времени через WebSocket
+• Анализ импульсных движений цены
+• Детекция резких изменений (>2% за минуту)
+• Анализ ордербука и объемов
+• Умная фильтрация сигналов
 
 ⚠️ *Важно:*
 Бот предоставляет аналитическую информацию, но не является инвестиционным советом. Торговля криптовалютами связана с высокими рисками.
@@ -204,10 +231,11 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             
             about_text = """ℹ️ *О боте*
 
-🤖 *Bybit Trading Bot v2.0*
+🤖 *Bybit Trading Bot v2.1*
 
 *Технологии:*
 • 📈 Bybit REST API v5 для рыночных данных
+• ⚡ Bybit WebSocket API для данных в реальном времени
 • 🤖 OpenAI GPT-4 для анализа и прогнозов
 • 🚀 Python aiogram для Telegram интеграции
 • ⚡ Асинхронная архитектура для скорости
@@ -217,9 +245,19 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
 • ИИ-прогнозы на основе текущих данных
 • Статистика объемов и волатильности
 • Отслеживание трендов за 24 часа
+• 🆕 Торговые сигналы WebSocket в реальном времени
+
+*🆕 Новые возможности v2.1:*
+• WebSocket подключение для мгновенных данных
+• Анализ импульсных движений цены
+• Мониторинг ордербука в реальном времени
+• Детекция резких движений (>2% за минуту)
+• Умная система фильтрации сигналов
+• Подписка на персональные уведомления
 
 *Режим работы:*
 • 🔗 Webhook для мгновенных ответов
+• ⚡ WebSocket для сигналов в реальном времени
 • ☁️ Развернуто на Render.com
 • 🏥 Health monitoring для стабильности
 
@@ -237,6 +275,165 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_about: {e}")
             await callback.answer("❌ Произошла ошибка")
+    
+    # 🆕 НОВЫЕ МЕТОДЫ ДЛЯ ТОРГОВЫХ СИГНАЛОВ
+    
+    async def handle_signals_menu(self, callback: CallbackQuery):
+        """Обработка меню торговых сигналов"""
+        try:
+            await callback.answer()
+            
+            user_id = callback.from_user.id
+            is_subscribed = user_id in self.signal_subscribers
+            
+            status_text = "✅ Активна" if is_subscribed else "❌ Неактивна"
+            subscribers_count = len(self.signal_subscribers)
+            
+            menu_text = f"""🚨 *Торговые сигналы WebSocket*
+
+📊 *Статус подписки:* {status_text}
+👥 *Подписчиков:* {subscribers_count}
+
+🔥 *Особенности:*
+• Данные в реальном времени через WebSocket
+• Анализ импульсных движений
+• Мониторинг ордербука  
+• Детекция резких движений цены
+• Интеллектуальная фильтрация сигналов
+
+⏱️ *Интервалы анализа:*
+• Мгновенные уведомления при движении >2%
+• Полный анализ каждые 30 секунд
+• Кулдаун между сигналами: 5 минут
+
+🎯 *Типы сигналов:*
+• 🟢 BUY - сигналы на покупку
+• 🔴 SELL - сигналы на продажу
+• Сила сигнала от 0.5 до 1.0
+
+⚠️ *ВНИМАНИЕ:* Торговые сигналы несут высокие риски!"""
+            
+            keyboard = self._create_signals_menu(is_subscribed)
+            
+            await callback.message.edit_text(
+                menu_text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в меню сигналов: {e}")
+            await callback.answer("❌ Произошла ошибка")
+    
+    async def handle_subscribe_signals(self, callback: CallbackQuery):
+        """Подписка на торговые сигналы"""
+        try:
+            await callback.answer()
+            
+            user_id = callback.from_user.id
+            user_name = callback.from_user.first_name or "пользователь"
+            
+            self.signal_subscribers.add(user_id)
+            
+            await callback.message.edit_text(
+                "✅ *Подписка активирована!*\n\n"
+                "Теперь вы будете получать торговые сигналы в реальном времени.\n\n"
+                "🔥 *Сигналы основаны на:*\n"
+                "• WebSocket данных в реальном времени\n"  
+                "• Анализе движений цены и объемов\n"
+                "• Анализе ордербука\n"
+                "• Импульсных стратегиях\n"
+                "• Детекции резких движений >2%\n\n"
+                "📱 *Уведомления будут приходить:*\n"
+                "• При сильных сигналах (сила ≥0.5)\n"
+                "• Максимум 1 сигнал одного типа в 5 минут\n"
+                "• В любое время суток\n\n"
+                "⚠️ *Важно:* Торговые сигналы несут высокие риски!\n"
+                "_Это не инвестиционный совет!_",
+                reply_markup=self._create_signals_menu(True),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            logger.info(f"📡 Пользователь {user_name} ({user_id}) подписался на сигналы")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка подписки на сигналы: {e}")
+            await callback.answer("❌ Произошла ошибка")
+    
+    async def handle_unsubscribe_signals(self, callback: CallbackQuery):
+        """Отписка от торговых сигналов"""
+        try:
+            await callback.answer()
+            
+            user_id = callback.from_user.id
+            user_name = callback.from_user.first_name or "пользователь"
+            
+            self.signal_subscribers.discard(user_id)
+            
+            await callback.message.edit_text(
+                "🔕 *Подписка отключена*\n\n"
+                "Вы больше не будете получать торговые сигналы.\n\n"
+                "Вы можете снова подписаться в любое время через главное меню.\n\n"
+                "Спасибо за использование наших сигналов! 🙏",
+                reply_markup=self._create_signals_menu(False),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            logger.info(f"📡 Пользователь {user_name} ({user_id}) отписался от сигналов")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отписки от сигналов: {e}")
+            await callback.answer("❌ Произошла ошибка")
+    
+    async def broadcast_signal(self, message: str):
+        """Отправляет сигнал всем подписчикам"""
+        try:
+            if not self.signal_subscribers:
+                logger.info("📡 Нет подписчиков для сигнала")
+                return
+            
+            sent_count = 0
+            failed_count = 0
+            blocked_users = []
+            
+            for user_id in self.signal_subscribers.copy():  # Копируем для безопасности
+                try:
+                    await self.bot.send_message(
+                        chat_id=user_id,
+                        text=message,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    sent_count += 1
+                    
+                    # Небольшая задержка между отправками для избежания rate limit
+                    await asyncio.sleep(0.05)
+                    
+                except Exception as e:
+                    failed_count += 1
+                    error_msg = str(e).lower()
+                    
+                    # Если пользователь заблокировал бота или удалил чат
+                    if any(phrase in error_msg for phrase in [
+                        "bot was blocked by the user",
+                        "user is deactivated", 
+                        "chat not found"
+                    ]):
+                        blocked_users.append(user_id)
+                        logger.info(f"🚫 Пользователь {user_id} заблокировал бота или удалил чат")
+                    else:
+                        logger.warning(f"⚠️ Не удалось отправить сигнал пользователю {user_id}: {e}")
+            
+            # Удаляем заблокировавших пользователей из списка подписчиков
+            for user_id in blocked_users:
+                self.signal_subscribers.discard(user_id)
+            
+            if blocked_users:
+                logger.info(f"🧹 Удалено {len(blocked_users)} неактивных подписчиков")
+            
+            logger.info(f"📨 Сигнал отправлен: ✅{sent_count} успешно, ❌{failed_count} ошибок")
+            
+        except Exception as e:
+            logger.error(f"💥 Ошибка рассылки сигнала: {e}")
     
     async def handle_back_to_menu(self, callback: CallbackQuery):
         """Возврат в главное меню"""
@@ -291,17 +488,31 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
                     "📊 Хотите получить анализ рынка BTC/USDT?",
                     reply_markup=builder.as_markup()
                 )
+            elif any(word in user_text for word in ['сигнал', 'сигналы', 'уведомления', 'подписка']):
+                # Создаем inline кнопку для сигналов
+                builder = InlineKeyboardBuilder()
+                builder.add(InlineKeyboardButton(
+                    text="🚨 Торговые сигналы",
+                    callback_data="signals_menu"
+                ))
+                
+                await message.answer(
+                    "🚨 Хотите настроить торговые сигналы?",
+                    reply_markup=builder.as_markup()
+                )
             elif any(word in user_text for word in ['помощь', 'справка', 'help']):
                 await self.help_command(message)
             else:
                 # Для всех остальных сообщений показываем меню
-                response_text = """🤖 Я анализирую рынок криптовалют!
+                response_text = """🤖 Я анализирую рынок криптовалют и отправляю торговые сигналы!
 
 Используйте кнопки меню или команды:
 /start - главное меню
 /help - справка
 
-Или просто напишите "анализ" для получения данных о рынке."""
+Или просто напишите:
+• "анализ" для получения данных о рынке
+• "сигналы" для настройки уведомлений"""
                 
                 keyboard = self._create_main_menu()
                 await message.answer(response_text, reply_markup=keyboard)
@@ -310,11 +521,17 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             logger.error(f"❌ Ошибка в handle_text_message: {e}")
             await message.answer("❌ Произошла ошибка. Попробуйте /start")
     
+    # МЕНЮ И КЛАВИАТУРЫ
+    
     def _create_main_menu(self) -> InlineKeyboardBuilder:
         """Создание главного меню"""
         builder = InlineKeyboardBuilder()
         builder.add(
             InlineKeyboardButton(text="📊 Анализ рынка", callback_data="market_analysis")
+        )
+        # 🆕 НОВОЕ: Кнопка торговых сигналов
+        builder.add(
+            InlineKeyboardButton(text="🚨 Торговые сигналы", callback_data="signals_menu")
         )
         builder.add(
             InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")
@@ -329,6 +546,9 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             InlineKeyboardButton(text="🔄 Обновить анализ", callback_data="market_analysis")
         )
         builder.add(
+            InlineKeyboardButton(text="🚨 Торговые сигналы", callback_data="signals_menu")
+        )
+        builder.add(
             InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_menu")
         )
         builder.adjust(1)
@@ -341,9 +561,27 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             InlineKeyboardButton(text="📊 Попробовать анализ", callback_data="market_analysis")
         )
         builder.add(
+            InlineKeyboardButton(text="🚨 Торговые сигналы", callback_data="signals_menu")
+        )
+        builder.add(
             InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_menu")
         )
         builder.adjust(1)
+        return builder.as_markup()
+    
+    def _create_signals_menu(self, is_subscribed: bool) -> InlineKeyboardBuilder:
+        """Создание меню сигналов"""
+        builder = InlineKeyboardBuilder()
+        
+        if is_subscribed:
+            builder.add(InlineKeyboardButton(text="🔕 Отписаться", callback_data="unsubscribe_signals"))
+        else:
+            builder.add(InlineKeyboardButton(text="🔔 Подписаться", callback_data="subscribe_signals"))
+            
+        builder.add(InlineKeyboardButton(text="📊 Анализ рынка", callback_data="market_analysis"))
+        builder.add(InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_menu"))
+        builder.adjust(1)
+        
         return builder.as_markup()
     
     def _create_error_menu(self) -> InlineKeyboardBuilder:
@@ -351,6 +589,9 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
         builder = InlineKeyboardBuilder()
         builder.add(
             InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="market_analysis")
+        )
+        builder.add(
+            InlineKeyboardButton(text="🚨 Торговые сигналы", callback_data="signals_menu")
         )
         builder.add(
             InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_menu")
