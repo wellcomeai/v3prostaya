@@ -1,29 +1,31 @@
 import logging
 import asyncio
-from typing import Set
+from typing import Set, Optional
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
-from bybit_client import BybitClient
-from openai_integration import OpenAIAnalyzer
+
+# 🆕 НОВЫЕ ИМПОРТЫ - удалены старые bybit_client и openai_integration
+from market_data import RestApiProvider
+from openai_integration import OpenAIAnalyzer  # Сохраняем пока что
 
 logger = logging.getLogger(__name__)
 
 class TelegramBot:
-    """Telegram бот для анализа рынка на aiogram (webhook режим)"""
+    """Telegram бот для анализа рынка на aiogram (webhook режим) - обновлен для новой архитектуры"""
     
     def __init__(self, token: str):
         self.bot = Bot(token=token)
         self.dp = Dispatcher()
         self.router = Router()
         
-        # Инициализируем клиенты
-        self.bybit_client = BybitClient()
+        # 🆕 НОВОЕ: Используем новый REST API провайдер вместо старого bybit_client
+        self.rest_api_provider = RestApiProvider()
         self.openai_analyzer = OpenAIAnalyzer()
         
-        # 🆕 НОВОЕ: Список пользователей для сигналов
+        # Список пользователей для сигналов
         self.signal_subscribers: Set[int] = set()
         
         # Регистрируем все обработчики
@@ -32,7 +34,7 @@ class TelegramBot:
         # Подключаем роутер к диспетчеру
         self.dp.include_router(self.router)
         
-        logger.info("🤖 TelegramBot инициализирован для webhook режима")
+        logger.info("🤖 TelegramBot инициализирован для webhook режима с новой архитектурой")
     
     def _register_handlers(self):
         """Регистрация всех обработчиков"""
@@ -49,7 +51,7 @@ class TelegramBot:
             self.handle_about, 
             F.data == "about"
         )
-        # 🆕 НОВОЕ: Обработчики сигналов
+        # Обработчики сигналов
         self.router.callback_query.register(
             self.handle_signals_menu,
             F.data == "signals_menu"
@@ -86,15 +88,22 @@ class TelegramBot:
             # Создаем главное меню
             keyboard = self._create_main_menu()
             
-            welcome_text = f"""🤖 *Bybit Trading Bot v2.1*
+            welcome_text = f"""🤖 *Bybit Trading Bot v2.1* (Modular)
 
 Привет, {user_name}! Я помогу тебе анализировать рынок криптовалют.
 
 📊 *Что я умею:*
-• Получать актуальные данные с Bybit
+• Получать данные через REST API и WebSocket
+• 🆕 Модульная архитектура для стабильности
+• 🆕 Продвинутая система управления стратегиями
 • Анализировать рынок BTC/USDT с помощью ИИ
-• Предоставлять статистику за 24 часа
-• 🆕 Отправлять торговые сигналы в реальном времени
+• Отправлять торговые сигналы в реальном времени
+
+🔥 *Новая архитектура v2.1:*
+• MarketDataManager - управление данными
+• StrategyOrchestrator - управление стратегиями  
+• SignalManager - обработка и фильтрация сигналов
+• Улучшенная система уведомлений
 
 Нажми кнопку ниже, чтобы начать! 👇"""
             
@@ -122,14 +131,23 @@ class TelegramBot:
 • 🤖 ИИ-прогнозы на основе данных Bybit
 • 📊 Статистика волатильности и объемов
 • 🕐 Данные за последние 24 часа
-• 🆕 🚨 Торговые сигналы WebSocket в реальном времени
+• 🚨 Торговые сигналы в реальном времени
 
-🆕 *Торговые сигналы:*
-• Мониторинг в реальном времени через WebSocket
+🆕 *Новая архитектура v2.1:*
+• Модульная система для надежности
+• MarketDataManager - WebSocket + REST API
+• StrategyOrchestrator - управление стратегиями
+• SignalManager - умная фильтрация сигналов
+• Импульсная MomentumStrategy
+• Продвинутая система уведомлений
+
+🚨 *Торговые сигналы:*
+• Мониторинг в реальном времени
 • Анализ импульсных движений цены
 • Детекция резких изменений (>2% за минуту)
 • Анализ ордербука и объемов
-• Умная фильтрация сигналов
+• Интеллектуальная фильтрация сигналов
+• Кулдаун между сигналами для избежания спама
 
 ⚠️ *Важно:*
 Бот предоставляет аналитическую информацию, но не является инвестиционным советом. Торговля криптовалютами связана с высокими рисками.
@@ -149,7 +167,7 @@ class TelegramBot:
             await message.answer("❌ Произошла ошибка. Попробуйте /start")
     
     async def handle_market_analysis(self, callback: CallbackQuery):
-        """Обработка запроса анализа рынка"""
+        """Обработка запроса анализа рынка - обновлено для новой архитектуры"""
         user_id = callback.from_user.id
         user_name = callback.from_user.first_name or "пользователь"
         
@@ -161,12 +179,12 @@ class TelegramBot:
             
             # Показываем индикатор загрузки
             await callback.message.edit_text(
-                "🔄 Получаю свежие данные с Bybit...\n_Это может занять несколько секунд_",
+                "🔄 Получаю свежие данные с Bybit REST API...\n_Это может занять несколько секунд_",
                 parse_mode=ParseMode.MARKDOWN
             )
             
-            # Получаем данные рынка
-            market_data = await self.bybit_client.get_market_data()
+            # 🆕 НОВОЕ: Используем новый REST API провайдер
+            market_data = await self.rest_api_provider.get_comprehensive_market_data()
             
             await callback.message.edit_text(
                 "🤖 Анализирую данные с помощью ИИ...\n_Генерирую прогноз_",
@@ -188,7 +206,8 @@ class TelegramBot:
 {ai_analysis}
 
 ---
-_Данные: Bybit API • Анализ: OpenAI GPT_
+_Данные: Bybit REST API v5 • Анализ: OpenAI GPT_
+_Модульная архитектура v2.1_
 _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}_"""
             
             # Создаем кнопки для дальнейших действий
@@ -214,6 +233,11 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
 • Ошибка OpenAI сервиса
 • Проблемы с сетью
 
+🆕 *Новая архитектура обеспечивает:*
+• Автоматическое восстановление подключений
+• Резервные источники данных
+• Улучшенную обработку ошибок
+
 Попробуйте позже или обратитесь к администратору."""
             
             keyboard = self._create_error_menu()
@@ -225,39 +249,49 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             )
     
     async def handle_about(self, callback: CallbackQuery):
-        """Обработка запроса информации о боте"""
+        """Обработка запроса информации о боте - обновлено для новой архитектуры"""
         try:
             await callback.answer()
             
             about_text = """ℹ️ *О боте*
 
-🤖 *Bybit Trading Bot v2.1*
+🤖 *Bybit Trading Bot v2.1* (Modular Architecture)
+
+*🏗️ Новая модульная архитектура:*
+• 📊 MarketDataManager - управление данными (WebSocket + REST)
+• 🎭 StrategyOrchestrator - координация стратегий
+• 🎛️ SignalManager - фильтрация и рассылка сигналов
+• 🧠 BaseStrategy - базовый класс для стратегий
+• ⚡ MomentumStrategy - импульсная торговая стратегия
 
 *Технологии:*
-• 📈 Bybit REST API v5 для рыночных данных
-• ⚡ Bybit WebSocket API для данных в реальном времени
+• 📈 Bybit REST API v5 + WebSocket для рыночных данных
 • 🤖 OpenAI GPT-4 для анализа и прогнозов
 • 🚀 Python aiogram для Telegram интеграции
-• ⚡ Асинхронная архитектура для скорости
+• ⚡ Асинхронная архитектура для производительности
+• 🔄 Автоматическое переподключение WebSocket
+• 🎯 Интеллектуальная система фильтрации сигналов
 
 *Функции:*
 • Анализ рынка BTC/USDT в реальном времени
 • ИИ-прогнозы на основе текущих данных
 • Статистика объемов и волатильности
-• Отслеживание трендов за 24 часа
-• 🆕 Торговые сигналы WebSocket в реальном времени
+• Отслеживание трендов за разные периоды
+• Торговые сигналы с умной фильтрацией
+• Управление подписками и уведомлениями
 
-*🆕 Новые возможности v2.1:*
-• WebSocket подключение для мгновенных данных
-• Анализ импульсных движений цены
-• Мониторинг ордербука в реальном времени
-• Детекция резких движений (>2% за минуту)
-• Умная система фильтрации сигналов
-• Подписка на персональные уведомления
+*🆕 Преимущества модульной архитектуры:*
+• Высокая надежность и стабильность
+• Легкость добавления новых стратегий
+• Независимое масштабирование компонентов
+• Продвинутая система мониторинга
+• Graceful shutdown и recovery
+• Детальная статистика и аналитика
 
 *Режим работы:*
 • 🔗 Webhook для мгновенных ответов
-• ⚡ WebSocket для сигналов в реальном времени
+• ⚡ WebSocket для данных в реальном времени  
+• 📡 REST API для исторических данных
 • ☁️ Развернуто на Render.com
 • 🏥 Health monitoring для стабильности
 
@@ -276,10 +310,8 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             logger.error(f"❌ Ошибка в handle_about: {e}")
             await callback.answer("❌ Произошла ошибка")
     
-    # 🆕 НОВЫЕ МЕТОДЫ ДЛЯ ТОРГОВЫХ СИГНАЛОВ
-    
     async def handle_signals_menu(self, callback: CallbackQuery):
-        """Обработка меню торговых сигналов"""
+        """Обработка меню торговых сигналов - обновлено для новой архитектуры"""
         try:
             await callback.answer()
             
@@ -289,27 +321,37 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             status_text = "✅ Активна" if is_subscribed else "❌ Неактивна"
             subscribers_count = len(self.signal_subscribers)
             
-            menu_text = f"""🚨 *Торговые сигналы WebSocket*
+            menu_text = f"""🚨 *Торговые сигналы v2.1*
 
 📊 *Статус подписки:* {status_text}
 👥 *Подписчиков:* {subscribers_count}
 
-🔥 *Особенности:*
-• Данные в реальном времени через WebSocket
-• Анализ импульсных движений
-• Мониторинг ордербука  
-• Детекция резких движений цены
-• Интеллектуальная фильтрация сигналов
+🏗️ *Новая модульная архитектура:*
+• MarketDataManager - данные в реальном времени
+• StrategyOrchestrator - управление стратегиями
+• SignalManager - умная фильтрация сигналов
+• MomentumStrategy - импульсная стратегия
 
-⏱️ *Интервалы анализа:*
-• Мгновенные уведомления при движении >2%
-• Полный анализ каждые 30 секунд
+🔥 *Особенности:*
+• WebSocket + REST API для данных
+• Анализ импульсных движений
+• Мониторинг ордербука в реальном времени
+• Детекция резких движений цены (>2%)
+• Интеллектуальная фильтрация дубликатов
+• Управление частотой сигналов (кулдаун)
+
+⏱️ *Интервалы и фильтры:*
+• Анализ каждые 30 секунд
+• Мгновенные экстремальные сигналы (>2%)
 • Кулдаун между сигналами: 5 минут
+• Минимальная сила сигнала: 0.5
+• Максимум 12 сигналов в час
 
 🎯 *Типы сигналов:*
-• 🟢 BUY - сигналы на покупку
-• 🔴 SELL - сигналы на продажу
-• Сила сигнала от 0.5 до 1.0
+• 🟢 BUY / STRONG_BUY - сигналы на покупку
+• 🔴 SELL / STRONG_SELL - сигналы на продажу
+• Сила сигнала: 0.5 - 1.0
+• Уровень уверенности: LOW/MEDIUM/HIGH
 
 ⚠️ *ВНИМАНИЕ:* Торговые сигналы несут высокие риски!"""
             
@@ -326,7 +368,7 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             await callback.answer("❌ Произошла ошибка")
     
     async def handle_subscribe_signals(self, callback: CallbackQuery):
-        """Подписка на торговые сигналы"""
+        """Подписка на торговые сигналы - обновлено для новой архитектуры"""
         try:
             await callback.answer()
             
@@ -337,16 +379,21 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             
             await callback.message.edit_text(
                 "✅ *Подписка активирована!*\n\n"
-                "Теперь вы будете получать торговые сигналы в реальном времени.\n\n"
-                "🔥 *Сигналы основаны на:*\n"
-                "• WebSocket данных в реальном времени\n"  
-                "• Анализе движений цены и объемов\n"
-                "• Анализе ордербука\n"
-                "• Импульсных стратегиях\n"
-                "• Детекции резких движений >2%\n\n"
-                "📱 *Уведомления будут приходить:*\n"
+                "Теперь вы будете получать торговые сигналы от новой модульной системы.\n\n"
+                "🏗️ *Сигналы генерируются через:*\n"
+                "• MarketDataManager - данные WebSocket + REST API\n"
+                "• StrategyOrchestrator - координация стратегий\n"
+                "• SignalManager - фильтрация и обработка\n"
+                "• MomentumStrategy - импульсная стратегия\n\n"
+                "🔥 *Основа сигналов:*\n"
+                "• Анализ движений цены за 1м и 5м\n"
+                "• Мониторинг ордербука в реальном времени\n"
+                "• Объемный анализ торгов\n"
+                "• Детекция экстремальных движений\n\n"
+                "📱 *Уведомления:*\n"
                 "• При сильных сигналах (сила ≥0.5)\n"
-                "• Максимум 1 сигнал одного типа в 5 минут\n"
+                "• Максимум 1 сигнал типа в 5 минут\n"
+                "• Умная фильтрация дубликатов\n"
                 "• В любое время суток\n\n"
                 "⚠️ *Важно:* Торговые сигналы несут высокие риски!\n"
                 "_Это не инвестиционный совет!_",
@@ -354,7 +401,7 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
                 parse_mode=ParseMode.MARKDOWN
             )
             
-            logger.info(f"📡 Пользователь {user_name} ({user_id}) подписался на сигналы")
+            logger.info(f"📡 Пользователь {user_name} ({user_id}) подписался на сигналы новой системы")
             
         except Exception as e:
             logger.error(f"❌ Ошибка подписки на сигналы: {e}")
@@ -430,7 +477,7 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             if blocked_users:
                 logger.info(f"🧹 Удалено {len(blocked_users)} неактивных подписчиков")
             
-            logger.info(f"📨 Сигнал отправлен: ✅{sent_count} успешно, ❌{failed_count} ошибок")
+            logger.info(f"📨 Сигнал от новой системы отправлен: ✅{sent_count} успешно, ❌{failed_count} ошибок")
             
         except Exception as e:
             logger.error(f"💥 Ошибка рассылки сигнала: {e}")
@@ -442,7 +489,7 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             
             keyboard = self._create_main_menu()
             
-            welcome_text = """🤖 *Bybit Trading Bot*
+            welcome_text = """🤖 *Bybit Trading Bot v2.1*
 
 Главное меню. Выберите действие:"""
             
@@ -485,8 +532,10 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
                 ))
                 
                 await message.answer(
-                    "📊 Хотите получить анализ рынка BTC/USDT?",
-                    reply_markup=builder.as_markup()
+                    "📊 Хотите получить анализ рынка BTC/USDT?\n"
+                    "_Powered by новой модульной архитектурой v2.1_",
+                    reply_markup=builder.as_markup(),
+                    parse_mode=ParseMode.MARKDOWN
                 )
             elif any(word in user_text for word in ['сигнал', 'сигналы', 'уведомления', 'подписка']):
                 # Создаем inline кнопку для сигналов
@@ -497,14 +546,18 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
                 ))
                 
                 await message.answer(
-                    "🚨 Хотите настроить торговые сигналы?",
-                    reply_markup=builder.as_markup()
+                    "🚨 Хотите настроить торговые сигналы?\n"
+                    "_Новая система с StrategyOrchestrator_",
+                    reply_markup=builder.as_markup(),
+                    parse_mode=ParseMode.MARKDOWN
                 )
             elif any(word in user_text for word in ['помощь', 'справка', 'help']):
                 await self.help_command(message)
             else:
                 # Для всех остальных сообщений показываем меню
                 response_text = """🤖 Я анализирую рынок криптовалют и отправляю торговые сигналы!
+
+🆕 *Новая модульная архитектура v2.1* для максимальной надежности!
 
 Используйте кнопки меню или команды:
 /start - главное меню
@@ -521,7 +574,7 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
             logger.error(f"❌ Ошибка в handle_text_message: {e}")
             await message.answer("❌ Произошла ошибка. Попробуйте /start")
     
-    # МЕНЮ И КЛАВИАТУРЫ
+    # МЕНЮ И КЛАВИАТУРЫ (без изменений)
     
     def _create_main_menu(self) -> InlineKeyboardBuilder:
         """Создание главного меню"""
@@ -529,7 +582,6 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
         builder.add(
             InlineKeyboardButton(text="📊 Анализ рынка", callback_data="market_analysis")
         )
-        # 🆕 НОВОЕ: Кнопка торговых сигналов
         builder.add(
             InlineKeyboardButton(text="🚨 Торговые сигналы", callback_data="signals_menu")
         )
@@ -632,10 +684,10 @@ _Обновлено: {market_data.get('timestamp', 'неизвестно')[:19]}
         try:
             logger.info("🔄 Закрытие Telegram бота...")
             
-            # Закрываем HTTP сессию Bybit клиента
-            if self.bybit_client:
-                await self.bybit_client.close()
-                logger.info("✅ BybitClient сессии закрыты")
+            # 🆕 НОВОЕ: Закрываем новый REST API провайдер
+            if self.rest_api_provider:
+                await self.rest_api_provider.close()
+                logger.info("✅ RestApiProvider сессии закрыты")
             
             # Закрываем HTTP сессию бота
             if self.bot and self.bot.session:
