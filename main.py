@@ -5,6 +5,7 @@ import os
 from aiohttp import web
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from telegram_bot import TelegramBot
+from websocket_strategy import WebSocketStrategy  # 🆕 НОВЫЙ ИМПОРТ
 from config import Config
 
 # Настройка логирования
@@ -25,6 +26,7 @@ BASE_WEBHOOK_URL = "https://bybitmybot.onrender.com"
 
 # Глобальные переменные
 bot_instance = None
+websocket_strategy = None  # 🆕 НОВАЯ ГЛОБАЛЬНАЯ ПЕРЕМЕННАЯ
 
 async def health_check(request):
     """Health check endpoint для Render и мониторинга"""
@@ -32,10 +34,17 @@ async def health_check(request):
         # Проверяем что бот существует и готов
         if bot_instance and bot_instance.bot:
             bot_info = await bot_instance.bot.get_me()
+            
+            # 🆕 НОВОЕ: Проверяем статус WebSocket стратегии
+            websocket_status = "active" if (websocket_strategy and websocket_strategy.running) else "inactive"
+            subscribers_count = len(bot_instance.signal_subscribers) if bot_instance else 0
+            
             return web.json_response({
                 "status": "ok",
                 "bot_username": bot_info.username,
                 "bot_id": bot_info.id,
+                "websocket_strategy": websocket_status,
+                "signal_subscribers": subscribers_count,
                 "timestamp": asyncio.get_event_loop().time()
             })
         else:
@@ -104,9 +113,15 @@ async def on_shutdown(bot) -> None:
 
 async def cleanup_resources():
     """Освобождение всех ресурсов"""
-    global bot_instance
+    global bot_instance, websocket_strategy
     
     try:
+        # 🆕 НОВОЕ: Останавливаем WebSocket стратегию
+        if websocket_strategy:
+            logger.info("🔄 Остановка WebSocket стратегии...")
+            await websocket_strategy.stop()
+            logger.info("✅ WebSocket стратегия остановлена")
+        
         if bot_instance:
             # Закрываем HTTP сессии в BybitClient
             if hasattr(bot_instance, 'bybit_client'):
@@ -122,10 +137,30 @@ async def cleanup_resources():
 
 async def create_app():
     """Создание веб-приложения"""
-    global bot_instance
+    global bot_instance, websocket_strategy
     
     # Создаем экземпляр бота
     bot_instance = TelegramBot(Config.TELEGRAM_BOT_TOKEN)
+    
+    # 🆕 НОВОЕ: Создаем и запускаем WebSocket стратегию
+    try:
+        logger.info("🚀 Инициализация WebSocket стратегии...")
+        websocket_strategy = WebSocketStrategy(bot_instance)
+        
+        # Запускаем стратегию в фоне
+        logger.info("⚡ Запуск WebSocket стратегии в фоновом режиме...")
+        asyncio.create_task(websocket_strategy.start())
+        
+        # Небольшая пауза для инициализации
+        await asyncio.sleep(2)
+        
+        logger.info("✅ WebSocket стратегия инициализирована")
+        
+    except Exception as e:
+        logger.error(f"💥 Ошибка запуска WebSocket стратегии: {e}")
+        logger.warning("⚠️ Продолжаем работу без WebSocket стратегии")
+        # Продолжаем работу без стратегии - бот все равно будет работать
+        websocket_strategy = None
     
     # Устанавливаем webhook при запуске
     await on_startup(bot_instance.bot)
@@ -138,13 +173,65 @@ async def create_app():
     
     # Root endpoint для проверки
     async def root_handler(request):
+        # 🆕 НОВОЕ: Добавляем информацию о WebSocket стратегии
+        websocket_info = {
+            "websocket_strategy_active": websocket_strategy.running if websocket_strategy else False,
+            "signal_subscribers": len(bot_instance.signal_subscribers) if bot_instance else 0
+        }
+        
         return web.json_response({
-            "message": "Bybit Trading Bot is running",
+            "message": "Bybit Trading Bot v2.1 is running",
+            "features": [
+                "REST API Market Analysis",
+                "OpenAI Integration", 
+                "WebSocket Real-time Signals",
+                "Telegram Notifications"
+            ],
             "webhook_path": WEBHOOK_PATH,
-            "status": "active"
+            "status": "active",
+            **websocket_info
         })
     
     app.router.add_get("/", root_handler)
+    
+    # 🆕 НОВОЕ: Дополнительный endpoint для статуса сигналов
+    async def signals_status_handler(request):
+        """Endpoint для проверки статуса торговых сигналов"""
+        try:
+            if not bot_instance or not websocket_strategy:
+                return web.json_response({
+                    "status": "inactive",
+                    "message": "WebSocket strategy not initialized"
+                }, status=503)
+            
+            return web.json_response({
+                "websocket_strategy": {
+                    "status": "active" if websocket_strategy.running else "inactive",
+                    "symbol": Config.SYMBOL,
+                    "testnet": Config.BYBIT_TESTNET,
+                    "min_signal_strength": websocket_strategy.min_signal_strength,
+                    "signal_cooldown_minutes": websocket_strategy.signal_cooldown.total_seconds() / 60,
+                    "price_data_points": len(websocket_strategy.market_data.prices) if websocket_strategy.market_data else 0,
+                    "last_signals_count": len(websocket_strategy.last_signals) if websocket_strategy.last_signals else 0
+                },
+                "subscribers": {
+                    "count": len(bot_instance.signal_subscribers),
+                    "active": True
+                },
+                "market_data": {
+                    "current_price": websocket_strategy.market_data.get_current_price() if websocket_strategy and websocket_strategy.market_data else 0,
+                    "data_available": len(websocket_strategy.market_data.prices) > 0 if websocket_strategy and websocket_strategy.market_data else False
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в signals_status: {e}")
+            return web.json_response({
+                "status": "error",
+                "message": str(e)
+            }, status=500)
+    
+    app.router.add_get("/signals/status", signals_status_handler)
     
     # Создаем обработчик webhook запросов
     webhook_requests_handler = SimpleRequestHandler(
@@ -171,10 +258,19 @@ async def main():
     """Главная функция приложения"""
     
     try:
-        logger.info("🚀 Запуск Bybit Trading Bot (webhook режим)...")
+        logger.info("🚀 Запуск Bybit Trading Bot v2.1 (webhook режим)...")
         logger.info(f"🔧 Порт: {WEB_SERVER_PORT}")
         logger.info(f"🔧 Webhook URL: {BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
         logger.info(f"🔧 Testnet: {Config.BYBIT_TESTNET}")
+        logger.info(f"🔧 Symbol: {Config.SYMBOL}")
+        
+        # 🆕 НОВОЕ: Логируем WebSocket настройки
+        logger.info("🚨 WebSocket Features:")
+        logger.info("   • Real-time price monitoring")
+        logger.info("   • Orderbook analysis")
+        logger.info("   • Trade flow analysis")
+        logger.info("   • Momentum detection")
+        logger.info("   • Automatic signal distribution")
         
         # Создаем приложение
         app = await create_app()
@@ -189,21 +285,49 @@ async def main():
         logger.info(f"🌐 Веб-сервер запущен на {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
         logger.info("🤖 Telegram бот готов к работе через webhook!")
         logger.info(f"🏥 Health check доступен по адресу: {BASE_WEBHOOK_URL}/health")
+        logger.info(f"📊 Статус сигналов: {BASE_WEBHOOK_URL}/signals/status")
         
         # Проверяем подключение к Bybit
         try:
-            connection_ok = await bot_instance.bybit_client.check_connection()
-            if connection_ok:
-                logger.info("✅ Подключение к Bybit API успешно")
-            else:
-                logger.warning("⚠️ Проблемы с подключением к Bybit API")
+            if bot_instance and bot_instance.bybit_client:
+                connection_ok = await bot_instance.bybit_client.check_connection()
+                if connection_ok:
+                    logger.info("✅ Подключение к Bybit API успешно")
+                else:
+                    logger.warning("⚠️ Проблемы с подключением к Bybit API")
         except Exception as e:
             logger.error(f"❌ Ошибка проверки Bybit API: {e}")
+        
+        # 🆕 НОВОЕ: Проверяем статус WebSocket стратегии
+        if websocket_strategy:
+            await asyncio.sleep(5)  # Ждем инициализации WebSocket
+            if websocket_strategy.running:
+                logger.info("🚨 ✅ WebSocket стратегия торговых сигналов активна")
+                logger.info(f"📊 Мониторинг символа: {Config.SYMBOL}")
+                logger.info(f"🔧 Режим: {'Testnet' if Config.BYBIT_TESTNET else 'Mainnet'}")
+            else:
+                logger.warning("⚠️ WebSocket стратегия не активна")
+        else:
+            logger.warning("⚠️ WebSocket стратегия не инициализирована")
         
         # Держим приложение запущенным
         try:
             while True:
                 await asyncio.sleep(3600)  # Проверяем каждый час
+                
+                # 🆕 НОВОЕ: Периодическая проверка WebSocket стратегии
+                if websocket_strategy and not websocket_strategy.running:
+                    logger.warning("⚠️ WebSocket стратегия остановилась, перезапуск...")
+                    try:
+                        await websocket_strategy.start()
+                        logger.info("✅ WebSocket стратегия перезапущена")
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось перезапустить WebSocket стратегию: {e}")
+                
+                # Логируем статистику
+                if bot_instance:
+                    subscribers_count = len(bot_instance.signal_subscribers)
+                    logger.info(f"📊 Статистика: {subscribers_count} подписчиков на сигналы")
                 
         except asyncio.CancelledError:
             logger.info("📡 Получен сигнал отмены")
