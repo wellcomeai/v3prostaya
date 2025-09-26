@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiohttp import web
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from telegram_bot import TelegramBot
@@ -257,6 +257,203 @@ async def trading_system_status_handler(request):
         }, status=500)
 
 
+async def load_historical_data_handler(request):
+    """🆕 НОВЫЙ: Endpoint для загрузки исторических данных через API"""
+    try:
+        # Проверяем что БД инициализирована
+        if not database_initialized:
+            return web.json_response({
+                "status": "error",
+                "message": "Database not initialized"
+            }, status=503)
+        
+        # Получаем параметры из request
+        try:
+            if request.content_type == 'application/json':
+                data = await request.json()
+            else:
+                data = {}
+        except Exception as e:
+            logger.warning(f"Failed to parse JSON, using defaults: {e}")
+            data = {}
+        
+        # Параметры по умолчанию
+        symbol = data.get('symbol', Config.SYMBOL)
+        days = int(data.get('days', 30))  # По умолчанию 30 дней
+        intervals = data.get('intervals', ["1m", "5m", "15m", "1h", "4h", "1d"])
+        testnet = data.get('testnet', Config.BYBIT_TESTNET)
+        
+        # Валидация параметров
+        if days <= 0 or days > 365:
+            return web.json_response({
+                "status": "error",
+                "message": "Days must be between 1 and 365"
+            }, status=400)
+        
+        if not isinstance(intervals, list) or len(intervals) == 0:
+            return web.json_response({
+                "status": "error", 
+                "message": "Intervals must be a non-empty list"
+            }, status=400)
+        
+        logger.info(f"🚀 Запуск загрузки исторических данных:")
+        logger.info(f"   Symbol: {symbol}")
+        logger.info(f"   Days: {days}")
+        logger.info(f"   Intervals: {intervals}")
+        logger.info(f"   Testnet: {testnet}")
+        
+        # Импортируем загрузчик
+        from database.loaders import load_year_data
+        
+        start_time = datetime.now()
+        
+        # Запускаем загрузку
+        result = await load_year_data(
+            symbol=symbol,
+            intervals=intervals,
+            testnet=testnet,
+            start_date=datetime.now() - timedelta(days=days)
+        )
+        
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        
+        logger.info(f"✅ Загрузка исторических данных завершена за {duration:.1f}s")
+        
+        # Проверяем сколько записей теперь в БД
+        try:
+            from database.connections import get_connection_manager
+            db_manager = await get_connection_manager()
+            
+            count_result = await db_manager.fetchval(
+                "SELECT COUNT(*) FROM market_data_candles WHERE symbol = $1", 
+                symbol.upper()
+            )
+            total_candles = count_result if count_result else 0
+            
+        except Exception as e:
+            logger.warning(f"Failed to count candles: {e}")
+            total_candles = "unknown"
+        
+        response_data = {
+            "status": "success",
+            "message": f"Historical data loaded successfully for {symbol}",
+            "parameters": {
+                "symbol": symbol,
+                "days": days,
+                "intervals": intervals,
+                "testnet": testnet
+            },
+            "result": result,
+            "duration_seconds": round(duration, 2),
+            "total_candles_in_db": total_candles,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Сериализуем datetime объекты
+        response_data = serialize_datetime_objects(response_data)
+        
+        return web.json_response(response_data)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки исторических данных: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        
+        return web.json_response({
+            "status": "error", 
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
+        }, status=500)
+
+
+async def check_database_data_handler(request):
+    """🆕 НОВЫЙ: Endpoint для проверки данных в БД"""
+    try:
+        if not database_initialized:
+            return web.json_response({
+                "status": "error",
+                "message": "Database not initialized"
+            }, status=503)
+        
+        from database.connections import get_connection_manager
+        db_manager = await get_connection_manager()
+        
+        # Общая статистика
+        total_count = await db_manager.fetchval("SELECT COUNT(*) FROM market_data_candles")
+        
+        # Статистика по символам и интервалам
+        stats_query = """
+        SELECT 
+            symbol, 
+            interval, 
+            COUNT(*) as count,
+            MIN(open_time) as earliest_data,
+            MAX(open_time) as latest_data,
+            MAX(open_time) - MIN(open_time) as data_range,
+            MAX(created_at) as last_inserted
+        FROM market_data_candles 
+        GROUP BY symbol, interval 
+        ORDER BY symbol, interval
+        """
+        
+        stats_results = await db_manager.fetch(stats_query)
+        
+        # Последние записи
+        latest_query = """
+        SELECT symbol, interval, open_time, close_price, volume, data_source, created_at
+        FROM market_data_candles 
+        ORDER BY created_at DESC 
+        LIMIT 10
+        """
+        
+        latest_results = await db_manager.fetch(latest_query)
+        
+        # Формируем ответ
+        response_data = {
+            "status": "success",
+            "timestamp": datetime.now().isoformat(),
+            "summary": {
+                "total_candles": total_count,
+                "symbols_intervals": len(stats_results)
+            },
+            "data_by_interval": [
+                {
+                    "symbol": row["symbol"],
+                    "interval": row["interval"], 
+                    "count": row["count"],
+                    "earliest_data": row["earliest_data"].isoformat() if row["earliest_data"] else None,
+                    "latest_data": row["latest_data"].isoformat() if row["latest_data"] else None,
+                    "data_range_days": row["data_range"].days if row["data_range"] else 0,
+                    "last_inserted": row["last_inserted"].isoformat() if row["last_inserted"] else None
+                }
+                for row in stats_results
+            ],
+            "latest_entries": [
+                {
+                    "symbol": row["symbol"],
+                    "interval": row["interval"],
+                    "open_time": row["open_time"].isoformat(),
+                    "close_price": float(row["close_price"]),
+                    "volume": float(row["volume"]),
+                    "data_source": row["data_source"],
+                    "created_at": row["created_at"].isoformat()
+                }
+                for row in latest_results
+            ]
+        }
+        
+        return web.json_response(response_data)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки данных БД: {e}")
+        return web.json_response({
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
+        }, status=500)
+
+
 async def root_handler(request):
     """Root endpoint с информацией о системе"""
     try:
@@ -270,14 +467,22 @@ async def root_handler(request):
                 "✅ Advanced Signal Management",
                 "✅ REST API + WebSocket Integration",
                 "✅ OpenAI Integration",
-                "✅ Telegram Notifications"
+                "✅ Telegram Notifications",
+                "🆕 Historical Data Loading via API"
             ],
             "status": "active",
             "timestamp": datetime.now().isoformat(),
             "database_enabled": database_initialized,
             "trading_system_active": bool(strategy_orchestrator and strategy_orchestrator.is_running),
             "environment": Config.ENVIRONMENT,
-            "webhook_path": WEBHOOK_PATH
+            "webhook_path": WEBHOOK_PATH,
+            "api_endpoints": {
+                "health": "/health",
+                "database_status": "/database/status", 
+                "trading_status": "/trading/status",
+                "check_data": "/admin/check-data",
+                "load_history": "/admin/load-history (POST)"
+            }
         }
         
         # Дополнительная информация если доступна
@@ -577,6 +782,10 @@ async def create_app():
     app.router.add_get("/trading/status", trading_system_status_handler)
     app.router.add_get("/", root_handler)
     
+    # 🆕 НОВЫЕ endpoints для работы с историческими данными
+    app.router.add_post("/admin/load-history", load_historical_data_handler)
+    app.router.add_get("/admin/check-data", check_database_data_handler)
+    
     # Webhook handler
     webhook_requests_handler = SimpleRequestHandler(
         dispatcher=bot_instance.dp,
@@ -630,6 +839,8 @@ async def main():
         logger.info(f"   • Health: {BASE_WEBHOOK_URL}/health")
         logger.info(f"   • Database: {BASE_WEBHOOK_URL}/database/status")
         logger.info(f"   • Trading: {BASE_WEBHOOK_URL}/trading/status")
+        logger.info(f"   • Check Data: {BASE_WEBHOOK_URL}/admin/check-data")
+        logger.info(f"   • Load History: {BASE_WEBHOOK_URL}/admin/load-history")
         logger.info("=" * 50)
         
         # Основной цикл приложения
