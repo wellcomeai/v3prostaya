@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import os
+from datetime import datetime
 from aiohttp import web
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from telegram_bot import TelegramBot
@@ -40,6 +41,32 @@ strategy_orchestrator = None
 system_config = None
 database_initialized = False
 
+
+def serialize_datetime_objects(obj):
+    """
+    Рекурсивно сериализует datetime объекты в ISO строки для JSON совместимости
+    
+    Args:
+        obj: Объект который может содержать datetime экземпляры
+        
+    Returns:
+        Объект с datetime экземплярами, преобразованными в строки
+    """
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {key: serialize_datetime_objects(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [serialize_datetime_objects(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(serialize_datetime_objects(item) for item in obj)
+    elif hasattr(obj, '__dict__'):
+        # Для пользовательских объектов с атрибутами
+        return {key: serialize_datetime_objects(value) for key, value in obj.__dict__.items()}
+    else:
+        return obj
+
+
 async def health_check(request):
     """Health check endpoint для Render и мониторинга"""
     try:
@@ -50,11 +77,13 @@ async def health_check(request):
             try:
                 bot_info = await bot_instance.bot.get_me()
                 bot_status = "active"
-            except Exception:
+            except Exception as e:
                 bot_status = "error"
+                logger.warning(f"Bot health check failed: {e}")
         
         # Проверяем БД
         db_health = await get_database_health()
+        # БД уже возвращает сериализованные данные из исправленного postgres.py
         
         # Проверяем торговую систему
         trading_system_status = {
@@ -65,20 +94,33 @@ async def health_check(request):
         }
         
         if market_data_manager:
-            health_status = market_data_manager.get_health_status()
-            trading_system_status["market_data_manager"] = health_status.get("overall_status", "unknown")
+            try:
+                health_status = market_data_manager.get_health_status()
+                trading_system_status["market_data_manager"] = health_status.get("overall_status", "unknown")
+            except Exception as e:
+                logger.warning(f"Market data manager health check failed: {e}")
+                trading_system_status["market_data_manager"] = "error"
         
         if signal_manager:
-            trading_system_status["signal_manager"] = "running" if signal_manager.is_running else "inactive"
+            try:
+                trading_system_status["signal_manager"] = "running" if signal_manager.is_running else "inactive"
+            except Exception as e:
+                logger.warning(f"Signal manager health check failed: {e}")
+                trading_system_status["signal_manager"] = "error"
         
         if strategy_orchestrator:
-            trading_system_status["strategy_orchestrator"] = strategy_orchestrator.status.value
-            trading_system_status["strategies_active"] = strategy_orchestrator._count_active_strategies()
+            try:
+                trading_system_status["strategy_orchestrator"] = strategy_orchestrator.status.value
+                trading_system_status["strategies_active"] = strategy_orchestrator._count_active_strategies()
+            except Exception as e:
+                logger.warning(f"Strategy orchestrator health check failed: {e}")
+                trading_system_status["strategy_orchestrator"] = "error"
+                trading_system_status["strategies_active"] = 0
         
         # Формируем ответ
         health_response = {
             "status": "ok",
-            "timestamp": asyncio.get_event_loop().time(),
+            "timestamp": datetime.now().isoformat(),
             "database": {
                 "status": "connected" if db_health.get("healthy", False) else "disconnected",
                 "initialized": database_initialized,
@@ -92,6 +134,9 @@ async def health_check(request):
             },
             "trading_system": trading_system_status
         }
+        
+        # Сериализуем все datetime объекты
+        health_response = serialize_datetime_objects(health_response)
         
         # Определяем HTTP статус
         overall_healthy = (
@@ -109,8 +154,9 @@ async def health_check(request):
         return web.json_response({
             "status": "error",
             "message": str(e),
-            "timestamp": asyncio.get_event_loop().time()
+            "timestamp": datetime.now().isoformat()
         }, status=500)
+
 
 async def database_status(request):
     """Endpoint для детального статуса БД"""
@@ -127,19 +173,148 @@ async def database_status(request):
             }
         }
         
-        return web.json_response({
+        response_data = {
             **db_health,
             **additional_info,
             "initialized": database_initialized
-        })
+        }
+        
+        # Сериализуем datetime объекты
+        response_data = serialize_datetime_objects(response_data)
+        
+        return web.json_response(response_data)
         
     except Exception as e:
         logger.error(f"❌ Database status check failed: {e}")
         return web.json_response({
             "status": "error",
             "message": str(e),
-            "initialized": database_initialized
+            "initialized": database_initialized,
+            "timestamp": datetime.now().isoformat()
         }, status=500)
+
+
+async def trading_system_status_handler(request):
+    """Endpoint для статуса торговой системы"""
+    try:
+        if not market_data_manager or not signal_manager or not strategy_orchestrator:
+            return web.json_response({
+                "status": "inactive",
+                "message": "Trading system not initialized",
+                "timestamp": datetime.now().isoformat()
+            }, status=503)
+        
+        # Собираем статистику
+        response_data = {}
+        
+        try:
+            response_data["market_data_manager"] = market_data_manager.get_stats()
+        except Exception as e:
+            logger.warning(f"Failed to get market data stats: {e}")
+            response_data["market_data_manager"] = {"error": str(e)}
+        
+        try:
+            response_data["signal_manager"] = signal_manager.get_stats()
+        except Exception as e:
+            logger.warning(f"Failed to get signal manager stats: {e}")
+            response_data["signal_manager"] = {"error": str(e)}
+        
+        try:
+            response_data["strategy_orchestrator"] = strategy_orchestrator.get_stats()
+        except Exception as e:
+            logger.warning(f"Failed to get orchestrator stats: {e}")
+            response_data["strategy_orchestrator"] = {"error": str(e)}
+        
+        try:
+            response_data["system_health"] = {
+                "market_data": market_data_manager.get_health_status() if market_data_manager else None,
+                "strategies": strategy_orchestrator.get_health_status() if strategy_orchestrator else None
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get system health: {e}")
+            response_data["system_health"] = {"error": str(e)}
+        
+        try:
+            response_data["database"] = await get_database_health()
+        except Exception as e:
+            logger.warning(f"Failed to get database health: {e}")
+            response_data["database"] = {"error": str(e)}
+        
+        response_data["timestamp"] = datetime.now().isoformat()
+        response_data["status"] = "active"
+        
+        # Сериализуем все datetime объекты
+        response_data = serialize_datetime_objects(response_data)
+        
+        return web.json_response(response_data)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в trading_system_status: {e}")
+        return web.json_response({
+            "status": "error", 
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
+        }, status=500)
+
+
+async def root_handler(request):
+    """Root endpoint с информацией о системе"""
+    try:
+        system_info = {
+            "message": "Bybit Trading Bot v2.1 - Production Ready",
+            "features": [
+                "✅ PostgreSQL Database Integration",
+                "✅ Historical Data Storage", 
+                "✅ Modular Market Data Management",
+                "✅ Strategy Orchestration System",
+                "✅ Advanced Signal Management",
+                "✅ REST API + WebSocket Integration",
+                "✅ OpenAI Integration",
+                "✅ Telegram Notifications"
+            ],
+            "status": "active",
+            "timestamp": datetime.now().isoformat(),
+            "database_enabled": database_initialized,
+            "trading_system_active": bool(strategy_orchestrator and strategy_orchestrator.is_running),
+            "environment": Config.ENVIRONMENT,
+            "webhook_path": WEBHOOK_PATH
+        }
+        
+        # Дополнительная информация если доступна
+        if market_data_manager:
+            try:
+                system_info["market_data_status"] = market_data_manager.get_health_status().get("overall_status", "unknown")
+            except Exception as e:
+                logger.warning(f"Failed to get market data status: {e}")
+                system_info["market_data_status"] = "error"
+        
+        if strategy_orchestrator:
+            try:
+                system_info["active_strategies"] = strategy_orchestrator._count_active_strategies()
+            except Exception as e:
+                logger.warning(f"Failed to get active strategies count: {e}")
+                system_info["active_strategies"] = 0
+        
+        if bot_instance:
+            try:
+                system_info["signal_subscribers"] = len(bot_instance.signal_subscribers)
+            except Exception as e:
+                logger.warning(f"Failed to get signal subscribers count: {e}")
+                system_info["signal_subscribers"] = 0
+        
+        # Сериализуем datetime объекты
+        system_info = serialize_datetime_objects(system_info)
+        
+        return web.json_response(system_info)
+        
+    except Exception as e:
+        logger.error(f"❌ Root handler failed: {e}")
+        return web.json_response({
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
+        }, status=500)
+
 
 async def on_startup(bot) -> None:
     """Действия при запуске - устанавливаем webhook"""
@@ -171,6 +346,7 @@ async def on_startup(bot) -> None:
         logger.error(f"❌ Ошибка установки webhook: {e}")
         raise
 
+
 async def on_shutdown(bot) -> None:
     """Действия при остановке"""
     try:
@@ -190,6 +366,7 @@ async def on_shutdown(bot) -> None:
     except Exception as e:
         logger.error(f"❌ Ошибка при остановке: {e}")
 
+
 async def cleanup_resources():
     """Освобождение всех ресурсов"""
     global bot_instance, market_data_manager, signal_manager, strategy_orchestrator, database_initialized
@@ -198,33 +375,50 @@ async def cleanup_resources():
         # Останавливаем торговую систему
         if strategy_orchestrator:
             logger.info("🔄 Остановка StrategyOrchestrator...")
-            await strategy_orchestrator.stop()
-            logger.info("✅ StrategyOrchestrator остановлен")
+            try:
+                await strategy_orchestrator.stop()
+                logger.info("✅ StrategyOrchestrator остановлен")
+            except Exception as e:
+                logger.error(f"❌ Ошибка остановки StrategyOrchestrator: {e}")
         
         if signal_manager:
             logger.info("🔄 Остановка SignalManager...")
-            await signal_manager.stop()
-            logger.info("✅ SignalManager остановлен")
+            try:
+                await signal_manager.stop()
+                logger.info("✅ SignalManager остановлен")
+            except Exception as e:
+                logger.error(f"❌ Ошибка остановки SignalManager: {e}")
         
         if market_data_manager:
             logger.info("🔄 Остановка MarketDataManager...")
-            await market_data_manager.stop()
-            logger.info("✅ MarketDataManager остановлен")
+            try:
+                await market_data_manager.stop()
+                logger.info("✅ MarketDataManager остановлен")
+            except Exception as e:
+                logger.error(f"❌ Ошибка остановки MarketDataManager: {e}")
         
         # Закрываем Telegram бот
         if bot_instance:
-            await bot_instance.close()
-            logger.info("✅ Telegram бот закрыт")
+            try:
+                await bot_instance.close()
+                logger.info("✅ Telegram бот закрыт")
+            except Exception as e:
+                logger.error(f"❌ Ошибка закрытия Telegram бота: {e}")
         
         # 🆕 НОВОЕ: Закрываем базу данных
         if database_initialized:
             logger.info("🔄 Закрытие базы данных...")
-            await close_database()
-            database_initialized = False
-            logger.info("✅ База данных закрыта")
+            try:
+                await close_database()
+                database_initialized = False
+                logger.info("✅ База данных закрыта")
+            except Exception as e:
+                logger.error(f"❌ Ошибка закрытия базы данных: {e}")
+                database_initialized = False
             
     except Exception as e:
-        logger.error(f"❌ Ошибка освобождения ресурсов: {e}")
+        logger.error(f"❌ Критическая ошибка освобождения ресурсов: {e}")
+
 
 async def initialize_database_system():
     """Инициализация базы данных"""
@@ -244,11 +438,14 @@ async def initialize_database_system():
             logger.info("✅ База данных инициализирована успешно")
             
             # Проверяем статус БД
-            db_health = await get_database_health()
-            if db_health.get("healthy", False):
-                logger.info(f"✅ База данных работает: {db_health.get('status', 'unknown')}")
-            else:
-                logger.warning(f"⚠️ Проблема с базой данных: {db_health}")
+            try:
+                db_health = await get_database_health()
+                if db_health.get("healthy", False):
+                    logger.info(f"✅ База данных работает: {db_health.get('status', 'unknown')}")
+                else:
+                    logger.warning(f"⚠️ Проблема с базой данных: {db_health}")
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось проверить статус БД: {e}")
                 
             return True
         else:
@@ -259,6 +456,7 @@ async def initialize_database_system():
         logger.error(f"❌ Критическая ошибка инициализации БД: {e}")
         database_initialized = False
         return False
+
 
 async def initialize_trading_system():
     """Инициализация торговой системы"""
@@ -332,6 +530,7 @@ async def initialize_trading_system():
         logger.error(f"❌ Критическая ошибка инициализации торговой системы: {e}")
         return False
 
+
 async def create_app():
     """Создание веб-приложения"""
     global bot_instance
@@ -375,69 +574,8 @@ async def create_app():
     # Основные endpoints
     app.router.add_get("/health", health_check)
     app.router.add_get("/database/status", database_status)
-    
-    # Root endpoint
-    async def root_handler(request):
-        system_info = {
-            "message": "Bybit Trading Bot v2.1 - Production Ready",
-            "features": [
-                "✅ PostgreSQL Database Integration",
-                "✅ Historical Data Storage", 
-                "✅ Modular Market Data Management",
-                "✅ Strategy Orchestration System",
-                "✅ Advanced Signal Management",
-                "✅ REST API + WebSocket Integration",
-                "✅ OpenAI Integration",
-                "✅ Telegram Notifications"
-            ],
-            "status": "active",
-            "database_enabled": database_initialized,
-            "trading_system_active": bool(strategy_orchestrator and strategy_orchestrator.is_running),
-            "environment": Config.ENVIRONMENT,
-            "webhook_path": WEBHOOK_PATH
-        }
-        
-        if market_data_manager:
-            system_info["market_data_status"] = market_data_manager.get_health_status().get("overall_status", "unknown")
-        
-        if strategy_orchestrator:
-            system_info["active_strategies"] = strategy_orchestrator._count_active_strategies()
-        
-        if bot_instance:
-            system_info["signal_subscribers"] = len(bot_instance.signal_subscribers)
-        
-        return web.json_response(system_info)
-    
-    app.router.add_get("/", root_handler)
-    
-    # Trading system status endpoint
-    async def trading_system_status_handler(request):
-        try:
-            if not market_data_manager or not signal_manager or not strategy_orchestrator:
-                return web.json_response({
-                    "status": "inactive",
-                    "message": "Trading system not initialized"
-                }, status=503)
-            
-            return web.json_response({
-                "market_data_manager": market_data_manager.get_stats(),
-                "signal_manager": signal_manager.get_stats(),
-                "strategy_orchestrator": strategy_orchestrator.get_stats(),
-                "system_health": {
-                    "market_data": market_data_manager.get_health_status(),
-                    "strategies": strategy_orchestrator.get_health_status()
-                },
-                "database": await get_database_health()
-            })
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка в trading_system_status: {e}")
-            return web.json_response({
-                "status": "error", 
-                "message": str(e)
-            }, status=500)
-    
     app.router.add_get("/trading/status", trading_system_status_handler)
+    app.router.add_get("/", root_handler)
     
     # Webhook handler
     webhook_requests_handler = SimpleRequestHandler(
@@ -456,6 +594,7 @@ async def create_app():
     app.on_cleanup.append(cleanup_handler)
     
     return app
+
 
 async def main():
     """Главная функция приложения"""
@@ -509,11 +648,14 @@ async def main():
                 
                 # Логируем статистику
                 if bot_instance and strategy_orchestrator:
-                    subscribers_count = len(bot_instance.signal_subscribers)
-                    strategies_active = strategy_orchestrator._count_active_strategies()
-                    db_status = "OK" if database_initialized else "OFF"
-                    logger.info(f"📊 Статистика: {subscribers_count} подписчиков, "
-                              f"{strategies_active} стратегий, БД: {db_status}")
+                    try:
+                        subscribers_count = len(bot_instance.signal_subscribers)
+                        strategies_active = strategy_orchestrator._count_active_strategies()
+                        db_status = "OK" if database_initialized else "OFF"
+                        logger.info(f"📊 Статистика: {subscribers_count} подписчиков, "
+                                  f"{strategies_active} стратегий, БД: {db_status}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Не удалось получить статистику: {e}")
                 
         except asyncio.CancelledError:
             logger.info("📡 Получен сигнал отмены")
@@ -545,6 +687,7 @@ async def main():
             
         raise
 
+
 def run_app():
     """Запуск приложения с корректной обработкой исключений"""
     try:
@@ -569,6 +712,7 @@ def run_app():
     except Exception as e:
         logger.error(f"💥 Критическая ошибка приложения: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     run_app()
