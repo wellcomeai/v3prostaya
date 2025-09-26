@@ -38,6 +38,9 @@ class RealtimeMarketData:
             "last_trades_update": None
         }
         
+        # ✅ НОВОЕ: Отслеживание времени для периодического логирования
+        self.last_summary_log = None
+        
         logger.info(f"📊 RealtimeMarketData инициализирован (max_history={max_history})")
         
     def update_ticker(self, ticker_data: dict):
@@ -58,7 +61,12 @@ class RealtimeMarketData:
                 self.volumes.append(volume)  
                 self.timestamps.append(timestamp)
                 
-                logger.info(f"📊 Ticker обновлен: ${price:,.2f}, Vol: {volume:,.0f} BTC, Updates: {self.stats['ticker_updates']}")
+                # ✅ ОПТИМИЗИРОВАНО: Периодическое логирование раз в минуту
+                if self.last_summary_log is None or (datetime.now() - self.last_summary_log).total_seconds() > 60:
+                    logger.info(f"📊 Ticker обновлен: ${price:,.2f}, Vol: {volume:,.0f} BTC, Updates: {self.stats['ticker_updates']}")
+                    self.last_summary_log = datetime.now()
+                else:
+                    logger.debug(f"📊 Ticker обновлен: ${price:,.2f}, Vol: {volume:,.0f} BTC, Updates: {self.stats['ticker_updates']}")
             else:
                 logger.warning(f"⚠️ Получена невалидная цена: {price}")
                 
@@ -98,7 +106,7 @@ class RealtimeMarketData:
             self.stats["trades_updates"] += 1
             self.stats["last_trades_update"] = datetime.now()
             
-            logger.info(f"💰 Trades обновлены: {len(trades_data)} сделок, Total updates: {self.stats['trades_updates']}")
+            logger.debug(f"💰 Trades обновлены: {len(trades_data)} сделок, Total updates: {self.stats['trades_updates']}")
             
         except Exception as e:
             logger.error(f"❌ Ошибка обновления трейдов: {e}")
@@ -252,6 +260,9 @@ class WebSocketProvider:
         self.orderbook_callbacks: List[Callable] = []
         self.trades_callbacks: List[Callable] = []
         
+        # ✅ НОВОЕ: Отслеживание времени для периодического логирования WebSocket
+        self.last_summary_log = None
+        
         # Статистика подключения
         self.connection_stats = {
             "connection_attempts": 0,
@@ -331,22 +342,27 @@ class WebSocketProvider:
             self.connection_stats["messages_received"] += 1
             self.connection_stats["last_message_time"] = datetime.now()
             
-            logger.info(f"📨 Получено ticker сообщение: {json.dumps(message, indent=2)}")
+            logger.debug(f"📨 Получено ticker сообщение: {json.dumps(message, indent=2)}")
             
             msg_type = message.get('type')
-            logger.info(f"📊 Ticker message type: {msg_type}")
+            logger.debug(f"📊 Ticker message type: {msg_type}")
             
             if msg_type == 'snapshot' and message.get('data'):
                 self.connection_stats["ticker_messages"] += 1
                 data = message['data']
                 
-                logger.info(f"📊 Ticker data получены: {json.dumps(data, indent=2)}")
+                # ✅ ОПТИМИЗИРОВАНО: Периодическое логирование раз в минуту вместо каждого сообщения
+                if self.last_summary_log is None or (datetime.now() - self.last_summary_log).total_seconds() > 60:
+                    logger.info(f"📊 WebSocket активен: {self.connection_stats['ticker_messages']} ticker updates, цена: ${float(data.get('lastPrice', 0)):,.2f}")
+                    self.last_summary_log = datetime.now()
+                else:
+                    logger.debug(f"📊 Ticker data получены: цена ${float(data.get('lastPrice', 0)):,.2f}")
                 
                 # Обновляем внутренние данные
                 self.market_data.update_ticker(data)
                 
                 # Уведомляем всех подписчиков
-                logger.info(f"📞 Вызов {len(self.ticker_callbacks)} ticker callbacks...")
+                logger.debug(f"📞 Вызов {len(self.ticker_callbacks)} ticker callbacks...")
                 for i, callback in enumerate(self.ticker_callbacks):
                     try:
                         logger.debug(f"📞 Вызов ticker callback #{i}")
@@ -356,16 +372,16 @@ class WebSocketProvider:
                         logger.error(f"❌ Ошибка в ticker callback #{i}: {e}")
                         logger.error(f"Stack trace: {traceback.format_exc()}")
                 
-                logger.info(f"✅ Ticker callbacks завершены")
+                logger.debug(f"✅ Ticker callbacks завершены")
                 
             elif msg_type == 'delta':
-                logger.info(f"📊 Получен ticker delta: {message}")
+                logger.debug(f"📊 Получен ticker delta: {message}")
                 # Можно обрабатывать дельта-обновления
                 pass
             else:
                 self.connection_stats["unknown_messages"] += 1
                 logger.warning(f"⚠️ Неизвестный тип ticker сообщения: {msg_type}")
-                logger.warning(f"Full message: {json.dumps(message, indent=2)}")
+                logger.debug(f"Full message: {json.dumps(message, indent=2)}")
                 
         except Exception as e:
             self.connection_stats["error_messages"] += 1
@@ -429,7 +445,7 @@ class WebSocketProvider:
                 self.connection_stats["trades_messages"] += 1
                 trades = message['data']
                 
-                logger.info(f"💰 Trades data: {len(trades)} сделок")
+                logger.debug(f"💰 Trades data: {len(trades)} сделок")
                 
                 # Обновляем внутренние данные
                 self.market_data.update_trades(trades)
