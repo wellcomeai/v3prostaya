@@ -15,6 +15,7 @@ Features:
 - Database batch operations for performance
 - Health monitoring and statistics
 - Uses pybit for reliable API communication
+- ✅ FIXED: Correct Bybit API interval mapping
 """
 
 import asyncio
@@ -178,7 +179,25 @@ class HistoricalDataLoader:
     - Error handling with automatic retries
     - Duplicate detection and efficient database operations
     - Comprehensive logging and monitoring
+    - ✅ FIXED: Correct Bybit API interval mapping
     """
+    
+    # ✅ FIXED: Правильный маппинг интервалов для Bybit API
+    BYBIT_INTERVAL_MAPPING = {
+        "1m": "1",
+        "3m": "3", 
+        "5m": "5",
+        "15m": "15",
+        "30m": "30",
+        "1h": "60",
+        "2h": "120", 
+        "4h": "240",
+        "6h": "360",
+        "12h": "720",
+        "1d": "D",
+        "1w": "W",
+        "1M": "M"
+    }
     
     def __init__(self, config: LoaderConfig):
         """
@@ -218,7 +237,8 @@ class HistoricalDataLoader:
             "start_time": None,
             "last_activity": None,
             "pybit_errors": 0,
-            "retry_attempts": 0
+            "retry_attempts": 0,
+            "interval_mapping_calls": 0
         }
         
         logger.info(f"🏗️ HistoricalDataLoader initialized for {config.symbol}")
@@ -226,7 +246,7 @@ class HistoricalDataLoader:
         logger.info(f"   • Max concurrent requests: {config.max_concurrent_requests}")
         logger.info(f"   • Rate limit: {config.requests_per_second_limit} req/sec")
         logger.info(f"   • Batch size: {config.batch_size}")
-        logger.info(f"   • Using pybit unified trading API")
+        logger.info(f"   • Using pybit unified trading API with FIXED interval mapping")
     
     async def initialize(self) -> bool:
         """Initialize database connections and pybit session"""
@@ -259,6 +279,7 @@ class HistoricalDataLoader:
             logger.info("✅ HistoricalDataLoader initialized successfully")
             logger.info(f"   • Pybit session: {'testnet' if self.config.testnet else 'mainnet'}")
             logger.info(f"   • Thread pool: {self.executor._max_workers} workers")
+            logger.info(f"   • Supported intervals: {list(self.BYBIT_INTERVAL_MAPPING.keys())}")
             return True
             
         except Exception as e:
@@ -297,6 +318,24 @@ class HistoricalDataLoader:
         except Exception as e:
             raise Exception(f"Pybit API connection test failed: {e}")
     
+    def _get_bybit_interval(self, interval: str) -> str:
+        """
+        ✅ FIXED: Convert standard interval to Bybit API format
+        
+        Args:
+            interval: Standard interval (e.g., "1h", "4h", "1d")
+            
+        Returns:
+            Bybit API interval (e.g., "60", "240", "D")
+        """
+        bybit_interval = self.BYBIT_INTERVAL_MAPPING.get(interval, interval)
+        
+        if bybit_interval != interval:
+            self.stats["interval_mapping_calls"] += 1
+            logger.debug(f"🔄 Interval mapping: {interval} → {bybit_interval}")
+        
+        return bybit_interval
+    
     async def load_historical_data(self, 
                                   intervals: List[str],
                                   start_time: datetime,
@@ -332,6 +371,15 @@ class HistoricalDataLoader:
         if not valid_intervals:
             raise ValueError("No valid intervals provided")
         
+        # Check if intervals are supported by Bybit
+        unsupported = [i for i in valid_intervals if i not in self.BYBIT_INTERVAL_MAPPING]
+        if unsupported:
+            logger.warning(f"⚠️ Unsupported Bybit intervals: {unsupported}")
+            valid_intervals = [i for i in valid_intervals if i in self.BYBIT_INTERVAL_MAPPING]
+        
+        if not valid_intervals:
+            raise ValueError("No supported Bybit intervals provided")
+        
         try:
             self.is_loading = True
             self.should_stop = False
@@ -343,6 +391,7 @@ class HistoricalDataLoader:
             logger.info(f"🚀 Starting historical data load")
             logger.info(f"   • Symbol: {self.config.symbol}")
             logger.info(f"   • Intervals: {valid_intervals}")
+            logger.info(f"   • Bybit intervals: {[self._get_bybit_interval(i) for i in valid_intervals]}")
             logger.info(f"   • Period: {start_time.date()} to {end_time.date()}")
             logger.info(f"   • Duration: {(end_time - start_time).days} days")
             logger.info(f"   • Mode: {'Testnet' if self.config.testnet else 'Mainnet'}")
@@ -362,7 +411,8 @@ class HistoricalDataLoader:
                 self.progress.completed_intervals = i
                 
                 try:
-                    logger.info(f"📊 Loading interval {interval} ({i+1}/{len(valid_intervals)})")
+                    bybit_interval = self._get_bybit_interval(interval)
+                    logger.info(f"📊 Loading interval {interval} → {bybit_interval} ({i+1}/{len(valid_intervals)})")
                     
                     result = await self._load_interval_data(
                         interval=interval,
@@ -427,7 +477,8 @@ class HistoricalDataLoader:
                     "successful_calls": self.stats["successful_api_calls"],
                     "failed_calls": self.stats["failed_api_calls"],
                     "pybit_errors": self.stats["pybit_errors"],
-                    "retry_attempts": self.stats["retry_attempts"]
+                    "retry_attempts": self.stats["retry_attempts"],
+                    "interval_mappings": self.stats["interval_mapping_calls"]
                 },
                 "results_by_interval": results
             }
@@ -440,6 +491,7 @@ class HistoricalDataLoader:
             logger.info(f"   • Candles saved: {summary['total_candles_saved']:,}")
             logger.info(f"   • Performance: {summary['average_requests_per_second']} req/sec")
             logger.info(f"   • API calls: {self.stats['successful_api_calls']}/{self.stats['total_api_calls']}")
+            logger.info(f"   • Interval mappings: {self.stats['interval_mapping_calls']}")
             
             if summary['error_count'] > 0:
                 logger.warning(f"   • Errors encountered: {summary['error_count']}")
@@ -621,7 +673,7 @@ class HistoricalDataLoader:
     async def _fetch_candles_chunk(self, interval: str, 
                                  start_time: datetime, end_time: datetime) -> List[MarketDataCandle]:
         """
-        Fetch a chunk of candles from Bybit API using pybit
+        ✅ FIXED: Fetch a chunk of candles from Bybit API using pybit with correct intervals
         
         Args:
             interval: Candle interval
@@ -635,12 +687,15 @@ class HistoricalDataLoader:
         start_ms = int(start_time.timestamp() * 1000)
         end_ms = int(end_time.timestamp() * 1000)
         
+        # ✅ FIXED: Get correct Bybit interval
+        bybit_interval = self._get_bybit_interval(interval)
+        
         def fetch_klines():
             """Sync function for pybit call"""
             return self.session.get_kline(
-                category='linear',
+                category='linear',  # ✅ Correct category for BTCUSDT perpetuals
                 symbol=self.config.symbol,
-                interval=interval,
+                interval=bybit_interval,  # ✅ Use mapped interval
                 start=start_ms,
                 end=end_ms,
                 limit=1000
@@ -657,31 +712,42 @@ class HistoricalDataLoader:
             # Check pybit response
             if result.get('retCode') != 0:
                 error_msg = result.get('retMsg', 'Unknown pybit API error')
+                logger.error(f"❌ Bybit API error: {error_msg} for {interval} -> {bybit_interval}")
                 raise Exception(f"Pybit API error: {error_msg}")
             
             # Parse candles from pybit response
             raw_candles = result.get('result', {}).get('list', [])
+            
+            if raw_candles:
+                logger.debug(f"✅ Received {len(raw_candles)} candles for {interval} -> {bybit_interval}")
+            else:
+                logger.warning(f"⚠️ No candles returned for {interval} -> {bybit_interval}")
             
             candles = []
             for raw_candle in raw_candles:
                 try:
                     candle = MarketDataCandle.create_from_bybit_data(
                         symbol=self.config.symbol,
-                        interval=interval,
+                        interval=interval,  # ✅ Store original interval in DB
                         bybit_candle=raw_candle
                     )
                     candles.append(candle)
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to parse candle: {e}")
+                    logger.debug(f"Raw candle data: {raw_candle}")
                     continue
             
             self.stats["total_data_points"] += len(candles)
             self.stats["last_activity"] = datetime.now()
             
+            if candles:
+                logger.info(f"📊 Successfully fetched {len(candles)} candles for {interval}")
+            
             return candles
             
         except Exception as e:
             self.stats["failed_api_calls"] += 1
+            logger.error(f"❌ Failed to fetch candles for {interval} -> {bybit_interval}: {e}")
             raise Exception(f"Failed to fetch candles via pybit: {e}")
     
     async def _save_candles_batch(self, candles: List[MarketDataCandle]) -> int:
@@ -769,6 +835,10 @@ class HistoricalDataLoader:
                 "testnet": self.config.testnet,
                 "timeout": self.config.request_timeout_seconds,
                 "thread_pool_workers": self.executor._max_workers if self.executor else 0
+            },
+            "interval_mappings": {
+                "supported_intervals": list(self.BYBIT_INTERVAL_MAPPING.keys()),
+                "mapping_calls_made": self.stats["interval_mapping_calls"]
             }
         }
     
@@ -816,7 +886,8 @@ class HistoricalDataLoader:
                 f"testnet={self.config.testnet}, "
                 f"max_concurrent={self.config.max_concurrent_requests}, "
                 f"batch_size={self.config.batch_size}, "
-                f"pybit_session={'active' if self.session else 'inactive'})")
+                f"pybit_session={'active' if self.session else 'inactive'}, "
+                f"intervals_supported={len(self.BYBIT_INTERVAL_MAPPING)})")
 
 
 # Export main components
