@@ -6,6 +6,7 @@ Optimized for time-series data with proper indexing and validation.
 """
 
 import logging
+import json
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Union
 from decimal import Decimal
@@ -338,6 +339,9 @@ class MarketDataCandle(Base):
             interval_seconds = interval_enum.to_seconds()
             close_time = datetime.fromtimestamp((start_time_ms / 1000) + interval_seconds - 1, tz=timezone.utc)
             
+            # ✅ ИСПРАВЛЕНО: Конвертируем список в JSON для JSONB поля
+            raw_data_json = json.dumps(bybit_candle) if bybit_candle else None
+            
             return cls(
                 symbol=symbol.upper(),
                 interval=interval,
@@ -350,7 +354,7 @@ class MarketDataCandle(Base):
                 volume=volume,
                 quote_volume=turnover,
                 data_source="bybit",
-                raw_data=bybit_candle
+                raw_data=raw_data_json  # ✅ Теперь JSON строка вместо списка
             )
             
         except Exception as e:
