@@ -168,9 +168,9 @@ class MarketDataCandle(Base):
         if len(symbol) < 3 or len(symbol) > 20:
             raise ValueError("Symbol must be between 3 and 20 characters")
         
-        # Basic format validation (letters and numbers only)
-        if not symbol.replace('USDT', '').replace('USDC', '').replace('BTC', '').replace('ETH', '').isalnum():
-            raise ValueError("Symbol contains invalid characters")
+        # ✅ ПРОСТАЯ ВАЛИДАЦИЯ - только буквы и цифры
+        if not symbol.isalnum():
+            raise ValueError("Symbol must contain only letters and numbers")
         
         return symbol
     
