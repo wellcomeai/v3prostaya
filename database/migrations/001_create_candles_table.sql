@@ -174,7 +174,8 @@ SELECT
     MIN(low_price) as day_low,
     MAX(high_price) as day_high,
     FIRST_VALUE(open_price ORDER BY open_time) as day_open,
-    LAST_VALUE(close_price ORDER BY open_time ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as day_close,
+    LAST_VALUE(close_price ORDER BY open_time 
+        RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as day_close,
     SUM(volume) as day_volume,
     AVG(close_price) as avg_price
 FROM market_data_candles
@@ -196,7 +197,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Create helper function for price change calculations
+-- FIXED: Create helper function for price change calculations
 CREATE OR REPLACE FUNCTION calculate_price_change(
     p_symbol TEXT,
     p_interval TEXT, 
@@ -210,29 +211,240 @@ RETURNS TABLE(
 ) AS $$
 BEGIN
     RETURN QUERY
+    WITH price_data AS (
+        SELECT 
+            c.open_time,
+            c.close_price,
+            LAG(c.close_price, p_periods) OVER (ORDER BY c.open_time) as previous_price
+        FROM market_data_candles c
+        WHERE c.symbol = p_symbol AND c.interval = p_interval
+        ORDER BY c.open_time
+    )
+    SELECT 
+        pd.open_time,
+        pd.close_price,
+        CASE 
+            WHEN pd.previous_price IS NOT NULL THEN pd.close_price - pd.previous_price
+            ELSE NULL::NUMERIC
+        END as price_change,
+        CASE 
+            WHEN pd.previous_price IS NOT NULL AND pd.previous_price > 0 THEN
+                ((pd.close_price - pd.previous_price) / pd.previous_price) * 100
+            ELSE NULL::NUMERIC
+        END as price_change_percent
+    FROM price_data pd
+    ORDER BY pd.open_time;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+COMMENT ON FUNCTION calculate_price_change IS 'Calculate price changes over specified periods';
+
+-- Create simple moving average calculation function
+CREATE OR REPLACE FUNCTION calculate_sma(
+    p_symbol TEXT,
+    p_interval TEXT,
+    p_periods INTEGER DEFAULT 20
+)
+RETURNS TABLE(
+    open_time TIMESTAMPTZ,
+    close_price NUMERIC,
+    sma NUMERIC
+) AS $$
+BEGIN
+    RETURN QUERY
     SELECT 
         c.open_time,
         c.close_price,
-        c.close_price - LAG(c.close_price, p_periods) OVER (ORDER BY c.open_time) as price_change,
-        CASE 
-            WHEN LAG(c.close_price, p_periods) OVER (ORDER BY c.open_time) > 0 THEN
-                ((c.close_price - LAG(c.close_price, p_periods) OVER (ORDER BY c.open_time)) / 
-                 LAG(c.close_price, p_periods) OVER (ORDER BY c.open_time)) * 100
-            ELSE NULL
-        END as price_change_percent
+        AVG(c.close_price) OVER (
+            ORDER BY c.open_time 
+            ROWS BETWEEN (p_periods - 1) PRECEDING AND CURRENT ROW
+        ) as sma
     FROM market_data_candles c
     WHERE c.symbol = p_symbol AND c.interval = p_interval
     ORDER BY c.open_time;
 END;
 $$ LANGUAGE plpgsql STABLE;
 
-COMMENT ON FUNCTION calculate_price_change IS 'Calculate price changes over specified periods';
+COMMENT ON FUNCTION calculate_sma IS 'Calculate Simple Moving Average over specified periods';
 
--- Grant appropriate permissions
+-- Create exponential moving average calculation function
+CREATE OR REPLACE FUNCTION calculate_ema(
+    p_symbol TEXT,
+    p_interval TEXT,
+    p_periods INTEGER DEFAULT 12
+)
+RETURNS TABLE(
+    open_time TIMESTAMPTZ,
+    close_price NUMERIC,
+    ema NUMERIC
+) AS $$
+DECLARE
+    alpha NUMERIC := 2.0 / (p_periods + 1);
+BEGIN
+    RETURN QUERY
+    WITH RECURSIVE ema_calc AS (
+        -- Base case: first row uses close_price as initial EMA
+        (
+            SELECT 
+                open_time,
+                close_price,
+                close_price as ema,
+                ROW_NUMBER() OVER (ORDER BY open_time) as rn
+            FROM market_data_candles
+            WHERE symbol = p_symbol AND interval = p_interval
+            ORDER BY open_time
+            LIMIT 1
+        )
+        UNION ALL
+        -- Recursive case: calculate EMA using previous EMA
+        (
+            SELECT 
+                c.open_time,
+                c.close_price,
+                (alpha * c.close_price + (1 - alpha) * e.ema) as ema,
+                e.rn + 1
+            FROM market_data_candles c
+            INNER JOIN ema_calc e ON c.open_time > (
+                SELECT open_time FROM market_data_candles 
+                WHERE symbol = p_symbol AND interval = p_interval
+                ORDER BY open_time OFFSET (e.rn) LIMIT 1
+            )
+            WHERE c.symbol = p_symbol AND c.interval = p_interval
+            ORDER BY c.open_time
+            LIMIT 1
+        )
+    )
+    SELECT ec.open_time, ec.close_price, ec.ema
+    FROM ema_calc ec
+    ORDER BY ec.open_time;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+COMMENT ON FUNCTION calculate_ema IS 'Calculate Exponential Moving Average over specified periods';
+
+-- Create RSI calculation function
+CREATE OR REPLACE FUNCTION calculate_rsi(
+    p_symbol TEXT,
+    p_interval TEXT,
+    p_periods INTEGER DEFAULT 14
+)
+RETURNS TABLE(
+    open_time TIMESTAMPTZ,
+    close_price NUMERIC,
+    rsi NUMERIC
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH price_changes AS (
+        SELECT 
+            open_time,
+            close_price,
+            CASE 
+                WHEN close_price > LAG(close_price) OVER (ORDER BY open_time) 
+                THEN close_price - LAG(close_price) OVER (ORDER BY open_time)
+                ELSE 0
+            END as gain,
+            CASE 
+                WHEN close_price < LAG(close_price) OVER (ORDER BY open_time) 
+                THEN LAG(close_price) OVER (ORDER BY open_time) - close_price
+                ELSE 0
+            END as loss
+        FROM market_data_candles
+        WHERE symbol = p_symbol AND interval = p_interval
+        ORDER BY open_time
+    ),
+    avg_gains_losses AS (
+        SELECT 
+            open_time,
+            close_price,
+            AVG(gain) OVER (
+                ORDER BY open_time 
+                ROWS BETWEEN (p_periods - 1) PRECEDING AND CURRENT ROW
+            ) as avg_gain,
+            AVG(loss) OVER (
+                ORDER BY open_time 
+                ROWS BETWEEN (p_periods - 1) PRECEDING AND CURRENT ROW
+            ) as avg_loss
+        FROM price_changes
+    )
+    SELECT 
+        agl.open_time,
+        agl.close_price,
+        CASE 
+            WHEN agl.avg_loss = 0 THEN 100
+            ELSE 100 - (100 / (1 + (agl.avg_gain / agl.avg_loss)))
+        END as rsi
+    FROM avg_gains_losses agl
+    ORDER BY agl.open_time;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+COMMENT ON FUNCTION calculate_rsi IS 'Calculate Relative Strength Index over specified periods';
+
+-- Create Bollinger Bands calculation function
+CREATE OR REPLACE FUNCTION calculate_bollinger_bands(
+    p_symbol TEXT,
+    p_interval TEXT,
+    p_periods INTEGER DEFAULT 20,
+    p_std_dev NUMERIC DEFAULT 2.0
+)
+RETURNS TABLE(
+    open_time TIMESTAMPTZ,
+    close_price NUMERIC,
+    middle_band NUMERIC,
+    upper_band NUMERIC,
+    lower_band NUMERIC
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH bb_calc AS (
+        SELECT 
+            c.open_time,
+            c.close_price,
+            AVG(c.close_price) OVER (
+                ORDER BY c.open_time 
+                ROWS BETWEEN (p_periods - 1) PRECEDING AND CURRENT ROW
+            ) as sma,
+            STDDEV(c.close_price) OVER (
+                ORDER BY c.open_time 
+                ROWS BETWEEN (p_periods - 1) PRECEDING AND CURRENT ROW
+            ) as std_dev
+        FROM market_data_candles c
+        WHERE c.symbol = p_symbol AND c.interval = p_interval
+        ORDER BY c.open_time
+    )
+    SELECT 
+        bb.open_time,
+        bb.close_price,
+        bb.sma as middle_band,
+        bb.sma + (p_std_dev * bb.std_dev) as upper_band,
+        bb.sma - (p_std_dev * bb.std_dev) as lower_band
+    FROM bb_calc bb
+    ORDER BY bb.open_time;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+COMMENT ON FUNCTION calculate_bollinger_bands IS 'Calculate Bollinger Bands with configurable periods and standard deviation';
+
+-- Grant appropriate permissions (create user if needed)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'trading_bot') THEN
+        CREATE USER trading_bot WITH PASSWORD 'secure_password_here';
+    END IF;
+END
+$$;
+
 GRANT SELECT, INSERT, UPDATE, DELETE ON market_data_candles TO trading_bot;
 GRANT USAGE, SELECT ON SEQUENCE market_data_candles_id_seq TO trading_bot;
 GRANT SELECT ON latest_candles TO trading_bot;
 GRANT SELECT ON daily_candle_stats TO trading_bot;
+GRANT EXECUTE ON FUNCTION calculate_price_change TO trading_bot;
+GRANT EXECUTE ON FUNCTION calculate_sma TO trading_bot;
+GRANT EXECUTE ON FUNCTION calculate_ema TO trading_bot;
+GRANT EXECUTE ON FUNCTION calculate_rsi TO trading_bot;
+GRANT EXECUTE ON FUNCTION calculate_bollinger_bands TO trading_bot;
+GRANT EXECUTE ON FUNCTION refresh_daily_stats TO trading_bot;
 
 -- Create notification function for real-time updates
 CREATE OR REPLACE FUNCTION notify_candle_insert()
@@ -257,16 +469,79 @@ $$ LANGUAGE plpgsql;
 --     FOR EACH ROW
 --     EXECUTE FUNCTION notify_candle_insert();
 
--- Log successful migration
-INSERT INTO database_migrations (migration_name, checksum, execution_time_ms)
-VALUES ('001_create_candles_table', 'auto_calculated', 0)
-ON CONFLICT (migration_name) DO NOTHING;
+-- Create data cleanup function for old candles
+CREATE OR REPLACE FUNCTION cleanup_old_candles(
+    p_symbol TEXT DEFAULT NULL,
+    p_interval TEXT DEFAULT NULL,
+    p_days_to_keep INTEGER DEFAULT 365
+)
+RETURNS INTEGER AS $$
+DECLARE
+    deleted_count INTEGER := 0;
+    cutoff_date TIMESTAMPTZ := NOW() - (p_days_to_keep * INTERVAL '1 day');
+BEGIN
+    IF p_symbol IS NOT NULL AND p_interval IS NOT NULL THEN
+        -- Cleanup specific symbol/interval
+        DELETE FROM market_data_candles 
+        WHERE symbol = p_symbol 
+        AND interval = p_interval 
+        AND open_time < cutoff_date;
+    ELSIF p_symbol IS NOT NULL THEN
+        -- Cleanup specific symbol, all intervals
+        DELETE FROM market_data_candles 
+        WHERE symbol = p_symbol 
+        AND open_time < cutoff_date;
+    ELSE
+        -- Cleanup all data older than cutoff
+        DELETE FROM market_data_candles 
+        WHERE open_time < cutoff_date;
+    END IF;
+    
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    
+    -- Refresh materialized view after cleanup
+    REFRESH MATERIALIZED VIEW CONCURRENTLY daily_candle_stats;
+    
+    RETURN deleted_count;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION cleanup_old_candles IS 'Cleanup old candle data beyond retention period';
+
+-- Create database statistics function
+CREATE OR REPLACE FUNCTION get_candle_stats()
+RETURNS TABLE(
+    symbol TEXT,
+    interval TEXT,
+    candle_count BIGINT,
+    earliest_candle TIMESTAMPTZ,
+    latest_candle TIMESTAMPTZ,
+    data_size_mb NUMERIC
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        c.symbol,
+        c.interval,
+        COUNT(*) as candle_count,
+        MIN(c.open_time) as earliest_candle,
+        MAX(c.open_time) as latest_candle,
+        ROUND(pg_total_relation_size('market_data_candles'::regclass) / 1024.0 / 1024.0, 2) as data_size_mb
+    FROM market_data_candles c
+    GROUP BY c.symbol, c.interval
+    ORDER BY c.symbol, c.interval;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+COMMENT ON FUNCTION get_candle_stats IS 'Get statistics about stored candle data';
 
 -- Success message
 DO $$
 BEGIN
-    RAISE NOTICE 'Migration 001_create_candles_table completed successfully';
-    RAISE NOTICE 'Created table: market_data_candles with % indexes and constraints', 
+    RAISE NOTICE '✅ Migration 001_create_candles_table completed successfully';
+    RAISE NOTICE '📊 Created table: market_data_candles with % indexes', 
         (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'market_data_candles');
+    RAISE NOTICE '🔧 Created % functions for technical analysis', 6;
+    RAISE NOTICE '👤 Granted permissions to trading_bot user';
 END
 $$;
