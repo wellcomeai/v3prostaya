@@ -13,7 +13,7 @@ class Config:
     # Bybit API (тестовые ключи)
     BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "YOUR_BYBIT_TEST_API_KEY")
     BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "YOUR_BYBIT_TEST_SECRET")
-    BYBIT_TESTNET = True  # Используем тестнет
+    BYBIT_TESTNET = False  # Используем тестнет
     
     # OpenAI API
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
