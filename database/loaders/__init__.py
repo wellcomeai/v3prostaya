@@ -110,7 +110,7 @@ async def load_year_data(symbol: str = "BTCUSDT",
     if start_date is None:
         start_date = datetime.now() - timedelta(days=365)
     
-    end_date = datetime.now()
+    end_date = datetime.now() - timedelta(hours=2)
     
     logger.info(f"🚀 Starting year data load for {symbol}")
     logger.info(f"📅 Period: {start_date.date()} to {end_date.date()}")
