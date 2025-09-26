@@ -30,7 +30,7 @@ import concurrent.futures
 
 # Pybit for Bybit API integration
 from pybit.unified_trading import HTTP
-from pybit.exceptions import InvalidRequestError, UnauthorizedError, FailedRequestError
+from pybit.exceptions import InvalidRequestError, FailedRequestError
 
 # Import existing components
 from ..connections import get_connection_manager
@@ -345,6 +345,7 @@ class HistoricalDataLoader:
             logger.info(f"   • Intervals: {valid_intervals}")
             logger.info(f"   • Period: {start_time.date()} to {end_time.date()}")
             logger.info(f"   • Duration: {(end_time - start_time).days} days")
+            logger.info(f"   • Mode: {'Testnet' if self.config.testnet else 'Mainnet'}")
             
             # Pre-calculate total requests for progress tracking
             await self._estimate_total_requests(valid_intervals, start_time, end_time)
@@ -550,7 +551,7 @@ class HistoricalDataLoader:
                             logger.info(f"   📈 Progress: {progress_pct:.1f}% "
                                       f"(loaded {candles_loaded:,} candles for {interval})")
                 
-                except (InvalidRequestError, UnauthorizedError, FailedRequestError) as e:
+                except (InvalidRequestError, FailedRequestError) as e:
                     # Pybit specific errors
                     self.stats["pybit_errors"] += 1
                     self.stats["retry_attempts"] += 1
@@ -571,7 +572,8 @@ class HistoricalDataLoader:
                             "interval": interval,
                             "start_time": current_time.isoformat(),
                             "end_time": chunk_end.isoformat(),
-                            "retry_count": retry_count
+                            "retry_count": retry_count,
+                            "error_type": "pybit_api_error"
                         })
                         
                 except Exception as e:
@@ -594,7 +596,8 @@ class HistoricalDataLoader:
                             "interval": interval,
                             "start_time": current_time.isoformat(),
                             "end_time": chunk_end.isoformat(),
-                            "retry_count": retry_count
+                            "retry_count": retry_count,
+                            "error_type": "general_error"
                         })
             
             # Move to next time chunk
