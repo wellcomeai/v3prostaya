@@ -258,7 +258,7 @@ async def trading_system_status_handler(request):
 
 
 async def load_historical_data_handler(request):
-    """🆕 НОВЫЙ: Endpoint для загрузки исторических данных через API"""
+    """🆕 ИСПРАВЛЕННЫЙ: Endpoint для загрузки исторических данных через API"""
     try:
         # Проверяем что БД инициализирована
         if not database_initialized:
@@ -279,8 +279,8 @@ async def load_historical_data_handler(request):
         
         # Параметры по умолчанию
         symbol = data.get('symbol', Config.SYMBOL)
-        days = int(data.get('days', 30))  # По умолчанию 30 дней
-        intervals = data.get('intervals', ["1m", "5m", "15m", "1h", "4h", "1d"])
+        days = int(data.get('days', 7))  # Уменьшили по умолчанию до 7 дней
+        intervals = data.get('intervals', ["1m", "5m", "1h", "1d"])  # Меньше интервалов
         testnet = data.get('testnet', Config.BYBIT_TESTNET)
         
         # Валидация параметров
@@ -302,29 +302,121 @@ async def load_historical_data_handler(request):
         logger.info(f"   Intervals: {intervals}")
         logger.info(f"   Testnet: {testnet}")
         
-        # Импортируем загрузчик
-        from database.loaders import load_year_data
+        # ✅ ИСПРАВЛЕНО: Проверяем доступность pybit
+        try:
+            from pybit.unified_trading import HTTP
+            logger.info("✅ pybit library available")
+        except ImportError as e:
+            logger.error(f"❌ pybit library not installed: {e}")
+            return web.json_response({
+                "status": "error",
+                "message": "pybit library not installed. Please install with: pip install pybit>=5.3.0",
+                "details": str(e)
+            }, status=500)
         
-        start_time = datetime.now()
-        
-        # Запускаем загрузку
-        result = await load_year_data(
-            symbol=symbol,
-            intervals=intervals,
-            testnet=testnet,
-            start_date=datetime.now() - timedelta(days=days)
-        )
-        
-        end_time = datetime.now()
-        duration = (end_time - start_time).total_seconds()
-        
-        logger.info(f"✅ Загрузка исторических данных завершена за {duration:.1f}s")
-        
-        # Проверяем сколько записей теперь в БД
+        # ✅ ИСПРАВЛЕНО: Проверяем БД подключение
         try:
             from database.connections import get_connection_manager
             db_manager = await get_connection_manager()
+            health = await db_manager.get_health_status()
             
+            if not health.get("healthy", False):
+                return web.json_response({
+                    "status": "error",
+                    "message": "Database connection unhealthy",
+                    "db_status": health
+                }, status=503)
+                
+            logger.info("✅ Database connection verified")
+            
+        except Exception as e:
+            logger.error(f"❌ Database connection failed: {e}")
+            return web.json_response({
+                "status": "error",
+                "message": f"Database connection failed: {str(e)}"
+            }, status=503)
+        
+        # ✅ ИСПРАВЛЕНО: Пробуем создать и инициализировать загрузчик
+        start_time = datetime.now()
+        
+        try:
+            # Импортируем с детальной диагностикой
+            logger.info("📦 Importing loader components...")
+            from database.loaders import create_historical_loader
+            
+            logger.info("🔧 Creating historical data loader...")
+            loader = await create_historical_loader(
+                symbol=symbol,
+                testnet=testnet,
+                enable_progress_tracking=True,
+                max_concurrent_requests=2,  # Консервативное значение
+                batch_size=500  # Меньший размер батча
+            )
+            
+            logger.info("✅ Loader created and initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create/initialize loader: {e}")
+            import traceback
+            logger.error(f"Loader creation traceback: {traceback.format_exc()}")
+            
+            return web.json_response({
+                "status": "error",
+                "message": f"Failed to initialize data loader: {str(e)}",
+                "error_type": type(e).__name__,
+                "parameters": {
+                    "symbol": symbol,
+                    "testnet": testnet
+                }
+            }, status=500)
+        
+        # ✅ Запускаем загрузку данных
+        try:
+            logger.info("📥 Starting data loading process...")
+            
+            # Простой подход - используем встроенную функцию
+            from database.loaders import load_year_data
+            
+            result = await load_year_data(
+                symbol=symbol,
+                intervals=intervals,
+                testnet=testnet,
+                start_date=datetime.now() - timedelta(days=days)
+            )
+            
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            
+            logger.info(f"✅ Загрузка данных завершена за {duration:.1f}s")
+            
+        except Exception as e:
+            logger.error(f"❌ Data loading failed: {e}")
+            import traceback
+            logger.error(f"Loading traceback: {traceback.format_exc()}")
+            
+            return web.json_response({
+                "status": "error",
+                "message": f"Data loading failed: {str(e)}",
+                "error_type": type(e).__name__,
+                "parameters": {
+                    "symbol": symbol,
+                    "days": days,
+                    "intervals": intervals
+                }
+            }, status=500)
+        
+        finally:
+            # Закрываем загрузчик если он был создан
+            try:
+                if 'loader' in locals():
+                    await loader.close()
+                    logger.info("🔐 Loader resources closed")
+            except Exception as e:
+                logger.warning(f"⚠️ Error closing loader: {e}")
+        
+        # ✅ Проверяем результат
+        try:
+            db_manager = await get_connection_manager()
             count_result = await db_manager.fetchval(
                 "SELECT COUNT(*) FROM market_data_candles WHERE symbol = $1", 
                 symbol.upper()
@@ -356,13 +448,14 @@ async def load_historical_data_handler(request):
         return web.json_response(response_data)
         
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки исторических данных: {e}")
+        logger.error(f"❌ Критическая ошибка в load_historical_data_handler: {e}")
         import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
+        logger.error(f"Handler traceback: {traceback.format_exc()}")
         
         return web.json_response({
             "status": "error", 
             "message": str(e),
+            "error_type": type(e).__name__,
             "timestamp": datetime.now().isoformat()
         }, status=500)
 
