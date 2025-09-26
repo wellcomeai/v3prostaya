@@ -14,6 +14,7 @@ Features:
 - Comprehensive error handling with retries
 - Database batch operations for performance
 - Health monitoring and statistics
+- Uses pybit for reliable API communication
 """
 
 import asyncio
@@ -25,6 +26,11 @@ from enum import Enum
 from dataclasses import dataclass, field
 import time
 import math
+import concurrent.futures
+
+# Pybit for Bybit API integration
+from pybit.unified_trading import HTTP
+from pybit.exceptions import InvalidRequestError, UnauthorizedError, FailedRequestError
 
 # Import existing components
 from ..connections import get_connection_manager
@@ -164,7 +170,7 @@ class LoaderConfig:
 
 class HistoricalDataLoader:
     """
-    Production-ready historical data loader
+    Production-ready historical data loader using pybit
     
     Loads historical OHLCV data from Bybit API with:
     - Intelligent pagination and rate limiting
@@ -188,9 +194,9 @@ class HistoricalDataLoader:
         self.connection_manager = None
         self.repository = None
         
-        # API client (we'll create our own minimal client for historical data)
+        # Pybit API client
         self.session = None
-        self.base_url = "https://api-testnet.bybit.com" if config.testnet else "https://api.bybit.com"
+        self.executor = None  # Thread pool for sync pybit calls
         
         # Rate limiting
         self.rate_limiter = asyncio.Semaphore(config.max_concurrent_requests)
@@ -210,7 +216,9 @@ class HistoricalDataLoader:
             "total_data_points": 0,
             "total_database_operations": 0,
             "start_time": None,
-            "last_activity": None
+            "last_activity": None,
+            "pybit_errors": 0,
+            "retry_attempts": 0
         }
         
         logger.info(f"🏗️ HistoricalDataLoader initialized for {config.symbol}")
@@ -218,9 +226,10 @@ class HistoricalDataLoader:
         logger.info(f"   • Max concurrent requests: {config.max_concurrent_requests}")
         logger.info(f"   • Rate limit: {config.requests_per_second_limit} req/sec")
         logger.info(f"   • Batch size: {config.batch_size}")
+        logger.info(f"   • Using pybit unified trading API")
     
     async def initialize(self) -> bool:
-        """Initialize database connections and HTTP session"""
+        """Initialize database connections and pybit session"""
         try:
             self.progress.status = LoadingStatus.INITIALIZING
             
@@ -228,15 +237,16 @@ class HistoricalDataLoader:
             self.connection_manager = await get_connection_manager()
             self.repository = await get_market_data_repository()
             
-            # Initialize HTTP session
-            import aiohttp
-            timeout = aiohttp.ClientTimeout(total=self.config.request_timeout_seconds)
-            self.session = aiohttp.ClientSession(
-                timeout=timeout,
-                headers={
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'BybitHistoricalLoader/1.0'
-                }
+            # Initialize thread pool executor for sync pybit calls
+            self.executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.config.max_concurrent_requests * 2,
+                thread_name_prefix="pybit_loader"
+            )
+            
+            # Initialize pybit session
+            self.session = HTTP(
+                testnet=self.config.testnet,
+                timeout=self.config.request_timeout_seconds
             )
             
             # Test connections
@@ -247,6 +257,8 @@ class HistoricalDataLoader:
             self.stats["start_time"] = datetime.now()
             
             logger.info("✅ HistoricalDataLoader initialized successfully")
+            logger.info(f"   • Pybit session: {'testnet' if self.config.testnet else 'mainnet'}")
+            logger.info(f"   • Thread pool: {self.executor._max_workers} workers")
             return True
             
         except Exception as e:
@@ -266,18 +278,24 @@ class HistoricalDataLoader:
             raise Exception(f"Database connection test failed: {e}")
     
     async def _test_api_connection(self):
-        """Test Bybit API connectivity"""
+        """Test Bybit API connectivity using pybit"""
         try:
-            url = f"{self.base_url}/v5/market/time"
-            async with self.session.get(url) as response:
-                if response.status != 200:
-                    raise Exception(f"API returned status {response.status}")
-                data = await response.json()
-                if data.get('retCode') != 0:
-                    raise Exception(f"API error: {data.get('retMsg')}")
-                logger.info("✅ Bybit API connection verified")
+            # Test with server time endpoint
+            def get_server_time():
+                return self.session.get_server_time()
+            
+            result = await asyncio.get_event_loop().run_in_executor(
+                self.executor, get_server_time
+            )
+            
+            if result.get('retCode') != 0:
+                raise Exception(f"API error: {result.get('retMsg')}")
+                
+            logger.info("✅ Pybit API connection verified")
+            logger.info(f"   • Server time: {result.get('result', {}).get('timeNano', 'unknown')}")
+            
         except Exception as e:
-            raise Exception(f"API connection test failed: {e}")
+            raise Exception(f"Pybit API connection test failed: {e}")
     
     async def load_historical_data(self, 
                                   intervals: List[str],
@@ -403,6 +421,13 @@ class HistoricalDataLoader:
                 "average_requests_per_second": round(self.progress.requests_per_second, 2),
                 "average_candles_per_second": round(self.progress.candles_per_second, 2),
                 "error_count": len(self.progress.errors),
+                "pybit_stats": {
+                    "total_api_calls": self.stats["total_api_calls"],
+                    "successful_calls": self.stats["successful_api_calls"],
+                    "failed_calls": self.stats["failed_api_calls"],
+                    "pybit_errors": self.stats["pybit_errors"],
+                    "retry_attempts": self.stats["retry_attempts"]
+                },
                 "results_by_interval": results
             }
             
@@ -413,6 +438,7 @@ class HistoricalDataLoader:
             logger.info(f"   • Candles loaded: {summary['total_candles_loaded']:,}")
             logger.info(f"   • Candles saved: {summary['total_candles_saved']:,}")
             logger.info(f"   • Performance: {summary['average_requests_per_second']} req/sec")
+            logger.info(f"   • API calls: {self.stats['successful_api_calls']}/{self.stats['total_api_calls']}")
             
             if summary['error_count'] > 0:
                 logger.warning(f"   • Errors encountered: {summary['error_count']}")
@@ -482,64 +508,94 @@ class HistoricalDataLoader:
         while current_time < end_time and not self.should_stop:
             chunk_end = min(current_time + chunk_duration, end_time)
             
-            try:
-                # Apply rate limiting
-                async with self.rate_limiter:
-                    await self._enforce_rate_limit()
-                    
-                    # Make API request
-                    chunk_candles = await self._fetch_candles_chunk(
-                        interval=interval,
-                        start_time=current_time,
-                        end_time=chunk_end
-                    )
-                    
-                    requests_made += 1
-                    self.progress.completed_requests += 1
-                    self.stats["successful_api_calls"] += 1
-                    
-                    if chunk_candles:
-                        candles_loaded += len(chunk_candles)
-                        self.progress.total_candles_loaded += len(chunk_candles)
+            retry_count = 0
+            chunk_success = False
+            
+            while retry_count <= self.config.max_retries_per_request and not chunk_success:
+                try:
+                    # Apply rate limiting
+                    async with self.rate_limiter:
+                        await self._enforce_rate_limit()
                         
-                        # Save to database in batches
-                        saved_count = await self._save_candles_batch(chunk_candles)
-                        candles_saved += saved_count
-                        self.progress.total_candles_saved += saved_count
+                        # Make API request using pybit
+                        chunk_candles = await self._fetch_candles_chunk(
+                            interval=interval,
+                            start_time=current_time,
+                            end_time=chunk_end
+                        )
                         
-                        if len(chunk_candles) > saved_count:
-                            self.progress.duplicates_skipped += (len(chunk_candles) - saved_count)
+                        requests_made += 1
+                        self.progress.completed_requests += 1
+                        self.stats["successful_api_calls"] += 1
+                        chunk_success = True
+                        
+                        if chunk_candles:
+                            candles_loaded += len(chunk_candles)
+                            self.progress.total_candles_loaded += len(chunk_candles)
+                            
+                            # Save to database in batches
+                            saved_count = await self._save_candles_batch(chunk_candles)
+                            candles_saved += saved_count
+                            self.progress.total_candles_saved += saved_count
+                            
+                            if len(chunk_candles) > saved_count:
+                                self.progress.duplicates_skipped += (len(chunk_candles) - saved_count)
+                        
+                        # Update performance metrics
+                        self._update_performance_metrics()
+                        
+                        # Log progress periodically
+                        if requests_made % self.config.progress_update_interval == 0:
+                            progress_pct = self.progress.get_overall_progress()
+                            logger.info(f"   📈 Progress: {progress_pct:.1f}% "
+                                      f"(loaded {candles_loaded:,} candles for {interval})")
+                
+                except (InvalidRequestError, UnauthorizedError, FailedRequestError) as e:
+                    # Pybit specific errors
+                    self.stats["pybit_errors"] += 1
+                    self.stats["retry_attempts"] += 1
+                    retry_count += 1
                     
-                    # Update performance metrics
-                    self._update_performance_metrics()
+                    error_msg = f"Pybit API error for {interval} data at {current_time.date()}: {e}"
+                    logger.error(f"❌ {error_msg}")
                     
-                    # Log progress periodically
-                    if requests_made % self.config.progress_update_interval == 0:
-                        progress_pct = self.progress.get_overall_progress()
-                        logger.info(f"   📈 Progress: {progress_pct:.1f}% "
-                                  f"(loaded {candles_loaded:,} candles for {interval})")
-                
-            except Exception as e:
-                errors += 1
-                self.progress.failed_requests += 1
-                self.stats["failed_api_calls"] += 1
-                
-                error_msg = f"Failed to fetch {interval} data for {current_time.date()}: {e}"
-                logger.error(f"❌ {error_msg}")
-                self.progress.add_error(error_msg, {
-                    "interval": interval,
-                    "start_time": current_time.isoformat(),
-                    "end_time": chunk_end.isoformat()
-                })
-                
-                # Retry logic
-                if errors <= self.config.max_retries_per_request:
-                    logger.info(f"🔄 Retrying in {self.config.retry_delay_seconds}s...")
-                    await asyncio.sleep(self.config.retry_delay_seconds)
-                    continue
-                else:
-                    logger.error(f"💥 Max retries exceeded for {interval} chunk")
-                    # Skip this chunk and continue
+                    if retry_count <= self.config.max_retries_per_request:
+                        wait_time = self.config.retry_delay_seconds * retry_count
+                        logger.info(f"🔄 Retrying in {wait_time}s... (attempt {retry_count})")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        errors += 1
+                        self.progress.failed_requests += 1
+                        self.stats["failed_api_calls"] += 1
+                        self.progress.add_error(error_msg, {
+                            "interval": interval,
+                            "start_time": current_time.isoformat(),
+                            "end_time": chunk_end.isoformat(),
+                            "retry_count": retry_count
+                        })
+                        
+                except Exception as e:
+                    # General errors
+                    self.stats["retry_attempts"] += 1
+                    retry_count += 1
+                    
+                    error_msg = f"Failed to fetch {interval} data for {current_time.date()}: {e}"
+                    logger.error(f"❌ {error_msg}")
+                    
+                    if retry_count <= self.config.max_retries_per_request:
+                        wait_time = self.config.retry_delay_seconds * retry_count
+                        logger.info(f"🔄 Retrying in {wait_time}s... (attempt {retry_count})")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        errors += 1
+                        self.progress.failed_requests += 1
+                        self.stats["failed_api_calls"] += 1
+                        self.progress.add_error(error_msg, {
+                            "interval": interval,
+                            "start_time": current_time.isoformat(),
+                            "end_time": chunk_end.isoformat(),
+                            "retry_count": retry_count
+                        })
             
             # Move to next time chunk
             current_time = chunk_end
@@ -562,7 +618,7 @@ class HistoricalDataLoader:
     async def _fetch_candles_chunk(self, interval: str, 
                                  start_time: datetime, end_time: datetime) -> List[MarketDataCandle]:
         """
-        Fetch a chunk of candles from Bybit API
+        Fetch a chunk of candles from Bybit API using pybit
         
         Args:
             interval: Candle interval
@@ -576,30 +632,32 @@ class HistoricalDataLoader:
         start_ms = int(start_time.timestamp() * 1000)
         end_ms = int(end_time.timestamp() * 1000)
         
-        params = {
-            'category': 'linear',  # Derivatives
-            'symbol': self.config.symbol,
-            'interval': interval,
-            'start': start_ms,
-            'end': end_ms,
-            'limit': 1000  # Max limit
-        }
+        def fetch_klines():
+            """Sync function for pybit call"""
+            return self.session.get_kline(
+                category='linear',
+                symbol=self.config.symbol,
+                interval=interval,
+                start=start_ms,
+                end=end_ms,
+                limit=1000
+            )
         
-        url = f"{self.base_url}/v5/market/kline"
-        
-        async with self.session.get(url, params=params) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                raise Exception(f"HTTP {response.status}: {error_text}")
+        try:
+            # Execute pybit call in thread pool
+            result = await asyncio.get_event_loop().run_in_executor(
+                self.executor, fetch_klines
+            )
             
-            data = await response.json()
+            self.stats["total_api_calls"] += 1
             
-            if data.get('retCode') != 0:
-                error_msg = data.get('retMsg', 'Unknown API error')
-                raise Exception(f"Bybit API error: {error_msg}")
+            # Check pybit response
+            if result.get('retCode') != 0:
+                error_msg = result.get('retMsg', 'Unknown pybit API error')
+                raise Exception(f"Pybit API error: {error_msg}")
             
-            # Parse candles
-            raw_candles = data.get('result', {}).get('list', [])
+            # Parse candles from pybit response
+            raw_candles = result.get('result', {}).get('list', [])
             
             candles = []
             for raw_candle in raw_candles:
@@ -618,6 +676,10 @@ class HistoricalDataLoader:
             self.stats["last_activity"] = datetime.now()
             
             return candles
+            
+        except Exception as e:
+            self.stats["failed_api_calls"] += 1
+            raise Exception(f"Failed to fetch candles via pybit: {e}")
     
     async def _save_candles_batch(self, candles: List[MarketDataCandle]) -> int:
         """
@@ -641,7 +703,7 @@ class HistoricalDataLoader:
             
             self.stats["total_database_operations"] += 1
             
-            # Return total affected rows (Bybit API handles conflicts via upsert)
+            # Return total affected rows
             return inserted_count + updated_count
             
         except Exception as e:
@@ -699,7 +761,12 @@ class HistoricalDataLoader:
             "current_status": self.progress.status.value,
             "success_rate": (
                 (self.stats["successful_api_calls"] / max(1, self.stats["total_api_calls"])) * 100
-            ) if self.stats["total_api_calls"] > 0 else 100
+            ) if self.stats["total_api_calls"] > 0 else 100,
+            "pybit_client": {
+                "testnet": self.config.testnet,
+                "timeout": self.config.request_timeout_seconds,
+                "thread_pool_workers": self.executor._max_workers if self.executor else 0
+            }
         }
     
     async def close(self):
@@ -710,9 +777,13 @@ class HistoricalDataLoader:
                 # Give some time for graceful shutdown
                 await asyncio.sleep(2)
             
-            if self.session and not self.session.closed:
-                await self.session.close()
-                logger.info("✅ HTTP session closed")
+            # Close thread pool executor
+            if self.executor:
+                self.executor.shutdown(wait=True)
+                logger.info("✅ Thread pool executor closed")
+            
+            # Pybit session doesn't need explicit closing
+            self.session = None
             
             self.is_initialized = False
             logger.info("✅ HistoricalDataLoader closed successfully")
@@ -733,14 +804,16 @@ class HistoricalDataLoader:
         """String representation"""
         return (f"HistoricalDataLoader(symbol={self.config.symbol}, "
                 f"status={self.progress.status.value}, "
-                f"loaded={self.progress.total_candles_loaded:,})")
+                f"loaded={self.progress.total_candles_loaded:,}, "
+                f"pybit={'testnet' if self.config.testnet else 'mainnet'})")
     
     def __repr__(self):
         """Detailed representation for debugging"""
         return (f"HistoricalDataLoader(symbol='{self.config.symbol}', "
                 f"testnet={self.config.testnet}, "
                 f"max_concurrent={self.config.max_concurrent_requests}, "
-                f"batch_size={self.config.batch_size})")
+                f"batch_size={self.config.batch_size}, "
+                f"pybit_session={'active' if self.session else 'inactive'})")
 
 
 # Export main components
