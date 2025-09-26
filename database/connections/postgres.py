@@ -575,12 +575,33 @@ class PostgreSQLManager:
             logger.error(f"Failed to execute migration {migration_name}: {e}")
             return False
     
+    def _serialize_datetime_objects(self, obj):
+        """
+        Recursively serialize datetime objects to ISO strings
+        
+        Args:
+            obj: Object that may contain datetime instances
+            
+        Returns:
+            Object with datetime instances converted to strings
+        """
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {key: self._serialize_datetime_objects(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._serialize_datetime_objects(item) for item in obj]
+        elif isinstance(obj, tuple):
+            return tuple(self._serialize_datetime_objects(item) for item in obj)
+        else:
+            return obj
+    
     async def get_health_status(self) -> Dict[str, Any]:
         """
         Get comprehensive database health status
         
         Returns:
-            dict: Health status information
+            dict: Health status information (JSON serializable)
         """
         health_status = {
             "healthy": self.is_healthy,
@@ -611,10 +632,12 @@ class PostgreSQLManager:
                 "consecutive_failures": self.consecutive_failures
             })
             
-            # Performance statistics
+            # Performance statistics - serialize all datetime objects
             uptime_seconds = (datetime.now() - self.stats["start_time"]).total_seconds()
+            serialized_stats = self._serialize_datetime_objects(self.stats.copy())
+            
             health_status["performance"] = {
-                **self.stats,
+                **serialized_stats,
                 "uptime_seconds": uptime_seconds,
                 "queries_per_second": self.stats["queries_executed"] / uptime_seconds if uptime_seconds > 0 else 0,
                 "error_rate": (self.stats["query_errors"] / self.stats["queries_executed"] * 100) if self.stats["queries_executed"] > 0 else 0
@@ -635,7 +658,8 @@ class PostgreSQLManager:
             
             logger.error(f"Health check failed: {e}")
         
-        self.stats["last_health_check"] = datetime.now()
+        # Update last health check timestamp (already serialized)
+        self.stats["last_health_check"] = datetime.now().isoformat()
         return health_status
     
     async def close(self):
@@ -660,6 +684,30 @@ class PostgreSQLManager:
                 self.pool = None
                 self.is_initialized = False
                 self.is_healthy = False
+    
+    def get_serializable_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics in JSON-serializable format
+        
+        Returns:
+            dict: Statistics with datetime objects converted to strings
+        """
+        uptime = None
+        if self.stats["start_time"]:
+            uptime = datetime.now() - self.stats["start_time"]
+        
+        serialized_stats = self._serialize_datetime_objects(self.stats.copy())
+        
+        return {
+            **serialized_stats,
+            "uptime": str(uptime).split('.')[0] if uptime else None,
+            "is_initialized": self.is_initialized,
+            "is_healthy": self.is_healthy,
+            "success_rate": (
+                (self.stats["queries_executed"] - self.stats["query_errors"]) / 
+                max(1, self.stats["queries_executed"])
+            ) * 100 if self.stats["queries_executed"] > 0 else 100
+        }
     
     def __repr__(self) -> str:
         """String representation for debugging"""
