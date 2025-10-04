@@ -1,0 +1,29 @@
+# Telegram Bot
+aiogram>=3.3.0
+
+# Bybit API
+pybit>=5.11.0
+
+# Дополнительные зависимости для pybit
+requests>=2.22.0
+websocket-client==1.5.0
+pycryptodome==3.20.0
+
+# OpenAI API
+openai>=1.0.0
+
+# Конфигурация
+python-dotenv>=1.0.0
+
+# Асинхронность
+aiohttp>=3.8.0
+
+# Логирование и утилиты
+colorlog>=6.7.0
+# Database
+asyncpg>=0.29.0
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+alembic>=1.13.0
+plotly>=5.18.0
+yfinance>=0.2.0
