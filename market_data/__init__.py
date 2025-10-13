@@ -6,6 +6,8 @@
 - YFinance WebSocket для фьючерсов CME в реальном времени
 - REST API для исторических данных
 - Менеджер для управления всеми источниками данных
+- Агрегатор свечей для сохранения WebSocket данных в БД
+- Сервис синхронизации исторических свечей
 """
 
 # ========== BYBIT ПРОВАЙДЕРЫ ==========
@@ -18,11 +20,15 @@ from .yfinance_websocket_provider import (
     RealtimeFuturesData
 )
 
+# ========== 🆕 CANDLE ОБРАБОТКА ==========
+from .candle_aggregator import CandleAggregator, CandleBuilder
+from .candle_sync_service import CandleSyncService, SyncConfig
+
 # ========== МЕНЕДЖЕР И МОДЕЛИ ДАННЫХ ==========
 from .market_data_manager import (
     MarketDataManager,
     MarketDataSnapshot,
-    FuturesSnapshot,  # 🆕 Снимок данных фьючерса
+    FuturesSnapshot,
     DataSourceType,
     HealthStatus
 )
@@ -47,10 +53,16 @@ __all__ = [
     "YFinanceWebSocketProvider",
     "RealtimeFuturesData",
     
+    # 🆕 Candle обработка
+    "CandleAggregator",
+    "CandleBuilder",
+    "CandleSyncService", 
+    "SyncConfig",
+    
     # Менеджер и снимки данных
     "MarketDataManager",
     "MarketDataSnapshot",
-    "FuturesSnapshot",  # 🆕 Снимок фьючерса
+    "FuturesSnapshot",
     
     # Типы и перечисления
     "DataSourceType",
@@ -62,9 +74,9 @@ __all__ = [
 
 
 # ========== ИНФОРМАЦИЯ О МОДУЛЕ ==========
-__version__ = "2.0.0"  # 🆕 Версия 2.0 с поддержкой YFinance
+__version__ = "2.1.0"  # 🆕 Версия 2.1 с CandleAggregator + CandleSync
 __author__ = "Trading Bot Team"
-__description__ = "Market data providers for crypto (Bybit) and futures (YFinance)"
+__description__ = "Market data providers with real-time aggregation and historical sync"
 
 
 # ========== УДОБНЫЕ АЛИАСЫ ==========
