@@ -5,6 +5,7 @@ Candle Synchronization Service
 - Проверка пропусков при старте
 - Фоновое обновление в реальном времени
 - Догрузка недостающих данных
+- ✅ Поддержка множественных символов
 """
 
 import asyncio
@@ -61,6 +62,7 @@ class CandleSyncService:
     1. Проверка пропусков при старте → догрузка
     2. Фоновое обновление 1m/5m/15m/1h/4h/1d в реальном времени
     3. Мониторинг состояния синхронизации
+    4. ✅ Поддержка множественных символов одновременно
     """
     
     def __init__(self, 
@@ -92,103 +94,126 @@ class CandleSyncService:
             "gaps_filled": 0,
             "candles_synced": 0,
             "sync_errors": 0,
-            "start_time": None
-            # last_sync_{interval} будут добавляться динамически
+            "start_time": None,
+            "symbols_syncing": []  # ✅ Список синхронизируемых символов
+            # last_sync_{symbol}_{interval} будут добавляться динамически
         }
         
         logger.info("🔄 CandleSyncService инициализирован")
     
-    async def start(self, symbol: str = "BTCUSDT") -> bool:
+    async def start(self, symbols: List[str] = None) -> bool:
         """
-        Запуск сервиса синхронизации
+        Запуск сервиса синхронизации для МНОЖЕСТВЕННЫХ символов
+        
+        Args:
+            symbols: Список символов для синхронизации (например, ["BTCUSDT", "ETHUSDT"])
+                    Если None, используется ["BTCUSDT"] по умолчанию
         
         Что делает:
-        1. Проверяет пропуски при старте
+        1. Проверяет пропуски для КАЖДОГО символа
         2. Догружает если нужно
-        3. Запускает фоновые задачи обновления
+        3. Запускает фоновые задачи обновления для ВСЕХ символов
+        
+        Returns:
+            True если хотя бы один символ запущен успешно
         """
+        if symbols is None:
+            symbols = ["BTCUSDT"]
+        
         try:
-            logger.info(f"🚀 Запуск синхронизации для {symbol}")
+            logger.info(f"🚀 Запуск синхронизации для {len(symbols)} символов: {', '.join(symbols)}")
             self.stats["start_time"] = datetime.now()
+            self.stats["symbols_syncing"] = symbols
             
-            # Шаг 1: Проверка и заполнение пропусков
+            # Шаг 1: Проверка и заполнение пропусков для КАЖДОГО символа
             if self.config.check_gaps_on_start:
-                await self._check_and_fill_gaps(symbol)
+                await self._check_and_fill_gaps(symbols)
             
-            # Шаг 2: Запуск фоновых задач
+            # Шаг 2: Запуск фоновых задач для ВСЕХ символов
             self.is_running = True
-            await self._start_sync_tasks(symbol)
+            await self._start_sync_tasks(symbols)
             
-            logger.info("✅ Синхронизация запущена успешно")
+            logger.info(f"✅ Синхронизация запущена для {len(symbols)} символов")
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка запуска синхронизации: {e}")
+            logger.error(traceback.format_exc())
             return False
     
-    async def _check_and_fill_gaps(self, symbol: str):
+    async def _check_and_fill_gaps(self, symbols: List[str]):
         """
-        Проверка и заполнение пропусков в данных
+        Проверка и заполнение пропусков для МНОЖЕСТВЕННЫХ символов
         
-        Зачем: При старте бота догрузить недостающие дни
+        Args:
+            symbols: Список символов для проверки
         """
         try:
-            logger.info("🔍 Проверка пропусков в данных...")
+            logger.info(f"🔍 Проверка пропусков для {len(symbols)} символов...")
             
             now = datetime.now(timezone.utc)
-            gaps_to_fill = []
+            all_gaps_to_fill = []
             
-            # Проверяем каждый интервал
-            for interval in self.config.intervals_to_sync:
-                gap_info = await self.repository.check_data_gaps(
-                    symbol=symbol,
-                    interval=interval,
-                    expected_end=now
-                )
+            # Проверяем КАЖДЫЙ символ
+            for symbol in symbols:
+                logger.info(f"📊 Проверка {symbol}...")
                 
-                if gap_info and gap_info.get("has_gap"):
-                    gaps_to_fill.append((interval, gap_info))
-                    self.stats["gaps_found"] += 1
+                # Проверяем каждый интервал для этого символа
+                for interval in self.config.intervals_to_sync:
+                    gap_info = await self.repository.check_data_gaps(
+                        symbol=symbol,
+                        interval=interval,
+                        expected_end=now
+                    )
                     
-                    missing = gap_info.get("missing_candles", "unknown")
-                    logger.warning(f"⚠️ Пропуск найден: {interval} - {missing} свечей")
+                    if gap_info and gap_info.get("has_gap"):
+                        all_gaps_to_fill.append((symbol, interval, gap_info))
+                        self.stats["gaps_found"] += 1
+                        
+                        missing = gap_info.get("missing_candles", "unknown")
+                        logger.warning(f"⚠️ Пропуск найден [{symbol}] {interval}: {missing} свечей")
             
-            # Заполняем пропуски
-            if gaps_to_fill:
-                await self._fill_gaps(symbol, gaps_to_fill)
+            # Заполняем все найденные пропуски
+            if all_gaps_to_fill:
+                logger.info(f"📥 Найдено {len(all_gaps_to_fill)} пропусков, начинаю заполнение...")
+                await self._fill_gaps(all_gaps_to_fill)
             else:
-                logger.info("✅ Пропусков не найдено, данные актуальны")
+                logger.info(f"✅ Пропусков не найдено для {len(symbols)} символов, данные актуальны")
                 
         except Exception as e:
             logger.error(f"❌ Ошибка проверки пропусков: {e}")
+            logger.error(traceback.format_exc())
     
-    async def _fill_gaps(self, symbol: str, gaps: List[tuple]):
+    async def _fill_gaps(self, gaps: List[tuple]):
         """
-        Заполнение найденных пропусков
+        Заполнение найденных пропусков для множественных символов
         
-        Зачем: Догрузить недостающие данные через REST API
+        Args:
+            gaps: Список кортежей (symbol, interval, gap_info)
         """
         try:
             logger.info(f"📥 Заполнение {len(gaps)} пропусков...")
             
-            for interval, gap_info in gaps:
+            for symbol, interval, gap_info in gaps:
                 gap_start = gap_info.get("gap_start")
                 gap_end = gap_info.get("gap_end")
                 missing_candles = gap_info.get("missing_candles")
                 
-                # Всегда используем REST API (он умеет делать несколько запросов)
-                logger.info(f"🌐 Загрузка {missing_candles} свечей через REST API")
+                logger.info(f"🔄 [{symbol}] {interval}: загрузка {missing_candles} свечей...")
+                
+                # Используем REST API для загрузки
                 await self._fill_gap_with_rest(symbol, interval, gap_start, gap_end)
                 
                 self.stats["gaps_filled"] += 1
                 
         except Exception as e:
             logger.error(f"❌ Ошибка заполнения пропусков: {e}")
+            logger.error(traceback.format_exc())
             self.stats["sync_errors"] += 1
     
     async def _fill_gap_with_rest(self, symbol: str, interval: str, 
                                   start: datetime, end: datetime):
-        """Заполнение небольшого пропуска через REST API"""
+        """Заполнение пропуска через REST API"""
         try:
             # Конвертируем interval в формат Bybit
             interval_map = {
@@ -202,7 +227,7 @@ class CandleSyncService:
             
             bybit_interval = interval_map.get(interval, "60")
             
-            logger.info(f"📥 Заполнение пропуска {symbol} {interval}: {start} → {end}")
+            logger.info(f"📥 Заполнение пропуска [{symbol}] {interval}: {start} → {end}")
             
             # Импортируем модели
             from database.models.market_data import CandleInterval, MarketDataCandle
@@ -217,7 +242,7 @@ class CandleSyncService:
             candles_per_request = 200
             num_requests = (total_candles // candles_per_request) + 1
             
-            logger.info(f"📊 Загружаю ~{total_candles} свечей за {num_requests} запросов")
+            logger.info(f"📊 [{symbol}] Загружаю ~{total_candles} свечей за {num_requests} запросов")
             
             all_candles = []
             current_end = end
@@ -232,7 +257,7 @@ class CandleSyncService:
                 )
                 
                 if not kline_response.get('result', {}).get('list'):
-                    logger.warning(f"⚠️ Нет данных в ответе на запрос #{i+1}")
+                    logger.warning(f"⚠️ [{symbol}] Нет данных в ответе на запрос #{i+1}")
                     break
                 
                 # Парсим свечи
@@ -250,30 +275,30 @@ class CandleSyncService:
                             all_candles.append(candle)
                             
                     except Exception as e:
-                        logger.error(f"❌ Ошибка парсинга свечи: {e}")
+                        logger.error(f"❌ [{symbol}] Ошибка парсинга свечи: {e}")
                         continue
                 
                 # Если получили самые старые данные
                 oldest_candle_time = datetime.fromtimestamp(int(raw_candles[-1][0]) / 1000, tz=timezone.utc)
                 if oldest_candle_time <= start:
-                    logger.info(f"✅ Достигнута начальная дата {start}")
+                    logger.info(f"✅ [{symbol}] Достигнута начальная дата {start}")
                     break
                 
                 # Небольшая задержка между запросами
                 await asyncio.sleep(0.2)
                 
-                logger.info(f"📊 Запрос {i+1}/{num_requests}: получено {len(raw_candles)} свечей")
+                logger.debug(f"📊 [{symbol}] Запрос {i+1}/{num_requests}: получено {len(raw_candles)} свечей")
             
             # Сохраняем в БД батчем
             if all_candles:
                 inserted, updated = await self.repository.bulk_insert_candles(all_candles)
                 self.stats["candles_synced"] += inserted + updated
-                logger.info(f"✅ Загружено {len(all_candles)} свечей ({inserted} новых, {updated} обновлено)")
+                logger.info(f"✅ [{symbol}] Загружено {len(all_candles)} свечей ({inserted} новых, {updated} обновлено)")
             else:
-                logger.warning(f"⚠️ Не получено ни одной свечи для заполнения пропуска")
+                logger.warning(f"⚠️ [{symbol}] Не получено ни одной свечи для заполнения пропуска")
                 
         except Exception as e:
-            logger.error(f"❌ Ошибка загрузки через REST: {e}")
+            logger.error(f"❌ [{symbol}] Ошибка загрузки через REST: {e}")
             logger.error(traceback.format_exc())
             self.stats["sync_errors"] += 1
     
@@ -282,10 +307,10 @@ class CandleSyncService:
         """Заполнение большого пропуска через HistoricalDataLoader"""
         try:
             if not self.historical_loader:
-                logger.warning("⚠️ HistoricalDataLoader недоступен, пропускаю")
+                logger.warning(f"⚠️ [{symbol}] HistoricalDataLoader недоступен, пропускаю")
                 return
             
-            logger.info(f"📦 Загрузка через HistoricalDataLoader: {start} → {end}")
+            logger.info(f"📦 [{symbol}] Загрузка через HistoricalDataLoader: {start} → {end}")
             
             # Используем существующий loader
             result = await self.historical_loader.load_historical_data(
@@ -297,49 +322,60 @@ class CandleSyncService:
             if result.get("success"):
                 candles_loaded = result.get("total_candles_loaded", 0)
                 self.stats["candles_synced"] += candles_loaded
-                logger.info(f"✅ Загружено {candles_loaded} свечей через Loader")
+                logger.info(f"✅ [{symbol}] Загружено {candles_loaded} свечей через Loader")
             else:
-                logger.error("❌ Ошибка загрузки через Loader")
+                logger.error(f"❌ [{symbol}] Ошибка загрузки через Loader")
                 self.stats["sync_errors"] += 1
                 
         except Exception as e:
-            logger.error(f"❌ Ошибка использования Loader: {e}")
+            logger.error(f"❌ [{symbol}] Ошибка использования Loader: {e}")
             self.stats["sync_errors"] += 1
     
-    async def _start_sync_tasks(self, symbol: str):
+    async def _start_sync_tasks(self, symbols: List[str]):
         """
-        Запуск фоновых задач синхронизации
+        Запуск фоновых задач синхронизации для МНОЖЕСТВЕННЫХ символов
         
-        ✅ Динамически создаёт задачи для ВСЕХ интервалов из конфига
+        ✅ Создаёт задачи для КАЖДОГО символа и КАЖДОГО интервала
+        
+        Args:
+            symbols: Список символов для синхронизации
         """
         try:
-            logger.info(f"🔄 Запуск синхронизации для интервалов: {self.config.intervals_to_sync}")
+            logger.info(f"🔄 Запуск синхронизации:")
+            logger.info(f"   • Символы: {', '.join(symbols)}")
+            logger.info(f"   • Интервалы: {', '.join(self.config.intervals_to_sync)}")
             
-            # Создаём задачу для КАЖДОГО интервала
-            for interval in self.config.intervals_to_sync:
-                # Получаем интервал обновления в секундах
-                sync_interval_seconds = self.config.get_sync_interval_seconds(interval)
-                
-                # Создаём и запускаем задачу
-                task = asyncio.create_task(
-                    self._sync_loop(symbol, interval, sync_interval_seconds)
-                )
-                self.sync_tasks.append(task)
-                
-                logger.info(f"✅ Запущена синхронизация {interval} (каждые {sync_interval_seconds}с)")
+            # Создаём задачу для КАЖДОЙ комбинации символ + интервал
+            for symbol in symbols:
+                for interval in self.config.intervals_to_sync:
+                    # Получаем интервал обновления в секундах
+                    sync_interval_seconds = self.config.get_sync_interval_seconds(interval)
+                    
+                    # Создаём и запускаем задачу
+                    task = asyncio.create_task(
+                        self._sync_loop(symbol, interval, sync_interval_seconds)
+                    )
+                    self.sync_tasks.append(task)
+                    
+                    logger.info(f"✅ Запущена синхронизация [{symbol}] {interval} (каждые {sync_interval_seconds}с)")
             
-            logger.info(f"🎯 Всего запущено {len(self.sync_tasks)} задач синхронизации")
+            total_tasks = len(symbols) * len(self.config.intervals_to_sync)
+            logger.info(f"🎯 Всего запущено {len(self.sync_tasks)} задач синхронизации ({len(symbols)} символов × {len(self.config.intervals_to_sync)} интервалов)")
                 
         except Exception as e:
             logger.error(f"❌ Ошибка запуска задач: {e}")
+            logger.error(traceback.format_exc())
     
     async def _sync_loop(self, symbol: str, interval: str, sleep_seconds: int):
         """
-        Бесконечный цикл синхронизации для конкретного интервала
+        Бесконечный цикл синхронизации для конкретного символа и интервала
         
-        Зачем: Каждые N секунд обновлять свечи через REST API
+        Args:
+            symbol: Символ для синхронизации (например, "BTCUSDT")
+            interval: Интервал (например, "1m")
+            sleep_seconds: Секунды между обновлениями
         """
-        logger.info(f"🔁 Запущен цикл синхронизации {interval} (каждые {sleep_seconds}с)")
+        logger.info(f"🔁 Запущен цикл синхронизации [{symbol}] {interval} (каждые {sleep_seconds}с)")
         
         while self.is_running:
             try:
@@ -347,21 +383,21 @@ class CandleSyncService:
                 await self._sync_latest_candle(symbol, interval)
                 
                 # Обновляем статистику динамически
-                self.stats[f"last_sync_{interval}"] = datetime.now()
+                self.stats[f"last_sync_{symbol}_{interval}"] = datetime.now()
                 
                 # Ждем до следующего обновления
                 await asyncio.sleep(sleep_seconds)
                 
             except asyncio.CancelledError:
-                logger.info(f"🛑 Цикл синхронизации {interval} остановлен")
+                logger.info(f"🛑 Цикл синхронизации [{symbol}] {interval} остановлен")
                 break
             except Exception as e:
-                logger.error(f"❌ Ошибка в цикле синхронизации {interval}: {e}")
+                logger.error(f"❌ Ошибка в цикле синхронизации [{symbol}] {interval}: {e}")
                 self.stats["sync_errors"] += 1
                 await asyncio.sleep(60)  # При ошибке ждем минуту
     
     async def _sync_latest_candle(self, symbol: str, interval: str):
-        """Синхронизация последней свечи"""
+        """Синхронизация последней свечи для конкретного символа"""
         try:
             # Конвертируем interval
             interval_map = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "D"}
@@ -389,10 +425,10 @@ class CandleSyncService:
             success = await self.repository.insert_candle(candle)
             if success:
                 self.stats["candles_synced"] += 1
-                logger.debug(f"✅ Обновлена свеча {interval}: ${candle.close_price}")
+                logger.debug(f"✅ Обновлена свеча [{symbol}] {interval}: ${candle.close_price}")
                 
         except Exception as e:
-            logger.error(f"❌ Ошибка синхронизации свечи {interval}: {e}")
+            logger.error(f"❌ Ошибка синхронизации свечи [{symbol}] {interval}: {e}")
             self.stats["sync_errors"] += 1
     
     async def stop(self):
