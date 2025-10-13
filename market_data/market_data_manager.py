@@ -298,7 +298,7 @@ class MarketDataManager:
                     
                     # Создаем конфигурацию
                     sync_config = SyncConfig(
-                        intervals_to_sync=["1m", "1h", "1d"],
+                        intervals_to_sync=["1m", "5m", "15m", "1h", "1d"],
                         check_gaps_on_start=True,
                         max_gap_days=30
                     )
