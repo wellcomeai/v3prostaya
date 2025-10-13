@@ -116,7 +116,7 @@ class CandleBuilder:
                 volume=self.volume,
                 quote_volume=None,  # Не доступно из WebSocket тиков
                 number_of_trades=self.tick_count,
-                data_source="bybit_websocket",
+                data_source="bybit",  # ✅ ИСПРАВЛЕНО: было "bybit_websocket"
                 raw_data=None
             )
             
