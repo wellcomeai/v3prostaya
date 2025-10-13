@@ -38,10 +38,10 @@ class RealtimeMarketData:
             "last_trades_update": None
         }
         
-        # ✅ НОВОЕ: Отслеживание времени для периодического логирования
+        # Отслеживание времени для периодического логирования
         self.last_summary_log = None
         
-        logger.info(f"📊 RealtimeMarketData инициализирован (max_history={max_history})")
+        logger.debug(f"📊 RealtimeMarketData инициализирован (max_history={max_history})")
         
     def update_ticker(self, ticker_data: dict):
         """Обновляет данные тикера"""
@@ -61,12 +61,12 @@ class RealtimeMarketData:
                 self.volumes.append(volume)  
                 self.timestamps.append(timestamp)
                 
-                # ✅ ОПТИМИЗИРОВАНО: Периодическое логирование раз в минуту
+                # Периодическое логирование раз в минуту
                 if self.last_summary_log is None or (datetime.now() - self.last_summary_log).total_seconds() > 60:
-                    logger.info(f"📊 Ticker обновлен: ${price:,.2f}, Vol: {volume:,.0f} BTC, Updates: {self.stats['ticker_updates']}")
+                    logger.info(f"📊 Ticker обновлен: ${price:,.2f}, Vol: {volume:,.0f}, Updates: {self.stats['ticker_updates']}")
                     self.last_summary_log = datetime.now()
                 else:
-                    logger.debug(f"📊 Ticker обновлен: ${price:,.2f}, Vol: {volume:,.0f} BTC, Updates: {self.stats['ticker_updates']}")
+                    logger.debug(f"📊 Ticker обновлен: ${price:,.2f}, Vol: {volume:,.0f}, Updates: {self.stats['ticker_updates']}")
             else:
                 logger.warning(f"⚠️ Получена невалидная цена: {price}")
                 
@@ -151,7 +151,7 @@ class RealtimeMarketData:
     def get_volume_24h(self) -> float:
         """Возвращает текущий объем за 24ч"""
         volume = float(self.current_ticker.get('volume24h', 0))
-        logger.debug(f"📦 Объем 24ч: {volume:,.0f} BTC")
+        logger.debug(f"📦 Объем 24ч: {volume:,.0f}")
         return volume
     
     def get_price_change_24h(self) -> float:
@@ -239,28 +239,45 @@ class RealtimeMarketData:
 
 
 class WebSocketProvider:
-    """Провайдер WebSocket данных от Bybit с расширенной отладкой"""
+    """
+    🆕 Провайдер WebSocket данных от Bybit с поддержкой МНОЖЕСТВЕННЫХ СИМВОЛОВ
     
-    def __init__(self, symbol: str = None, testnet: bool = None):
+    Поддерживает подписку на несколько символов одновременно в одном WebSocket соединении.
+    Все 15 криптопар будут получать данные и сохраняться в БД.
+    """
+    
+    def __init__(self, symbols: List[str] = None, testnet: bool = None):
         """
         Инициализация WebSocket провайдера
         
         Args:
-            symbol: Торговый символ (по умолчанию из Config)
+            symbols: Список торговых символов (по умолчанию из Config)
             testnet: Использовать testnet (по умолчанию из Config)
         """
-        self.symbol = symbol or Config.SYMBOL
+        # 🆕 ИЗМЕНЕНО: Поддержка множественных символов
+        if symbols is None:
+            symbols = [Config.SYMBOL]
+        elif isinstance(symbols, str):
+            symbols = [symbols]
+        
+        self.symbols = [s.upper() for s in symbols]
         self.testnet = testnet if testnet is not None else Config.BYBIT_TESTNET
-        self.market_data = RealtimeMarketData()
+        
+        # Данные для каждого символа
+        self.market_data_by_symbol: Dict[str, RealtimeMarketData] = {}
+        for symbol in self.symbols:
+            self.market_data_by_symbol[symbol] = RealtimeMarketData()
+        
         self.ws = None
         self.running = False
         
         # Callback функции для уведомления подписчиков
-        self.ticker_callbacks: List[Callable] = []
-        self.orderbook_callbacks: List[Callable] = []
-        self.trades_callbacks: List[Callable] = []
+        # 🆕 ИЗМЕНЕНО: Callbacks теперь принимают (symbol: str, data: dict/list)
+        self.ticker_callbacks: List[Callable[[str, dict], None]] = []
+        self.orderbook_callbacks: List[Callable[[str, dict], None]] = []
+        self.trades_callbacks: List[Callable[[str, list], None]] = []
         
-        # ✅ НОВОЕ: Отслеживание времени для периодического логирования WebSocket
+        # Время последнего summary лога
         self.last_summary_log = None
         
         # Статистика подключения
@@ -270,39 +287,57 @@ class WebSocketProvider:
             "connection_failures": 0,
             "messages_received": 0,
             "ticker_messages": 0,
+            "ticker_messages_by_symbol": {s: 0 for s in self.symbols},  # 🆕 По каждому символу
             "orderbook_messages": 0,
+            "orderbook_messages_by_symbol": {s: 0 for s in self.symbols},  # 🆕
             "trades_messages": 0,
+            "trades_messages_by_symbol": {s: 0 for s in self.symbols},  # 🆕
             "unknown_messages": 0,
             "error_messages": 0,
             "last_message_time": None,
             "start_time": None
         }
         
-        logger.info(f"🔌 WebSocketProvider инициализирован: {self.symbol}, testnet={self.testnet}")
+        logger.info(f"🔌 WebSocketProvider инициализирован для {len(self.symbols)} символов: {', '.join(self.symbols)}")
+    
+    def add_ticker_callback(self, callback: Callable[[str, dict], None]):
+        """
+        Добавляет callback для обновлений тикера
         
-    def add_ticker_callback(self, callback: Callable[[dict], None]):
-        """Добавляет callback для обновлений тикера"""
+        Args:
+            callback: Функция с сигнатурой callback(symbol: str, ticker_data: dict)
+        """
         self.ticker_callbacks.append(callback)
         logger.info(f"📝 Добавлен ticker callback ({len(self.ticker_callbacks)} всего)")
         
-    def add_orderbook_callback(self, callback: Callable[[dict], None]):
-        """Добавляет callback для обновлений ордербука"""
+    def add_orderbook_callback(self, callback: Callable[[str, dict], None]):
+        """
+        Добавляет callback для обновлений ордербука
+        
+        Args:
+            callback: Функция с сигнатурой callback(symbol: str, orderbook_data: dict)
+        """
         self.orderbook_callbacks.append(callback)
         logger.info(f"📝 Добавлен orderbook callback ({len(self.orderbook_callbacks)} всего)")
         
-    def add_trades_callback(self, callback: Callable[[list], None]):
-        """Добавляет callback для обновлений трейдов"""
+    def add_trades_callback(self, callback: Callable[[str, list], None]):
+        """
+        Добавляет callback для обновлений трейдов
+        
+        Args:
+            callback: Функция с сигнатурой callback(symbol: str, trades_data: list)
+        """
         self.trades_callbacks.append(callback)
         logger.info(f"📝 Добавлен trades callback ({len(self.trades_callbacks)} всего)")
     
     async def start(self):
-        """Запускает WebSocket подключения"""
+        """Запускает WebSocket подключения для ВСЕХ символов"""
         try:
             self.connection_stats["connection_attempts"] += 1
             self.connection_stats["start_time"] = datetime.now()
             
-            logger.info(f"🚀 Запуск WebSocket провайдера для {self.symbol}...")
-            logger.info(f"🔧 Настройки: testnet={self.testnet}, symbol={self.symbol}")
+            logger.info(f"🚀 Запуск WebSocket провайдера для {len(self.symbols)} символов...")
+            logger.info(f"🔧 Настройки: testnet={self.testnet}, symbols={', '.join(self.symbols)}")
             
             # Создаем WebSocket для linear (USDT перпетуалы)
             logger.info("🔗 Создание WebSocket соединения...")
@@ -311,22 +346,23 @@ class WebSocketProvider:
                 channel_type="linear"
             )
             
-            logger.info("📡 Подписка на потоки данных...")
+            logger.info("📡 Подписка на потоки данных для всех символов...")
             
-            # Подписываемся на нужные потоки с детальным логированием
-            logger.info(f"📊 Подписка на ticker stream: {self.symbol}")
-            self.ws.ticker_stream(self.symbol, self._handle_ticker)
-            
-            logger.info(f"📋 Подписка на orderbook stream: {self.symbol} (50 levels)")
-            self.ws.orderbook_stream(50, self.symbol, self._handle_orderbook)
-            
-            logger.info(f"💰 Подписка на trade stream: {self.symbol}")
-            self.ws.trade_stream(self.symbol, self._handle_trades)
+            # 🆕 ИЗМЕНЕНО: Подписываемся на каждый символ
+            for symbol in self.symbols:
+                logger.info(f"📊 Подписка на ticker stream: {symbol}")
+                self.ws.ticker_stream(symbol, self._handle_ticker)
+                
+                logger.info(f"📋 Подписка на orderbook stream: {symbol} (50 levels)")
+                self.ws.orderbook_stream(50, symbol, self._handle_orderbook)
+                
+                logger.info(f"💰 Подписка на trade stream: {symbol}")
+                self.ws.trade_stream(symbol, self._handle_trades)
             
             self.running = True
             self.connection_stats["successful_connections"] += 1
             
-            logger.info(f"✅ WebSocket провайдер запущен для {self.symbol}")
+            logger.info(f"✅ WebSocket провайдер запущен для {len(self.symbols)} символов")
             logger.info(f"📞 Registered callbacks: ticker={len(self.ticker_callbacks)}, orderbook={len(self.orderbook_callbacks)}, trades={len(self.trades_callbacks)}")
             
         except Exception as e:
@@ -337,7 +373,7 @@ class WebSocketProvider:
             raise
     
     def _handle_ticker(self, message: dict):
-        """Внутренний обработчик обновлений тикера"""
+        """Внутренний обработчик обновлений тикера для МНОЖЕСТВЕННЫХ СИМВОЛОВ"""
         try:
             self.connection_stats["messages_received"] += 1
             self.connection_stats["last_message_time"] = datetime.now()
@@ -351,28 +387,50 @@ class WebSocketProvider:
                 self.connection_stats["ticker_messages"] += 1
                 data = message['data']
                 
-                # ✅ ОПТИМИЗИРОВАНО: Периодическое логирование раз в минуту вместо каждого сообщения
+                # 🆕 ИЗМЕНЕНО: Извлекаем символ из данных
+                symbol = data.get('symbol', '').upper()
+                
+                if not symbol:
+                    logger.warning(f"⚠️ Ticker без символа: {data}")
+                    return
+                
+                if symbol not in self.symbols:
+                    logger.debug(f"🔍 Игнорируем символ {symbol} (не в подписке)")
+                    return
+                
+                # Обновляем статистику по символу
+                self.connection_stats["ticker_messages_by_symbol"][symbol] += 1
+                
+                # Периодическое логирование раз в минуту
                 if self.last_summary_log is None or (datetime.now() - self.last_summary_log).total_seconds() > 60:
-                    logger.info(f"📊 WebSocket активен: {self.connection_stats['ticker_messages']} ticker updates, цена: ${float(data.get('lastPrice', 0)):,.2f}")
+                    total_msgs = sum(self.connection_stats["ticker_messages_by_symbol"].values())
+                    logger.info(f"📊 WebSocket активен: {total_msgs} ticker updates для {len(self.symbols)} символов")
+                    for sym in self.symbols:
+                        count = self.connection_stats["ticker_messages_by_symbol"][sym]
+                        if count > 0:
+                            market_data = self.market_data_by_symbol.get(sym)
+                            price = market_data.get_current_price() if market_data else 0
+                            logger.info(f"   • {sym}: {count} updates, цена: ${price:,.2f}")
                     self.last_summary_log = datetime.now()
                 else:
-                    logger.debug(f"📊 Ticker data получены: цена ${float(data.get('lastPrice', 0)):,.2f}")
+                    logger.debug(f"📊 Ticker data для {symbol}: цена ${float(data.get('lastPrice', 0)):,.2f}")
                 
-                # Обновляем внутренние данные
-                self.market_data.update_ticker(data)
+                # Обновляем внутренние данные для конкретного символа
+                if symbol in self.market_data_by_symbol:
+                    self.market_data_by_symbol[symbol].update_ticker(data)
                 
-                # Уведомляем всех подписчиков
-                logger.debug(f"📞 Вызов {len(self.ticker_callbacks)} ticker callbacks...")
+                # 🆕 ИЗМЕНЕНО: Уведомляем всех подписчиков с передачей символа
+                logger.debug(f"📞 Вызов {len(self.ticker_callbacks)} ticker callbacks для {symbol}...")
                 for i, callback in enumerate(self.ticker_callbacks):
                     try:
-                        logger.debug(f"📞 Вызов ticker callback #{i}")
-                        callback(data)
-                        logger.debug(f"✅ Ticker callback #{i} выполнен")
+                        logger.debug(f"📞 Вызов ticker callback #{i} для {symbol}")
+                        callback(symbol, data)  # 🆕 Передаем symbol + data
+                        logger.debug(f"✅ Ticker callback #{i} выполнен для {symbol}")
                     except Exception as e:
-                        logger.error(f"❌ Ошибка в ticker callback #{i}: {e}")
+                        logger.error(f"❌ Ошибка в ticker callback #{i} для {symbol}: {e}")
                         logger.error(f"Stack trace: {traceback.format_exc()}")
                 
-                logger.debug(f"✅ Ticker callbacks завершены")
+                logger.debug(f"✅ Ticker callbacks завершены для {symbol}")
                 
             elif msg_type == 'delta':
                 logger.debug(f"📊 Получен ticker delta: {message}")
@@ -390,7 +448,7 @@ class WebSocketProvider:
             logger.error(f"Stack trace: {traceback.format_exc()}")
     
     def _handle_orderbook(self, message: dict):
-        """Внутренний обработчик обновлений ордербука"""
+        """Внутренний обработчик обновлений ордербука для МНОЖЕСТВЕННЫХ СИМВОЛОВ"""
         try:
             self.connection_stats["messages_received"] += 1
             self.connection_stats["last_message_time"] = datetime.now()
@@ -403,19 +461,34 @@ class WebSocketProvider:
                 self.connection_stats["orderbook_messages"] += 1
                 data = message['data']
                 
-                logger.debug(f"📋 Orderbook data: bids={len(data.get('b', []))}, asks={len(data.get('a', []))}")
+                # 🆕 Извлекаем символ
+                symbol = data.get('s', '').upper()
+                
+                if not symbol:
+                    logger.warning(f"⚠️ Orderbook без символа")
+                    return
+                
+                if symbol not in self.symbols:
+                    logger.debug(f"🔍 Игнорируем orderbook для {symbol}")
+                    return
+                
+                # Обновляем статистику по символу
+                self.connection_stats["orderbook_messages_by_symbol"][symbol] += 1
+                
+                logger.debug(f"📋 Orderbook data для {symbol}: bids={len(data.get('b', []))}, asks={len(data.get('a', []))}")
                 
                 # Обновляем внутренние данные
-                self.market_data.update_orderbook(data)
+                if symbol in self.market_data_by_symbol:
+                    self.market_data_by_symbol[symbol].update_orderbook(data)
                 
                 # Уведомляем всех подписчиков
-                logger.debug(f"📞 Вызов {len(self.orderbook_callbacks)} orderbook callbacks...")
+                logger.debug(f"📞 Вызов {len(self.orderbook_callbacks)} orderbook callbacks для {symbol}...")
                 for i, callback in enumerate(self.orderbook_callbacks):
                     try:
-                        callback(data)
-                        logger.debug(f"✅ Orderbook callback #{i} выполнен")
+                        callback(symbol, data)  # 🆕 Передаем symbol + data
+                        logger.debug(f"✅ Orderbook callback #{i} выполнен для {symbol}")
                     except Exception as e:
-                        logger.error(f"❌ Ошибка в orderbook callback #{i}: {e}")
+                        logger.error(f"❌ Ошибка в orderbook callback #{i} для {symbol}: {e}")
                 
             elif msg_type == 'delta':
                 logger.debug(f"📋 Получен orderbook delta")
@@ -432,7 +505,7 @@ class WebSocketProvider:
             logger.error(f"Stack trace: {traceback.format_exc()}")
     
     def _handle_trades(self, message: dict):
-        """Внутренний обработчик обновлений сделок"""
+        """Внутренний обработчик обновлений сделок для МНОЖЕСТВЕННЫХ СИМВОЛОВ"""
         try:
             self.connection_stats["messages_received"] += 1
             self.connection_stats["last_message_time"] = datetime.now()
@@ -445,19 +518,37 @@ class WebSocketProvider:
                 self.connection_stats["trades_messages"] += 1
                 trades = message['data']
                 
-                logger.debug(f"💰 Trades data: {len(trades)} сделок")
+                if not trades or len(trades) == 0:
+                    return
+                
+                # 🆕 Извлекаем символ из первой сделки
+                symbol = trades[0].get('s', '').upper()
+                
+                if not symbol:
+                    logger.warning(f"⚠️ Trades без символа")
+                    return
+                
+                if symbol not in self.symbols:
+                    logger.debug(f"🔍 Игнорируем trades для {symbol}")
+                    return
+                
+                # Обновляем статистику по символу
+                self.connection_stats["trades_messages_by_symbol"][symbol] += 1
+                
+                logger.debug(f"💰 Trades data для {symbol}: {len(trades)} сделок")
                 
                 # Обновляем внутренние данные
-                self.market_data.update_trades(trades)
+                if symbol in self.market_data_by_symbol:
+                    self.market_data_by_symbol[symbol].update_trades(trades)
                 
                 # Уведомляем всех подписчиков
-                logger.debug(f"📞 Вызов {len(self.trades_callbacks)} trades callbacks...")
+                logger.debug(f"📞 Вызов {len(self.trades_callbacks)} trades callbacks для {symbol}...")
                 for i, callback in enumerate(self.trades_callbacks):
                     try:
-                        callback(trades)
-                        logger.debug(f"✅ Trades callback #{i} выполнен")
+                        callback(symbol, trades)  # 🆕 Передаем symbol + trades
+                        logger.debug(f"✅ Trades callback #{i} выполнен для {symbol}")
                     except Exception as e:
-                        logger.error(f"❌ Ошибка в trades callback #{i}: {e}")
+                        logger.error(f"❌ Ошибка в trades callback #{i} для {symbol}: {e}")
                 
             else:
                 self.connection_stats["unknown_messages"] += 1
@@ -469,37 +560,86 @@ class WebSocketProvider:
             logger.error(f"Raw message: {message}")
             logger.error(f"Stack trace: {traceback.format_exc()}")
     
-    def get_market_data(self) -> RealtimeMarketData:
-        """Возвращает объект с рыночными данными"""
-        return self.market_data
+    def get_market_data(self, symbol: str = None) -> RealtimeMarketData:
+        """
+        🆕 ИЗМЕНЕНО: Возвращает объект с рыночными данными для конкретного символа
+        
+        Args:
+            symbol: Символ (если None, возвращает для первого символа)
+            
+        Returns:
+            RealtimeMarketData: Объект с данными для символа
+        """
+        if symbol is None:
+            symbol = self.symbols[0]
+        
+        symbol = symbol.upper()
+        return self.market_data_by_symbol.get(symbol, RealtimeMarketData())
     
-    def get_current_stats(self) -> Dict[str, Any]:
-        """Возвращает текущую статистику рынка"""
+    def get_all_market_data(self) -> Dict[str, RealtimeMarketData]:
+        """
+        🆕 НОВОЕ: Возвращает данные для всех символов
+        
+        Returns:
+            Dict[str, RealtimeMarketData]: Словарь {symbol: market_data}
+        """
+        return self.market_data_by_symbol
+    
+    def get_current_stats(self, symbol: str = None) -> Dict[str, Any]:
+        """
+        🆕 ИЗМЕНЕНО: Возвращает текущую статистику рынка
+        
+        Args:
+            symbol: Символ (если None, возвращает для всех символов)
+            
+        Returns:
+            Dict: Статистика для символа или всех символов
+        """
         try:
-            stats = {
-                "symbol": self.symbol,
-                "current_price": self.market_data.get_current_price(),
-                "price_change_1m": self.market_data.get_price_change(1),
-                "price_change_5m": self.market_data.get_price_change(5),
-                "price_change_24h": self.market_data.get_price_change_24h(),
-                "volume_24h": self.market_data.get_volume_24h(),
-                "volume_analysis": self.market_data.get_volume_analysis(),
-                "orderbook_pressure": self.market_data.get_orderbook_pressure(),
-                "data_points": len(self.market_data.prices),
-                "has_sufficient_data": self.market_data.has_sufficient_data(),
-                "last_update": datetime.now().isoformat(),
-                "connection_stats": self.connection_stats.copy(),
-                "market_data_stats": self.market_data.get_stats()
-            }
-            
-            logger.debug(f"📊 Current stats: price=${stats['current_price']:,.2f}, data_points={stats['data_points']}")
-            return stats
-            
+            if symbol:
+                # Статистика для одного символа
+                symbol = symbol.upper()
+                market_data = self.market_data_by_symbol.get(symbol)
+                
+                if not market_data:
+                    return {"symbol": symbol, "error": "Symbol not found"}
+                
+                return {
+                    "symbol": symbol,
+                    "current_price": market_data.get_current_price(),
+                    "price_change_1m": market_data.get_price_change(1),
+                    "price_change_5m": market_data.get_price_change(5),
+                    "price_change_24h": market_data.get_price_change_24h(),
+                    "volume_24h": market_data.get_volume_24h(),
+                    "volume_analysis": market_data.get_volume_analysis(),
+                    "orderbook_pressure": market_data.get_orderbook_pressure(),
+                    "data_points": len(market_data.prices),
+                    "has_sufficient_data": market_data.has_sufficient_data(),
+                    "last_update": datetime.now().isoformat(),
+                    "connection_stats": {
+                        "ticker_messages": self.connection_stats["ticker_messages_by_symbol"].get(symbol, 0),
+                        "orderbook_messages": self.connection_stats["orderbook_messages_by_symbol"].get(symbol, 0),
+                        "trades_messages": self.connection_stats["trades_messages_by_symbol"].get(symbol, 0)
+                    },
+                    "market_data_stats": market_data.get_stats()
+                }
+            else:
+                # Статистика для всех символов
+                stats_by_symbol = {}
+                for sym in self.symbols:
+                    stats_by_symbol[sym] = self.get_current_stats(sym)
+                
+                return {
+                    "symbols": self.symbols,
+                    "total_symbols": len(self.symbols),
+                    "data_by_symbol": stats_by_symbol,
+                    "connection_stats": self.connection_stats.copy(),
+                    "last_update": datetime.now().isoformat()
+                }
+                
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
             return {
-                "symbol": self.symbol,
-                "current_price": 0,
                 "error": str(e)
             }
     
@@ -515,6 +655,8 @@ class WebSocketProvider:
             
         return {
             **self.connection_stats,
+            "symbols": self.symbols,
+            "total_symbols": len(self.symbols),
             "uptime_seconds": uptime,
             "messages_per_minute": (self.connection_stats["messages_received"] / (uptime / 60)) if uptime and uptime > 0 else 0,
             "is_healthy": self.is_connection_healthy()
@@ -547,43 +689,67 @@ class WebSocketProvider:
             # Логируем финальную статистику
             final_stats = self.get_connection_stats()
             logger.info(f"📊 Финальная статистика WebSocket:")
+            logger.info(f"   • Символов: {len(self.symbols)}")
             logger.info(f"   • Попыток подключения: {final_stats['connection_attempts']}")
             logger.info(f"   • Успешных подключений: {final_stats['successful_connections']}")
             logger.info(f"   • Сообщений получено: {final_stats['messages_received']}")
             logger.info(f"   • Ticker сообщений: {final_stats['ticker_messages']}")
             logger.info(f"   • Orderbook сообщений: {final_stats['orderbook_messages']}")
             logger.info(f"   • Trades сообщений: {final_stats['trades_messages']}")
+            
+            # Статистика по каждому символу
+            for symbol in self.symbols:
+                ticker_msgs = final_stats['ticker_messages_by_symbol'].get(symbol, 0)
+                market_data = self.market_data_by_symbol.get(symbol)
+                data_points = len(market_data.prices) if market_data else 0
+                logger.info(f"   • {symbol}: {ticker_msgs} ticker msgs, {data_points} data points")
+            
             logger.info(f"   • Время работы: {final_stats['uptime_seconds']:.0f} сек")
             
-            logger.info(f"🛑 WebSocket провайдер остановлен для {self.symbol}")
+            logger.info(f"🛑 WebSocket провайдер остановлен для {len(self.symbols)} символов")
             
         except Exception as e:
             logger.error(f"❌ Ошибка остановки WebSocket провайдера: {e}")
     
-    async def wait_for_data(self, timeout: int = 30) -> bool:
+    async def wait_for_data(self, timeout: int = 30, min_symbols: int = None) -> bool:
         """
-        Ожидает получения достаточного количества данных
+        🆕 ИЗМЕНЕНО: Ожидает получения достаточного количества данных для ВСЕХ символов
         
         Args:
             timeout: Таймаут ожидания в секундах
+            min_symbols: Минимальное количество символов с данными (по умолчанию все)
             
         Returns:
-            True если данные получены, False если таймаут
+            bool: True если данные получены, False если таймаут
         """
+        if min_symbols is None:
+            min_symbols = len(self.symbols)
+        
         start_time = datetime.now()
-        logger.info(f"⏳ Ожидание данных (таймаут: {timeout}с)...")
+        logger.info(f"⏳ Ожидание данных для минимум {min_symbols}/{len(self.symbols)} символов (таймаут: {timeout}с)...")
         
         check_interval = 1  # Проверяем каждую секунду
         
         while (datetime.now() - start_time).seconds < timeout:
-            # Проверяем наличие данных
-            has_data = self.market_data.has_sufficient_data()
+            # Считаем символы с достаточными данными
+            symbols_with_data = 0
+            for symbol in self.symbols:
+                market_data = self.market_data_by_symbol[symbol]
+                if market_data.has_sufficient_data(min_data_points=5):
+                    symbols_with_data += 1
+            
             messages_received = self.connection_stats["messages_received"]
             
-            logger.debug(f"📊 Проверка данных: has_data={has_data}, messages={messages_received}")
+            logger.debug(f"📊 Проверка данных: {symbols_with_data}/{len(self.symbols)} символов готовы, messages={messages_received}")
             
-            if has_data and messages_received > 0:
+            if symbols_with_data >= min_symbols and messages_received > 0:
                 logger.info(f"✅ Данные получены за {(datetime.now() - start_time).seconds}с")
+                # Показываем статистику по каждому символу
+                for symbol in self.symbols:
+                    market_data = self.market_data_by_symbol[symbol]
+                    msgs = self.connection_stats["ticker_messages_by_symbol"][symbol]
+                    has_data = "✅" if market_data.has_sufficient_data() else "❌"
+                    logger.info(f"   {has_data} {symbol}: {len(market_data.prices)} точек, {msgs} сообщений, цена ${market_data.get_current_price():,.2f}")
                 return True
                 
             await asyncio.sleep(check_interval)
@@ -591,9 +757,11 @@ class WebSocketProvider:
         logger.warning(f"⏰ Таймаут ожидания данных ({timeout}с)")
         logger.warning(f"📊 Итоговая статистика:")
         logger.warning(f"   • Сообщений получено: {self.connection_stats['messages_received']}")
-        logger.warning(f"   • Ticker сообщений: {self.connection_stats['ticker_messages']}")
-        logger.warning(f"   • Data points: {len(self.market_data.prices)}")
-        logger.warning(f"   • Has sufficient data: {self.market_data.has_sufficient_data()}")
+        for symbol in self.symbols:
+            market_data = self.market_data_by_symbol[symbol]
+            msgs = self.connection_stats["ticker_messages_by_symbol"][symbol]
+            has_data = "✅" if market_data.has_sufficient_data() else "❌"
+            logger.warning(f"   {has_data} {symbol}: {msgs} сообщений, {len(market_data.prices)} точек, достаточно={market_data.has_sufficient_data()}")
             
         return False
     
@@ -601,10 +769,11 @@ class WebSocketProvider:
         """Строковое представление провайдера"""
         status = "Running" if self.running else "Stopped"
         messages = self.connection_stats["messages_received"]
-        return f"WebSocketProvider(symbol={self.symbol}, testnet={self.testnet}, status={status}, messages={messages})"
+        return f"WebSocketProvider(symbols={len(self.symbols)}, status={status}, messages={messages})"
     
     def __repr__(self):
         """Подробное представление для отладки"""
-        return (f"WebSocketProvider(symbol='{self.symbol}', testnet={self.testnet}, "
+        symbols_str = ','.join(self.symbols[:3]) + ('...' if len(self.symbols) > 3 else '')
+        return (f"WebSocketProvider(symbols=[{symbols_str}] ({len(self.symbols)} total), "
                 f"running={self.running}, callbacks=[{len(self.ticker_callbacks)},{len(self.orderbook_callbacks)},{len(self.trades_callbacks)}], "
                 f"messages={self.connection_stats['messages_received']})")
