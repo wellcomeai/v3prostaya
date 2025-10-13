@@ -126,7 +126,7 @@ class MarketDataManager:
     Поддерживает:
     ✅ Bybit WebSocket + REST API (криптовалюты)
     ✅ YFinance WebSocket (фьючерсы CME)
-    ✅ Синхронизация исторических свечей
+    ✅ Синхронизация исторических свечей для МНОЖЕСТВЕННЫХ символов
     ✅ Thread-safe обработка сообщений
     ✅ Автоматическое переподключение
     ✅ Интеллектуальное кэширование 
@@ -238,7 +238,7 @@ class MarketDataManager:
         logger.info(f"   • Crypto symbols: {', '.join(self.symbols_crypto)}")
         logger.info(f"   • Futures symbols: {', '.join(self.symbols_futures)}")
         logger.info(f"   • Bybit WS: {enable_bybit_websocket}, YFinance WS: {enable_yfinance_websocket}")
-        logger.info(f"   • Candle Sync: {enable_candle_sync}")  # 🆕
+        logger.info(f"   • Candle Sync: {enable_candle_sync} (для {len(self.symbols_crypto)} символов)")  # 🆕
     
     async def start(self) -> bool:
         """
@@ -287,10 +287,10 @@ class MarketDataManager:
                     self.stats["errors"] += 1
                     self.stats["last_error"] = str(e)
             
-            # ========== 🆕 ИНИЦИАЛИЗАЦИЯ СИНХРОНИЗАЦИИ СВЕЧЕЙ ==========
+            # ========== 🆕 ИНИЦИАЛИЗАЦИЯ СИНХРОНИЗАЦИИ СВЕЧЕЙ ДЛЯ ВСЕХ СИМВОЛОВ ==========
             if self.enable_rest_api and self.enable_candle_sync:
                 try:
-                    logger.info("🔄 Инициализация сервиса синхронизации свечей...")
+                    logger.info(f"🔄 Инициализация сервиса синхронизации свечей для {len(self.symbols_crypto)} символов...")
                     
                     # Получаем репозиторий
                     from database.repositories import get_market_data_repository
@@ -301,7 +301,6 @@ class MarketDataManager:
                         intervals_to_sync=["1m", "1h", "1d"],
                         check_gaps_on_start=True,
                         max_gap_days=30
-                        
                     )
                     
                     # Создаем сервис
@@ -312,13 +311,14 @@ class MarketDataManager:
                         config=sync_config
                     )
                     
-                    # Запускаем синхронизацию
-                    symbol = self.symbols_crypto[0]  # Первый крипто символ
-                    sync_started = await self.candle_sync_service.start(symbol)
+                    # ✅ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Передаем ВСЕ крипто символы
+                    logger.info(f"🎯 Запуск синхронизации для символов: {', '.join(self.symbols_crypto)}")
+                    sync_started = await self.candle_sync_service.start(self.symbols_crypto)
                     
                     if sync_started:
                         providers_started += 1
-                        logger.info("✅ Сервис синхронизации свечей запущен")
+                        total_tasks = len(self.symbols_crypto) * len(sync_config.intervals_to_sync)
+                        logger.info(f"✅ Сервис синхронизации запущен для {len(self.symbols_crypto)} символов ({total_tasks} задач)")
                     else:
                         logger.warning("⚠️ Не удалось запустить синхронизацию свечей")
                         initialization_errors.append("Candle sync startup failed")
@@ -378,7 +378,16 @@ class MarketDataManager:
             logger.info(f"🔌 Bybit WS: {'✅' if self.bybit_websocket_provider and self.bybit_websocket_provider.is_running() else '❌'}")
             logger.info(f"🔌 YFinance WS: {'✅' if self.yfinance_websocket_provider and self.yfinance_websocket_provider.is_running() else '❌'}")
             logger.info(f"📡 REST API: {'✅' if self.rest_api_provider else '❌'}")
-            logger.info(f"🔄 Candle Sync: {'✅' if self.candle_sync_service and self.candle_sync_service.is_running else '❌'}")  # 🆕
+            
+            # 🆕 Улучшенное логирование синхронизации
+            if self.candle_sync_service and self.candle_sync_service.is_running:
+                sync_stats = self.candle_sync_service.get_stats()
+                active_tasks = sync_stats.get('active_tasks', 0)
+                symbols_syncing = sync_stats.get('symbols_syncing', [])
+                logger.info(f"🔄 Candle Sync: ✅ ({len(symbols_syncing)} символов, {active_tasks} активных задач)")
+                logger.info(f"   Символы: {', '.join(symbols_syncing)}")
+            else:
+                logger.info(f"🔄 Candle Sync: ❌")
             
             return True
             
@@ -799,8 +808,9 @@ class MarketDataManager:
                 # 🆕 Логируем статистику синхронизации
                 if self.candle_sync_service:
                     sync_stats = stats.get('candle_sync', {})
-                    logger.info(f"   • Candle Sync: {sync_stats.get('successful_syncs', 0)} syncs, "
-                              f"{sync_stats.get('total_candles_synced', 0)} candles")
+                    logger.info(f"   • Candle Sync: {sync_stats.get('candles_synced', 0)} свечей, "
+                              f"{sync_stats.get('gaps_filled', 0)} пропусков заполнено, "
+                              f"{sync_stats.get('sync_errors', 0)} ошибок")
                 
                 # Очищаем счетчики ошибок
                 if self.stats["errors"] > 100:
@@ -1350,8 +1360,10 @@ class MarketDataManager:
             # 🆕 Логируем статистику синхронизации
             if 'candle_sync' in final_stats:
                 sync_stats = final_stats['candle_sync']
-                logger.info(f"   • Синхронизаций: {sync_stats.get('successful_syncs', 0)}")
-                logger.info(f"   • Свечей синхронизировано: {sync_stats.get('total_candles_synced', 0)}")
+                logger.info(f"   • Пропусков найдено: {sync_stats.get('gaps_found', 0)}")
+                logger.info(f"   • Пропусков заполнено: {sync_stats.get('gaps_filled', 0)}")
+                logger.info(f"   • Свечей синхронизировано: {sync_stats.get('candles_synced', 0)}")
+                logger.info(f"   • Активных задач синхронизации: {sync_stats.get('active_tasks', 0)}")
             
             logger.info("🛑 MarketDataManager успешно остановлен")
             
@@ -1371,7 +1383,7 @@ class MarketDataManager:
         if self.rest_api_provider:
             providers.append("REST")
         if self.candle_sync_service and self.candle_sync_service.is_running:  # 🆕
-            providers.append("Sync")
+            providers.append(f"Sync({len(self.symbols_crypto)})")
         
         providers_str = "+".join(providers) if providers else "None"
         health = self.get_health_status()["overall_status"]
@@ -1396,4 +1408,4 @@ __all__ = [
     "HealthStatus"
 ]
 
-logger.info("✅ Market Data Manager module loaded successfully with YFinance and Candle Sync support")
+logger.info("✅ Market Data Manager module loaded successfully with YFinance and Multi-Symbol Candle Sync support")
