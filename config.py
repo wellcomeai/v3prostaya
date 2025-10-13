@@ -17,8 +17,11 @@ class Config:
     BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "YOUR_BYBIT_TEST_SECRET")
     BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
     
-    # 🆕 Настройки крипто символов Bybit
-    BYBIT_SYMBOLS = os.getenv("BYBIT_SYMBOLS", "BTCUSDT,ETHUSDT").split(",")
+    # 🆕 Настройки крипто символов Bybit - ✅ ВСЕ 15 ПАР
+    BYBIT_SYMBOLS = os.getenv(
+        "BYBIT_SYMBOLS", 
+        "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,MATICUSDT,DOTUSDT,LTCUSDT,AVAXUSDT,LINKUSDT,UNIUSDT,ATOMUSDT,NEARUSDT"
+    ).split(",")
     SYMBOL = BYBIT_SYMBOLS[0]  # Основной символ (для обратной совместимости)
     CATEGORY = "linear"  # Деривативы (USDT перпетуалы)
     
@@ -332,7 +335,7 @@ class Config:
         print("\n₿ BYBIT (CRYPTO):")
         print(f"  • Testnet: {config_summary['bybit_testnet']}")
         print(f"  • WebSocket: {'✅' if config_summary['bybit_websocket_enabled'] else '❌'}")
-        print(f"  • Symbols: {', '.join(config_summary['bybit_symbols'])}")
+        print(f"  • Symbols ({len(config_summary['bybit_symbols'])}): {', '.join(config_summary['bybit_symbols'][:5])}{'...' if len(config_summary['bybit_symbols']) > 5 else ''}")
         
         # 🆕 Секция: YFinance (Фьючерсы)
         print("\n📈 YFINANCE (FUTURES):")
