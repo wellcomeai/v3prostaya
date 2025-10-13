@@ -10,7 +10,8 @@ import traceback
 from .websocket_provider import WebSocketProvider, RealtimeMarketData
 from .rest_api_provider import RestApiProvider
 from .yfinance_websocket_provider import YFinanceWebSocketProvider, RealtimeFuturesData
-from .candle_sync_service import CandleSyncService, SyncConfig  # 🆕 Импорт синхронизации
+from .candle_sync_service import CandleSyncService, SyncConfig
+from .candle_aggregator import CandleAggregator  # 🆕 ДОБАВЛЕНО
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -124,8 +125,9 @@ class MarketDataManager:
     🚀 Центральный менеджер для управления всеми источниками рыночных данных
     
     Поддерживает:
-    ✅ Bybit WebSocket + REST API (криптовалюты)
+    ✅ Bybit WebSocket + REST API (криптовалюты) - МНОЖЕСТВЕННЫЕ СИМВОЛЫ
     ✅ YFinance WebSocket (фьючерсы CME)
+    ✅ CandleAggregator - сохранение WebSocket данных в БД
     ✅ Синхронизация исторических свечей для МНОЖЕСТВЕННЫХ символов
     ✅ Thread-safe обработка сообщений
     ✅ Автоматическое переподключение
@@ -141,7 +143,8 @@ class MarketDataManager:
                  enable_bybit_websocket: bool = True,
                  enable_yfinance_websocket: bool = False,
                  enable_rest_api: bool = True,
-                 enable_candle_sync: bool = True,  # 🆕 Параметр синхронизации
+                 enable_candle_sync: bool = True,
+                 enable_candle_aggregation: bool = True,  # 🆕 ДОБАВЛЕНО
                  rest_cache_minutes: int = 1, 
                  websocket_reconnect: bool = True):
         """
@@ -155,6 +158,7 @@ class MarketDataManager:
             enable_yfinance_websocket: Включить YFinance WebSocket
             enable_rest_api: Включить REST API провайдер
             enable_candle_sync: Включить синхронизацию исторических свечей
+            enable_candle_aggregation: Включить агрегацию и сохранение WebSocket данных в БД
             rest_cache_minutes: Время кэширования REST данных в минутах
             websocket_reconnect: Включить автоматическое переподключение
         """
@@ -167,13 +171,15 @@ class MarketDataManager:
         self.bybit_websocket_provider: Optional[WebSocketProvider] = None
         self.yfinance_websocket_provider: Optional[YFinanceWebSocketProvider] = None
         self.rest_api_provider: Optional[RestApiProvider] = None
-        self.candle_sync_service: Optional[CandleSyncService] = None  # 🆕 Сервис синхронизации
+        self.candle_sync_service: Optional[CandleSyncService] = None
+        self.candle_aggregator: Optional[CandleAggregator] = None  # 🆕 ДОБАВЛЕНО
         
         # Настройки
         self.enable_bybit_websocket = enable_bybit_websocket
         self.enable_yfinance_websocket = enable_yfinance_websocket
         self.enable_rest_api = enable_rest_api
-        self.enable_candle_sync = enable_candle_sync  # 🆕
+        self.enable_candle_sync = enable_candle_sync
+        self.enable_candle_aggregation = enable_candle_aggregation  # 🆕 ДОБАВЛЕНО
         self.websocket_reconnect = websocket_reconnect
         self.rest_cache_duration = timedelta(minutes=rest_cache_minutes)
         
@@ -238,7 +244,8 @@ class MarketDataManager:
         logger.info(f"   • Crypto symbols: {', '.join(self.symbols_crypto)}")
         logger.info(f"   • Futures symbols: {', '.join(self.symbols_futures)}")
         logger.info(f"   • Bybit WS: {enable_bybit_websocket}, YFinance WS: {enable_yfinance_websocket}")
-        logger.info(f"   • Candle Sync: {enable_candle_sync} (для {len(self.symbols_crypto)} символов)")  # 🆕
+        logger.info(f"   • Candle Sync: {enable_candle_sync} (для {len(self.symbols_crypto)} символов)")
+        logger.info(f"   • Candle Aggregation: {enable_candle_aggregation}")  # 🆕 ДОБАВЛЕНО
     
     async def start(self) -> bool:
         """
@@ -287,7 +294,7 @@ class MarketDataManager:
                     self.stats["errors"] += 1
                     self.stats["last_error"] = str(e)
             
-            # ========== 🆕 ИНИЦИАЛИЗАЦИЯ СИНХРОНИЗАЦИИ СВЕЧЕЙ ДЛЯ ВСЕХ СИМВОЛОВ ==========
+            # ========== ИНИЦИАЛИЗАЦИЯ СИНХРОНИЗАЦИИ СВЕЧЕЙ ДЛЯ ВСЕХ СИМВОЛОВ ==========
             if self.enable_rest_api and self.enable_candle_sync:
                 try:
                     logger.info(f"🔄 Инициализация сервиса синхронизации свечей для {len(self.symbols_crypto)} символов...")
@@ -307,11 +314,11 @@ class MarketDataManager:
                     self.candle_sync_service = CandleSyncService(
                         repository=repository,
                         rest_api_provider=self.rest_api_provider,
-                        historical_loader=None,  # Можно добавить позже
+                        historical_loader=None,
                         config=sync_config
                     )
                     
-                    # ✅ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Передаем ВСЕ крипто символы
+                    # Запускаем синхронизацию для ВСЕХ крипто символов
                     logger.info(f"🎯 Запуск синхронизации для символов: {', '.join(self.symbols_crypto)}")
                     sync_started = await self.candle_sync_service.start(self.symbols_crypto)
                     
@@ -337,6 +344,39 @@ class MarketDataManager:
                     providers_started += 1
                 else:
                     initialization_errors.append("Bybit WebSocket initialization failed")
+            
+            # ========== 🆕 ИНИЦИАЛИЗАЦИЯ CANDLE AGGREGATOR ==========
+            if self.enable_candle_aggregation and self.enable_bybit_websocket and self.bybit_websocket_provider:
+                try:
+                    logger.info(f"🏗️ Инициализация CandleAggregator для {len(self.symbols_crypto)} символов...")
+                    
+                    self.candle_aggregator = CandleAggregator(
+                        symbols=self.symbols_crypto,
+                        intervals=["1m", "5m", "15m", "1h", "1d"],
+                        batch_save=True,  # Батчевое сохранение для производительности
+                        batch_size=50
+                    )
+                    
+                    # Запускаем агрегатор
+                    await self.candle_aggregator.start()
+                    
+                    # Подписываем агрегатор на WebSocket обновления
+                    self.bybit_websocket_provider.add_ticker_callback(
+                        lambda symbol, ticker_data: asyncio.create_task(
+                            self._handle_ticker_for_aggregator(symbol, ticker_data)
+                        )
+                    )
+                    logger.info("✅ CandleAggregator подписан на WebSocket обновления")
+                    
+                    providers_started += 1
+                    logger.info("✅ CandleAggregator инициализирован и запущен")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка инициализации CandleAggregator: {e}")
+                    logger.error(traceback.format_exc())
+                    initialization_errors.append(f"CandleAggregator error: {str(e)}")
+                    self.stats["errors"] += 1
+                    self.stats["last_error"] = str(e)
             
             # ========== ИНИЦИАЛИЗАЦИЯ YFINANCE WEBSOCKET ==========
             if self.enable_yfinance_websocket:
@@ -379,7 +419,7 @@ class MarketDataManager:
             logger.info(f"🔌 YFinance WS: {'✅' if self.yfinance_websocket_provider and self.yfinance_websocket_provider.is_running() else '❌'}")
             logger.info(f"📡 REST API: {'✅' if self.rest_api_provider else '❌'}")
             
-            # 🆕 Улучшенное логирование синхронизации
+            # Улучшенное логирование синхронизации
             if self.candle_sync_service and self.candle_sync_service.is_running:
                 sync_stats = self.candle_sync_service.get_stats()
                 active_tasks = sync_stats.get('active_tasks', 0)
@@ -388,6 +428,14 @@ class MarketDataManager:
                 logger.info(f"   Символы: {', '.join(symbols_syncing)}")
             else:
                 logger.info(f"🔄 Candle Sync: ❌")
+            
+            # 🆕 Логирование CandleAggregator
+            if self.candle_aggregator and self.candle_aggregator.is_running:
+                agg_stats = self.candle_aggregator.get_stats()
+                logger.info(f"🏗️ Candle Aggregator: ✅ ({len(self.symbols_crypto)} символов, {len(agg_stats['intervals'])} интервалов)")
+                logger.info(f"   Интервалы: {', '.join(agg_stats['intervals'])}")
+            else:
+                logger.info(f"🏗️ Candle Aggregator: ❌")
             
             return True
             
@@ -414,17 +462,18 @@ class MarketDataManager:
             raise
     
     async def _initialize_bybit_websocket(self) -> bool:
-        """Инициализация Bybit WebSocket провайдера"""
+        """🆕 ИЗМЕНЕНО: Инициализация Bybit WebSocket провайдера с множественными символами"""
         try:
             logger.info("🔌 Инициализация Bybit WebSocket провайдера...")
-            # Используем первый крипто символ
-            symbol = self.symbols_crypto[0]
+            
+            # 🆕 ИЗМЕНЕНО: Передаем ВСЕ крипто символы
             self.bybit_websocket_provider = WebSocketProvider(
-                symbol=symbol, 
+                symbols=self.symbols_crypto,  # ✅ ВСЕ 15 символов!
                 testnet=self.testnet
             )
             
             # Подписываемся на обновления с thread-safe callback'ами
+            # 🆕 ИЗМЕНЕНО: Callbacks теперь принимают (symbol, data)
             self.bybit_websocket_provider.add_ticker_callback(self._on_bybit_ticker_update)
             self.bybit_websocket_provider.add_orderbook_callback(self._on_bybit_orderbook_update)
             self.bybit_websocket_provider.add_trades_callback(self._on_bybit_trades_update)
@@ -433,9 +482,12 @@ class MarketDataManager:
             start_task = asyncio.create_task(self.bybit_websocket_provider.start())
             await asyncio.wait_for(start_task, timeout=15)
             
-            # Ждем получения данных
-            logger.info("⏳ Ожидание Bybit WebSocket данных...")
-            data_received = await self.bybit_websocket_provider.wait_for_data(timeout=20)
+            # Ждем получения данных для всех символов
+            logger.info(f"⏳ Ожидание Bybit WebSocket данных для {len(self.symbols_crypto)} символов...")
+            data_received = await self.bybit_websocket_provider.wait_for_data(
+                timeout=30,
+                min_symbols=max(1, len(self.symbols_crypto) // 2)  # Хотя бы половина символов
+            )
             
             if data_received:
                 self.current_bybit_reconnect_attempts = 0
@@ -460,7 +512,7 @@ class MarketDataManager:
             logger.info("🔌 Инициализация YFinance WebSocket провайдера...")
             self.yfinance_websocket_provider = YFinanceWebSocketProvider(
                 symbols=self.symbols_futures,
-                verbose=False  # Отключаем verbose логи yfinance
+                verbose=False
             )
             
             # Подписываемся на обновления
@@ -571,7 +623,7 @@ class MarketDataManager:
             logger.error(f"❌ Ошибка обработки Bybit события: {e}")
             self.stats["errors"] += 1
     
-    def _on_bybit_ticker_update(self, ticker_data: dict):
+    def _on_bybit_ticker_update(self, symbol: str, ticker_data: dict):  # 🆕 ИЗМЕНЕНО
         """Thread-safe callback для Bybit тикера"""
         try:
             self.stats["bybit_websocket_updates"] += 1
@@ -580,45 +632,48 @@ class MarketDataManager:
             if self._bybit_event_queue:
                 try:
                     self._bybit_event_queue.put_nowait({
-                        "type": "ticker", 
+                        "type": "ticker",
+                        "symbol": symbol,  # 🆕 ДОБАВЛЕНО
                         "data": ticker_data
                     })
                 except queue.Full:
                     logger.warning("⚠️ Очередь Bybit событий переполнена")
                     
         except Exception as e:
-            logger.error(f"❌ Ошибка обработки Bybit ticker: {e}")
+            logger.error(f"❌ Ошибка обработки Bybit ticker для {symbol}: {e}")
             self.stats["bybit_callback_errors"] += 1
             self.stats["errors"] += 1
     
-    def _on_bybit_orderbook_update(self, orderbook_data: dict):
+    def _on_bybit_orderbook_update(self, symbol: str, orderbook_data: dict):  # 🆕 ИЗМЕНЕНО
         """Thread-safe callback для Bybit ордербука"""
         try:
             if self._bybit_event_queue:
                 try:
                     self._bybit_event_queue.put_nowait({
                         "type": "orderbook",
+                        "symbol": symbol,  # 🆕 ДОБАВЛЕНО
                         "data": orderbook_data
                     })
                 except queue.Full:
                     logger.warning("⚠️ Очередь Bybit событий переполнена")
         except Exception as e:
-            logger.error(f"❌ Ошибка обработки Bybit orderbook: {e}")
+            logger.error(f"❌ Ошибка обработки Bybit orderbook для {symbol}: {e}")
             self.stats["bybit_callback_errors"] += 1
     
-    def _on_bybit_trades_update(self, trades_data: list):
+    def _on_bybit_trades_update(self, symbol: str, trades_data: list):  # 🆕 ИЗМЕНЕНО
         """Thread-safe callback для Bybit трейдов"""
         try:
             if self._bybit_event_queue:
                 try:
                     self._bybit_event_queue.put_nowait({
                         "type": "trades",
+                        "symbol": symbol,  # 🆕 ДОБАВЛЕНО
                         "data": trades_data
                     })
                 except queue.Full:
                     logger.warning("⚠️ Очередь Bybit событий переполнена")
         except Exception as e:
-            logger.error(f"❌ Ошибка обработки Bybit trades: {e}")
+            logger.error(f"❌ Ошибка обработки Bybit trades для {symbol}: {e}")
             self.stats["bybit_callback_errors"] += 1
     
     async def _bybit_monitor_task(self):
@@ -656,11 +711,40 @@ class MarketDataManager:
             
             if success:
                 self.stats["bybit_websocket_reconnects"] += 1
+                
+                # 🆕 Переподписываем CandleAggregator если есть
+                if self.candle_aggregator and self.candle_aggregator.is_running:
+                    self.bybit_websocket_provider.add_ticker_callback(
+                        lambda symbol, ticker_data: asyncio.create_task(
+                            self._handle_ticker_for_aggregator(symbol, ticker_data)
+                        )
+                    )
+                    logger.info("✅ CandleAggregator переподписан после переподключения")
             
             return success
         except Exception as e:
             logger.error(f"❌ Ошибка переподключения Bybit: {e}")
             return False
+    
+    # ========== 🆕 CANDLE AGGREGATOR ОБРАБОТЧИК ==========
+    
+    async def _handle_ticker_for_aggregator(self, symbol: str, ticker_data: dict):
+        """
+        🆕 Обработчик ticker updates для CandleAggregator
+        
+        Args:
+            symbol: Символ (передается от WebSocket callback)
+            ticker_data: Данные тикера от WebSocket
+        """
+        try:
+            if not self.candle_aggregator or not self.candle_aggregator.is_running:
+                return
+            
+            # Передаем в агрегатор
+            await self.candle_aggregator.process_ticker_update(symbol, ticker_data)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка передачи тика {symbol} в агрегатор: {e}")
     
     # ========== YFINANCE WEBSOCKET ОБРАБОТЧИКИ ==========
     
@@ -730,19 +814,16 @@ class MarketDataManager:
         """Мониторинг YFinance WebSocket соединения"""
         while self.is_running and not self.shutdown_event.is_set():
             try:
-                await asyncio.sleep(90)  # Проверяем каждые 90 секунд
+                await asyncio.sleep(90)
                 
-                # Проверяем здоровье соединения
                 is_healthy = (self.yfinance_websocket_provider and 
                              self.yfinance_websocket_provider.is_connection_healthy())
                 
                 if not is_healthy:
-                    # Логируем детальную статистику
                     if self.yfinance_websocket_provider:
                         stats = self.yfinance_websocket_provider.get_connection_stats()
                         logger.warning(f"⚠️ YFinance WebSocket нездоров")
                         logger.warning(f"📊 Сообщений получено: {stats['messages_received']}")
-                        logger.warning(f"📊 Последнее сообщение: {stats['last_message_time']}")
                     
                     if self.current_yfinance_reconnect_attempts < self.max_reconnect_attempts:
                         logger.info(f"🔄 Попытка переподключения {self.current_yfinance_reconnect_attempts + 1}/{self.max_reconnect_attempts}")
@@ -753,26 +834,18 @@ class MarketDataManager:
                             self.current_yfinance_reconnect_attempts = 0
                         else:
                             self.current_yfinance_reconnect_attempts += 1
-                            logger.warning(f"❌ Попытка #{self.current_yfinance_reconnect_attempts} не удалась")
                     else:
-                        logger.error(f"💥 Превышено максимум ({self.max_reconnect_attempts}) попыток переподключения YFinance")
-                        # Сбрасываем счетчик через 10 минут для повторной попытки
-                        logger.info("⏰ Жду 10 минут перед сбросом счетчика...")
+                        logger.error(f"💥 Превышено максимум попыток переподключения YFinance")
                         await asyncio.sleep(600)
                         self.current_yfinance_reconnect_attempts = 0
-                        logger.info("🔄 Счетчик попыток сброшен, начинаю заново")
                 else:
-                    # Все хорошо
                     if self.current_yfinance_reconnect_attempts > 0:
-                        logger.info("✅ YFinance WebSocket восстановлено, сброс счетчика")
                         self.current_yfinance_reconnect_attempts = 0
                         
             except asyncio.CancelledError:
-                logger.info("🔄 Монитор YFinance отменен")
                 break
             except Exception as e:
                 logger.error(f"❌ Ошибка мониторинга YFinance: {e}")
-                logger.error(traceback.format_exc())
     
     async def _attempt_yfinance_reconnect(self) -> bool:
         """Попытка переподключения YFinance WebSocket"""
@@ -805,12 +878,17 @@ class MarketDataManager:
                 logger.info(f"   • YFinance WS: {stats['yfinance_websocket_updates']}")
                 logger.info(f"   • Errors: {stats['errors']}")
                 
-                # 🆕 Логируем статистику синхронизации
+                # Логируем статистику синхронизации
                 if self.candle_sync_service:
                     sync_stats = stats.get('candle_sync', {})
-                    logger.info(f"   • Candle Sync: {sync_stats.get('candles_synced', 0)} свечей, "
-                              f"{sync_stats.get('gaps_filled', 0)} пропусков заполнено, "
-                              f"{sync_stats.get('sync_errors', 0)} ошибок")
+                    logger.info(f"   • Candle Sync: {sync_stats.get('candles_synced', 0)} свечей")
+                
+                # 🆕 Логируем статистику агрегации
+                if self.candle_aggregator:
+                    agg_stats = stats.get('candle_aggregator', {})
+                    logger.info(f"   • Candle Aggregator: {agg_stats.get('ticks_received', 0)} тиков, "
+                              f"{agg_stats.get('candles_created', 0)} свечей создано, "
+                              f"{agg_stats.get('candles_saved', 0)} сохранено")
                 
                 # Очищаем счетчики ошибок
                 if self.stats["errors"] > 100:
@@ -916,8 +994,8 @@ class MarketDataManager:
             
             # Получаем данные из Bybit WebSocket
             if self.bybit_websocket_provider and self.bybit_websocket_provider.is_running():
-                websocket_stats = self.bybit_websocket_provider.get_current_stats()
-                if websocket_stats["has_sufficient_data"]:
+                websocket_stats = self.bybit_websocket_provider.get_current_stats(symbol)
+                if websocket_stats.get("has_sufficient_data"):
                     websocket_data = websocket_stats
             
             # Получаем данные из REST API
@@ -1101,13 +1179,14 @@ class MarketDataManager:
     def get_current_price(self, symbol: str = None) -> float:
         """Получает текущую цену крипты"""
         try:
+            symbol = symbol or self.symbols_crypto[0]
             if self.bybit_websocket_provider and self.bybit_websocket_provider.is_running():
-                return self.bybit_websocket_provider.get_market_data().get_current_price()
+                return self.bybit_websocket_provider.get_market_data(symbol).get_current_price()
             elif self.cached_rest_data:
                 return self.cached_rest_data.get("current_price", 0)
             return 0.0
         except Exception as e:
-            logger.error(f"❌ Ошибка получения цены: {e}")
+            logger.error(f"❌ Ошибка получения цены {symbol}: {e}")
             return 0.0
     
     def get_futures_price(self, symbol: str) -> float:
@@ -1137,11 +1216,9 @@ class MarketDataManager:
         uptime = datetime.now() - self.stats["start_time"]
         uptime_hours = uptime.total_seconds() / 3600
         
-        # Производительность Bybit
+        # Производительность
         bybit_updates_per_hour = self.stats["bybit_websocket_updates"] / uptime_hours if uptime_hours > 0 else 0
         bybit_calls_per_hour = self.stats["bybit_rest_api_calls"] / uptime_hours if uptime_hours > 0 else 0
-        
-        # Производительность YFinance
         yfinance_updates_per_hour = self.stats["yfinance_websocket_updates"] / uptime_hours if uptime_hours > 0 else 0
         
         # Коэффициент успеха
@@ -1164,7 +1241,8 @@ class MarketDataManager:
             "bybit_websocket_active": self.bybit_websocket_provider.is_running() if self.bybit_websocket_provider else False,
             "yfinance_websocket_active": self.yfinance_websocket_provider.is_running() if self.yfinance_websocket_provider else False,
             "rest_api_active": bool(self.rest_api_provider),
-            "candle_sync_active": self.candle_sync_service.is_running if self.candle_sync_service else False,  # 🆕
+            "candle_sync_active": self.candle_sync_service.is_running if self.candle_sync_service else False,
+            "candle_aggregator_active": self.candle_aggregator.is_running if self.candle_aggregator else False,  # 🆕
             
             # Подписчики
             "data_subscribers_count": len(self.data_subscribers),
@@ -1195,9 +1273,13 @@ class MarketDataManager:
             "max_reconnect_attempts": self.max_reconnect_attempts
         }
         
-        # 🆕 Добавляем статистику синхронизации свечей
+        # Добавляем статистику синхронизации свечей
         if self.candle_sync_service:
             stats_dict["candle_sync"] = self.candle_sync_service.get_stats()
+        
+        # 🆕 Добавляем статистику агрегации свечей
+        if self.candle_aggregator:
+            stats_dict["candle_aggregator"] = self.candle_aggregator.get_stats()
         
         return stats_dict
     
@@ -1206,7 +1288,8 @@ class MarketDataManager:
         bybit_ws_status = "active" if (self.bybit_websocket_provider and self.bybit_websocket_provider.is_running()) else "inactive"
         yfinance_ws_status = "active" if (self.yfinance_websocket_provider and self.yfinance_websocket_provider.is_running()) else "inactive"
         rest_api_status = "active" if self.rest_api_provider else "inactive"
-        candle_sync_status = "active" if (self.candle_sync_service and self.candle_sync_service.is_running) else "inactive"  # 🆕
+        candle_sync_status = "active" if (self.candle_sync_service and self.candle_sync_service.is_running) else "inactive"
+        candle_aggregator_status = "active" if (self.candle_aggregator and self.candle_aggregator.is_running) else "inactive"  # 🆕
         
         # Определяем общий статус
         if not self.initialization_complete:
@@ -1235,7 +1318,7 @@ class MarketDataManager:
         yfinance_freshness = "unknown"
         if self.stats.get("last_yfinance_data"):
             yf_age = (datetime.now() - self.stats["last_yfinance_data"]).total_seconds()
-            if yf_age < 300:  # 5 минут для фьючерсов
+            if yf_age < 300:
                 yfinance_freshness = "fresh"
             elif yf_age < 600:
                 yfinance_freshness = "stale"
@@ -1248,7 +1331,8 @@ class MarketDataManager:
                 "bybit_websocket": bybit_ws_status,
                 "yfinance_websocket": yfinance_ws_status,
                 "rest_api": rest_api_status,
-                "candle_sync": candle_sync_status,  # 🆕
+                "candle_sync": candle_sync_status,
+                "candle_aggregator": candle_aggregator_status,  # 🆕
                 "bybit_event_queue": "healthy" if self._bybit_event_queue and self._bybit_event_queue.qsize() < 800 else "degraded",
                 "yfinance_event_queue": "healthy" if self._yfinance_event_queue and self._yfinance_event_queue.qsize() < 800 else "degraded",
                 "background_tasks": "active" if any(not task.done() for task in self.background_tasks) else "inactive"
@@ -1295,6 +1379,15 @@ class MarketDataManager:
                     await asyncio.gather(*self.background_tasks, return_exceptions=True)
                     logger.info("✅ Фоновые задачи остановлены")
             
+            # 🆕 Останавливаем CandleAggregator
+            if self.candle_aggregator:
+                logger.info("🏗️ Останавливаю CandleAggregator...")
+                try:
+                    await self.candle_aggregator.stop()
+                    logger.info("✅ CandleAggregator остановлен")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка остановки CandleAggregator: {e}")
+            
             # Останавливаем Bybit WebSocket
             if self.bybit_websocket_provider:
                 logger.info("🔌 Останавливаю Bybit WebSocket...")
@@ -1307,7 +1400,7 @@ class MarketDataManager:
                 await self.yfinance_websocket_provider.stop()
                 logger.info("✅ YFinance WebSocket остановлен")
             
-            # 🆕 Останавливаем синхронизацию свечей
+            # Останавливаем синхронизацию свечей
             if self.candle_sync_service:
                 logger.info("🔄 Останавливаю синхронизацию свечей...")
                 await self.candle_sync_service.stop()
@@ -1357,13 +1450,19 @@ class MarketDataManager:
             logger.info(f"   • Ошибок: {final_stats['errors']}")
             logger.info(f"   • Успешность: {final_stats['success_rate_percent']:.1f}%")
             
-            # 🆕 Логируем статистику синхронизации
+            # Логируем статистику синхронизации
             if 'candle_sync' in final_stats:
                 sync_stats = final_stats['candle_sync']
                 logger.info(f"   • Пропусков найдено: {sync_stats.get('gaps_found', 0)}")
                 logger.info(f"   • Пропусков заполнено: {sync_stats.get('gaps_filled', 0)}")
                 logger.info(f"   • Свечей синхронизировано: {sync_stats.get('candles_synced', 0)}")
-                logger.info(f"   • Активных задач синхронизации: {sync_stats.get('active_tasks', 0)}")
+            
+            # 🆕 Логируем статистику агрегации
+            if 'candle_aggregator' in final_stats:
+                agg_stats = final_stats['candle_aggregator']
+                logger.info(f"   • Тиков обработано: {agg_stats.get('ticks_received', 0)}")
+                logger.info(f"   • Свечей создано: {agg_stats.get('candles_created', 0)}")
+                logger.info(f"   • Свечей сохранено в БД: {agg_stats.get('candles_saved', 0)}")
             
             logger.info("🛑 MarketDataManager успешно остановлен")
             
@@ -1382,8 +1481,10 @@ class MarketDataManager:
             providers.append("YFinance-WS")
         if self.rest_api_provider:
             providers.append("REST")
-        if self.candle_sync_service and self.candle_sync_service.is_running:  # 🆕
+        if self.candle_sync_service and self.candle_sync_service.is_running:
             providers.append(f"Sync({len(self.symbols_crypto)})")
+        if self.candle_aggregator and self.candle_aggregator.is_running:  # 🆕
+            providers.append(f"Aggregator({len(self.symbols_crypto)})")
         
         providers_str = "+".join(providers) if providers else "None"
         health = self.get_health_status()["overall_status"]
@@ -1408,4 +1509,4 @@ __all__ = [
     "HealthStatus"
 ]
 
-logger.info("✅ Market Data Manager module loaded successfully with YFinance and Multi-Symbol Candle Sync support")
+logger.info("✅ Market Data Manager module loaded successfully with Multi-Symbol WebSocket + CandleAggregator support")
