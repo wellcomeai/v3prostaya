@@ -8,6 +8,8 @@ Candle Aggregator Service
 - Множественные интервалы (1m, 5m, 15m, 1h, 1d)
 - Автоматическое сохранение при закрытии свечи
 - Thread-safe операции
+- 🆕 Защита от deadlock с retry логикой
+- 🆕 Синхронизация параллельных сохранений
 """
 
 import asyncio
@@ -116,7 +118,7 @@ class CandleBuilder:
                 volume=self.volume,
                 quote_volume=None,  # Не доступно из WebSocket тиков
                 number_of_trades=self.tick_count,
-                data_source="bybit",  # ✅ ИСПРАВЛЕНО: было "bybit_websocket"
+                data_source="bybit",
                 raw_data=None
             )
             
@@ -136,6 +138,8 @@ class CandleAggregator:
     - Формирование свечей для множественных интервалов
     - Автоматическое сохранение готовых свечей в БД
     - Поддержка множественных символов
+    - 🆕 Защита от deadlock с retry логикой
+    - 🆕 Синхронизация параллельных сохранений через Lock
     - Детальная статистика
     """
     
@@ -164,6 +168,9 @@ class CandleAggregator:
         # Очередь готовых свечей для батчевого сохранения
         self.pending_candles: List[MarketDataCandle] = []
         
+        # 🆕 Lock для синхронизации сохранений (защита от deadlock)
+        self._save_lock = asyncio.Lock()
+        
         # Статистика
         self.stats = {
             "ticks_received": 0,
@@ -172,6 +179,7 @@ class CandleAggregator:
             "candles_saved": 0,
             "candles_by_interval": defaultdict(int),
             "save_errors": 0,
+            "deadlock_retries": 0,  # 🆕 Счетчик retry при deadlock
             "last_tick_time": None,
             "last_save_time": None,
             "start_time": datetime.now()
@@ -188,6 +196,7 @@ class CandleAggregator:
         logger.info(f"   • Символы: {', '.join(self.symbols)}")
         logger.info(f"   • Интервалы: {', '.join(self.intervals)}")
         logger.info(f"   • Батчевое сохранение: {batch_save}")
+        logger.info(f"   • 🔒 Защита от deadlock: включена")
     
     async def start(self):
         """Запускает агрегатор"""
@@ -375,54 +384,112 @@ class CandleAggregator:
             self.stats["save_errors"] += 1
     
     async def _save_single_candle(self, candle: MarketDataCandle):
-        """Сохраняет одну свечу в БД"""
-        try:
-            if not self.repository:
-                logger.error("❌ Repository не инициализирован")
-                return
-            
-            success = await self.repository.insert_candle(candle)
-            
-            if success:
-                self.stats["candles_saved"] += 1
-                self.stats["last_save_time"] = datetime.now()
-                logger.info(f"✅ Свеча сохранена: {candle.symbol} {candle.interval} @ ${candle.close_price} (O:{candle.open_time})")
-            else:
-                logger.error(f"❌ Не удалось сохранить свечу {candle.symbol} {candle.interval}")
-                self.stats["save_errors"] += 1
+        """
+        Сохраняет одну свечу в БД с защитой от deadlock
+        
+        🆕 Добавлена retry логика с экспоненциальной задержкой
+        """
+        # 🆕 Используем lock для синхронизации
+        async with self._save_lock:
+            try:
+                if not self.repository:
+                    logger.error("❌ Repository не инициализирован")
+                    return
                 
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения свечи: {e}")
-            self.stats["save_errors"] += 1
+                # 🆕 Retry логика при deadlock
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        success = await self.repository.insert_candle(candle)
+                        
+                        if success:
+                            self.stats["candles_saved"] += 1
+                            self.stats["last_save_time"] = datetime.now()
+                            logger.info(f"✅ Свеча сохранена: {candle.symbol} {candle.interval} @ ${candle.close_price} (O:{candle.open_time})")
+                        else:
+                            logger.error(f"❌ Не удалось сохранить свечу {candle.symbol} {candle.interval}")
+                            self.stats["save_errors"] += 1
+                        
+                        break  # Успех - выходим из retry цикла
+                        
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        
+                        # Проверяем, является ли это deadlock
+                        if "deadlock" in error_str and attempt < max_retries - 1:
+                            self.stats["deadlock_retries"] += 1
+                            retry_delay = 0.1 * (2 ** attempt)  # 0.1, 0.2, 0.4 сек
+                            logger.warning(f"⚠️ Deadlock при сохранении свечи {candle.symbol} {candle.interval}, "
+                                         f"retry {attempt + 1}/{max_retries} через {retry_delay}s")
+                            await asyncio.sleep(retry_delay)
+                            continue
+                        else:
+                            # Не deadlock или исчерпаны попытки
+                            raise
+                    
+            except Exception as e:
+                logger.error(f"❌ Ошибка сохранения свечи: {e}")
+                self.stats["save_errors"] += 1
     
     async def _save_pending_candles(self):
-        """Сохраняет накопленные свечи батчем"""
-        try:
-            if not self.pending_candles:
-                return
-            
-            if not self.repository:
-                logger.error("❌ Repository не инициализирован")
-                return
-            
-            logger.info(f"💾 Сохранение батча из {len(self.pending_candles)} свечей...")
-            
-            inserted, updated = await self.repository.bulk_insert_candles(
-                self.pending_candles
-            )
-            
-            self.stats["candles_saved"] += inserted + updated
-            self.stats["last_save_time"] = datetime.now()
-            
-            logger.info(f"✅ Батч сохранен: {inserted} новых, {updated} обновлено")
-            
-            # Очищаем очередь
-            self.pending_candles.clear()
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка сохранения батча: {e}")
-            logger.error(traceback.format_exc())
-            self.stats["save_errors"] += 1
+        """
+        Сохраняет накопленные свечи батчем с защитой от deadlock
+        
+        🆕 Добавлена синхронизация через Lock и retry логика
+        """
+        # 🆕 Используем lock для предотвращения параллельных сохранений
+        async with self._save_lock:
+            try:
+                if not self.pending_candles:
+                    return
+                
+                if not self.repository:
+                    logger.error("❌ Repository не инициализирован")
+                    return
+                
+                candles_to_save = len(self.pending_candles)
+                logger.info(f"💾 Сохранение батча из {candles_to_save} свечей...")
+                
+                # 🆕 Retry логика при deadlock
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        inserted, updated = await self.repository.bulk_insert_candles(
+                            self.pending_candles
+                        )
+                        
+                        self.stats["candles_saved"] += inserted + updated
+                        self.stats["last_save_time"] = datetime.now()
+                        
+                        logger.info(f"✅ Батч сохранен: {inserted} новых, {updated} обновлено")
+                        
+                        # Очищаем очередь только при успехе
+                        self.pending_candles.clear()
+                        
+                        break  # Успех - выходим из retry цикла
+                        
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        
+                        # Проверяем, является ли это deadlock
+                        if "deadlock" in error_str and attempt < max_retries - 1:
+                            self.stats["deadlock_retries"] += 1
+                            retry_delay = 0.1 * (2 ** attempt)  # 0.1, 0.2, 0.4 сек
+                            logger.warning(f"⚠️ Deadlock при сохранении батча из {candles_to_save} свечей, "
+                                         f"retry {attempt + 1}/{max_retries} через {retry_delay}s")
+                            await asyncio.sleep(retry_delay)
+                            continue
+                        else:
+                            # Не deadlock или исчерпаны попытки
+                            raise
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка сохранения батча: {e}")
+                logger.error(traceback.format_exc())
+                self.stats["save_errors"] += 1
+                
+                # 🆕 При критической ошибке не очищаем очередь - попробуем позже
+                logger.warning(f"⚠️ Батч из {len(self.pending_candles)} свечей остается в очереди для повторной попытки")
     
     async def _periodic_save_task(self):
         """Фоновая задача для периодического сохранения батчей"""
@@ -479,6 +546,7 @@ class CandleAggregator:
             logger.info(f"   • Свечей создано: {self.stats['candles_created']}")
             logger.info(f"   • Свечей сохранено: {self.stats['candles_saved']}")
             logger.info(f"   • Ошибок сохранения: {self.stats['save_errors']}")
+            logger.info(f"   • 🔄 Deadlock retry: {self.stats['deadlock_retries']}")
             
             for interval, count in self.stats["candles_by_interval"].items():
                 logger.info(f"   • {interval}: {count} свечей")
@@ -500,7 +568,8 @@ class CandleAggregator:
             "intervals": self.intervals,
             "active_builders": sum(len(builders) for builders in self.current_builders.values()),
             "pending_candles_count": len(self.pending_candles),
-            "is_running": self.is_running
+            "is_running": self.is_running,
+            "deadlock_retry_rate": (self.stats["deadlock_retries"] / max(1, self.stats["candles_saved"])) * 100
         }
 
 
