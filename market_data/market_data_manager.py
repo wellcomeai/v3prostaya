@@ -202,7 +202,7 @@ class MarketDataManager:
         # Задачи фонового выполнения
         self.background_tasks: List[asyncio.Task] = []
         
-        # Thread-safe очереди для WebSocket событий
+        # ✅ ИСПРАВЛЕНИЕ: Увеличена очередь до 50000
         self._bybit_event_queue: Optional[queue.Queue] = None
         self._yfinance_event_queue: Optional[queue.Queue] = None
         
@@ -261,9 +261,11 @@ class MarketDataManager:
             # Сохраняем ссылку на основной event loop
             self._main_loop = asyncio.get_running_loop()
             
-            # Создаем thread-safe очереди
-            self._bybit_event_queue = queue.Queue(maxsize=10000)
+            # ✅ ИСПРАВЛЕНИЕ: Увеличен размер очереди
+            self._bybit_event_queue = queue.Queue(maxsize=50000)  # было 10000
             self._yfinance_event_queue = queue.Queue(maxsize=1000)
+            
+            logger.info(f"📦 Bybit очередь создана: maxsize=50000")
             
             providers_started = 0
             initialization_errors = []
@@ -360,11 +362,11 @@ class MarketDataManager:
                     # Запускаем агрегатор
                     await self.candle_aggregator.start()
                     
-                    # ✅ ИСПРАВЛЕНО: Подписываем агрегатор через thread-safe callback
+                    # ✅ ИСПРАВЛЕНИЕ: Подписываем ТОЛЬКО один callback для ticker
                     self.bybit_websocket_provider.add_ticker_callback(
-                        self._on_bybit_ticker_update_for_aggregator
+                        self._on_bybit_ticker_update  # Один callback для всех
                     )
-                    logger.info("✅ CandleAggregator подписан на WebSocket обновления")
+                    logger.info("✅ CandleAggregator будет получать данные через единый ticker callback")
                     
                     providers_started += 1
                     logger.info("✅ CandleAggregator инициализирован и запущен")
@@ -544,11 +546,12 @@ class MarketDataManager:
     async def _start_background_tasks(self):
         """Запуск фоновых задач"""
         try:
-            # Задача обработки Bybit WebSocket событий
+            # ✅ ИСПРАВЛЕНИЕ: Запускаем 3 параллельных процессора Bybit событий
             if self.bybit_websocket_provider:
-                bybit_processor = asyncio.create_task(self._bybit_event_processor())
-                self.background_tasks.append(bybit_processor)
-                logger.info("🔄 Запущен процессор Bybit WebSocket событий")
+                for i in range(3):
+                    bybit_processor = asyncio.create_task(self._bybit_event_processor())
+                    self.background_tasks.append(bybit_processor)
+                logger.info(f"🔄 Запущено 3 параллельных процессора Bybit WebSocket событий")
             
             # Задача обработки YFinance WebSocket событий
             if self.yfinance_websocket_provider:
@@ -581,7 +584,7 @@ class MarketDataManager:
     # ========== BYBIT WEBSOCKET ОБРАБОТЧИКИ ==========
     
     async def _bybit_event_processor(self):
-        """Фоновая задача для обработки Bybit WebSocket событий"""
+        """✅ ИСПРАВЛЕНИЕ: Оптимизированная фоновая задача для обработки Bybit WebSocket событий"""
         logger.info("🔄 Запущен цикл обработки Bybit WebSocket событий")
         
         while self.is_running and not self.shutdown_event.is_set():
@@ -591,11 +594,14 @@ class MarketDataManager:
                     continue
                 
                 try:
-                    event = self._bybit_event_queue.get_nowait()
+                    # ✅ ИСПРАВЛЕНИЕ: Используем asyncio.to_thread вместо get_nowait + sleep
+                    event = await asyncio.to_thread(
+                        self._bybit_event_queue.get,
+                        timeout=0.1
+                    )
                     await self._process_bybit_event(event)
                 except queue.Empty:
-                    await asyncio.sleep(0.1)
-                    continue
+                    continue  # Сразу следующая итерация, без sleep
                     
             except asyncio.CancelledError:
                 logger.info("🔄 Процессор Bybit WebSocket событий отменен")
@@ -608,16 +614,16 @@ class MarketDataManager:
         logger.info("🛑 Цикл обработки Bybit WebSocket остановлен")
     
     async def _process_bybit_event(self, event: Dict[str, Any]):
-        """Обрабатывает событие от Bybit WebSocket"""
+        """✅ ИСПРАВЛЕНИЕ: Обрабатывает событие от Bybit WebSocket + CandleAggregator"""
         try:
             event_type = event.get("type")
             
             if event_type == "ticker":
+                # Уведомляем подписчиков
                 if self.data_subscribers:
                     await self._notify_subscribers_async()
-            
-            # ✅ ДОБАВЛЕНО: Обработка событий для CandleAggregator
-            elif event_type == "ticker_for_aggregator":
+                
+                # ✅ НОВОЕ: Отправляем данные в CandleAggregator
                 if self.candle_aggregator and self.candle_aggregator.is_running:
                     symbol = event.get("symbol")
                     ticker_data = event.get("data")
@@ -642,32 +648,12 @@ class MarketDataManager:
                         "data": ticker_data
                     })
                 except queue.Full:
-                    logger.warning("⚠️ Очередь Bybit событий переполнена")
+                    logger.warning(f"⚠️ Очередь Bybit событий переполнена: {self._bybit_event_queue.qsize()}/50000")
                     
         except Exception as e:
             logger.error(f"❌ Ошибка обработки Bybit ticker для {symbol}: {e}")
             self.stats["bybit_callback_errors"] += 1
             self.stats["errors"] += 1
-    
-    def _on_bybit_ticker_update_for_aggregator(self, symbol: str, ticker_data: dict):
-        """
-        ✅ ДОБАВЛЕНО: Thread-safe callback для CandleAggregator
-        Отдельный от основного callback чтобы не дублировать события
-        """
-        try:
-            # Сразу отправляем в агрегатор через очередь
-            if self._bybit_event_queue:
-                try:
-                    self._bybit_event_queue.put_nowait({
-                        "type": "ticker_for_aggregator",
-                        "symbol": symbol,
-                        "data": ticker_data
-                    })
-                except queue.Full:
-                    logger.warning(f"⚠️ Очередь Bybit переполнена, пропущен тик для агрегатора: {symbol}")
-                    
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки ticker для агрегатора {symbol}: {e}")
     
     def _on_bybit_orderbook_update(self, symbol: str, orderbook_data: dict):
         """Thread-safe callback для Bybit ордербука"""
@@ -736,13 +722,6 @@ class MarketDataManager:
             
             if success:
                 self.stats["bybit_websocket_reconnects"] += 1
-                
-                # ✅ ИСПРАВЛЕНО: Переподписываем CandleAggregator если есть
-                if self.candle_aggregator and self.candle_aggregator.is_running:
-                    self.bybit_websocket_provider.add_ticker_callback(
-                        self._on_bybit_ticker_update_for_aggregator
-                    )
-                    logger.info("✅ CandleAggregator переподписан после переподключения")
             
             return success
         except Exception as e:
@@ -880,6 +859,7 @@ class MarketDataManager:
                 logger.info(f"   • Bybit WS: {stats['bybit_websocket_updates']}, REST: {stats['bybit_rest_api_calls']}")
                 logger.info(f"   • YFinance WS: {stats['yfinance_websocket_updates']}")
                 logger.info(f"   • Errors: {stats['errors']}")
+                logger.info(f"   • Bybit Queue: {stats.get('bybit_queue_size', 0)}/50000")
                 
                 # Логируем статистику синхронизации
                 if self.candle_sync_service:
@@ -1336,7 +1316,7 @@ class MarketDataManager:
                 "rest_api": rest_api_status,
                 "candle_sync": candle_sync_status,
                 "candle_aggregator": candle_aggregator_status,
-                "bybit_event_queue": "healthy" if self._bybit_event_queue and self._bybit_event_queue.qsize() < 800 else "degraded",
+                "bybit_event_queue": "healthy" if self._bybit_event_queue and self._bybit_event_queue.qsize() < 40000 else "degraded",
                 "yfinance_event_queue": "healthy" if self._yfinance_event_queue and self._yfinance_event_queue.qsize() < 800 else "degraded",
                 "background_tasks": "active" if any(not task.done() for task in self.background_tasks) else "inactive"
             },
