@@ -262,7 +262,7 @@ class MarketDataManager:
             self._main_loop = asyncio.get_running_loop()
             
             # Создаем thread-safe очереди
-            self._bybit_event_queue = queue.Queue(maxsize=5000)
+            self._bybit_event_queue = queue.Queue(maxsize=10000)
             self._yfinance_event_queue = queue.Queue(maxsize=1000)
             
             providers_started = 0
