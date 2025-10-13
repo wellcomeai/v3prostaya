@@ -124,17 +124,23 @@ class MarketDataManager:
     """
     🚀 Центральный менеджер для управления всеми источниками рыночных данных
     
+    🆕 ВАРИАНТ 1: ТОЛЬКО TICKER (без orderbook/trades)
+    
     Поддерживает:
-    ✅ Bybit WebSocket + REST API (криптовалюты) - МНОЖЕСТВЕННЫЕ СИМВОЛЫ
+    ✅ Bybit WebSocket TICKER ONLY (криптовалюты) - 15 символов
+    ✅ REST API для исторических данных
     ✅ YFinance WebSocket (фьючерсы CME)
     ✅ CandleAggregator - сохранение WebSocket данных в БД
-    ✅ Синхронизация исторических свечей для МНОЖЕСТВЕННЫХ символов
+    ✅ Синхронизация исторических свечей
     ✅ 8 параллельных процессоров с распределением символов
     ✅ Thread-safe обработка сообщений
     ✅ Автоматическое переподключение
-    ✅ Интеллектуальное кэширование 
-    ✅ Детальный мониторинг производительности
-    ✅ Graceful shutdown и error recovery
+    ✅ Graceful shutdown
+    
+    📉 Уменьшение потока:
+    - БЫЛО: 15 символов × 3 типа (ticker/orderbook/trades) = 45 потоков
+    - СТАЛО: 15 символов × 1 тип (ticker) = 15 потоков
+    - Результат: Нагрузка в 3 раза меньше!
     """
     
     def __init__(self, 
@@ -203,7 +209,7 @@ class MarketDataManager:
         # Задачи фонового выполнения
         self.background_tasks: List[asyncio.Task] = []
         
-        # ✅ ИЗМЕНЕНО: 8 очередей для параллельной обработки
+        # 8 очередей для параллельной обработки
         self._bybit_event_queues: List[queue.Queue] = []
         self._num_processors = 8  # количество параллельных процессоров
         self._yfinance_event_queue: Optional[queue.Queue] = None
@@ -242,13 +248,14 @@ class MarketDataManager:
         self.current_bybit_reconnect_attempts = 0
         self.current_yfinance_reconnect_attempts = 0
         
-        logger.info(f"🏗️ MarketDataManager инициализирован")
+        logger.info(f"🏗️ MarketDataManager инициализирован (TICKER ONLY)")
         logger.info(f"   • Crypto symbols: {', '.join(self.symbols_crypto)}")
         logger.info(f"   • Futures symbols: {', '.join(self.symbols_futures)}")
         logger.info(f"   • Bybit WS: {enable_bybit_websocket}, YFinance WS: {enable_yfinance_websocket}")
         logger.info(f"   • Candle Sync: {enable_candle_sync} (для {len(self.symbols_crypto)} символов)")
         logger.info(f"   • Candle Aggregation: {enable_candle_aggregation}")
         logger.info(f"   • Процессоров: {self._num_processors}")
+        logger.info(f"   • 📉 Режим: ТОЛЬКО TICKER (без orderbook/trades)")
     
     def _get_queue_index_for_symbol(self, symbol: str) -> int:
         """
@@ -277,7 +284,7 @@ class MarketDataManager:
             # Сохраняем ссылку на основной event loop
             self._main_loop = asyncio.get_running_loop()
             
-            # ✅ ИЗМЕНЕНО: Создаем 8 очередей по 10000 событий
+            # Создаем 8 очередей по 10000 событий
             self._bybit_event_queues = []
             for i in range(self._num_processors):
                 self._bybit_event_queues.append(queue.Queue(maxsize=10000))
@@ -480,9 +487,16 @@ class MarketDataManager:
             raise
     
     async def _initialize_bybit_websocket(self) -> bool:
-        """Инициализация Bybit WebSocket провайдера с множественными символами"""
+        """
+        🆕 ВАРИАНТ 1: Инициализация Bybit WebSocket - ТОЛЬКО TICKER
+        
+        Подписываемся ТОЛЬКО на ticker stream для всех символов.
+        Это уменьшает поток событий в 3 раза:
+        - БЫЛО: 15 символов × 3 типа = 45 потоков
+        - СТАЛО: 15 символов × 1 тип = 15 потоков
+        """
         try:
-            logger.info("🔌 Инициализация Bybit WebSocket провайдера...")
+            logger.info("🔌 Инициализация Bybit WebSocket провайдера (TICKER ONLY)...")
             
             # Передаем ВСЕ крипто символы
             self.bybit_websocket_provider = WebSocketProvider(
@@ -490,10 +504,9 @@ class MarketDataManager:
                 testnet=self.testnet
             )
             
-            # Подписываемся на обновления с thread-safe callback'ами
+            # ✅ ВАРИАНТ 1: Подписываемся ТОЛЬКО на ticker (убрали orderbook и trades)
             self.bybit_websocket_provider.add_ticker_callback(self._on_bybit_ticker_update)
-            self.bybit_websocket_provider.add_orderbook_callback(self._on_bybit_orderbook_update)
-            self.bybit_websocket_provider.add_trades_callback(self._on_bybit_trades_update)
+            logger.info("📊 Подписка: ТОЛЬКО ticker stream (orderbook/trades отключены)")
             
             # Запускаем WebSocket с таймаутом
             start_task = asyncio.create_task(self.bybit_websocket_provider.start())
@@ -508,7 +521,7 @@ class MarketDataManager:
             
             if data_received:
                 self.current_bybit_reconnect_attempts = 0
-                logger.info("✅ Bybit WebSocket провайдер готов")
+                logger.info("✅ Bybit WebSocket провайдер готов (TICKER ONLY режим)")
                 return True
             else:
                 logger.warning("⚠️ Bybit WebSocket данные не получены в течение таймаута")
@@ -564,7 +577,7 @@ class MarketDataManager:
     async def _start_background_tasks(self):
         """Запуск фоновых задач"""
         try:
-            # ✅ ИЗМЕНЕНО: Запускаем 8 процессоров с распределением символов
+            # Запускаем 8 процессоров с распределением символов
             if self.bybit_websocket_provider:
                 for i in range(self._num_processors):
                     bybit_processor = asyncio.create_task(
@@ -612,7 +625,7 @@ class MarketDataManager:
     
     async def _bybit_event_processor(self, queue_index: int):
         """
-        ✅ Фоновая задача для обработки Bybit WebSocket событий
+        Фоновая задача для обработки Bybit WebSocket событий
         
         Args:
             queue_index: Индекс очереди для обработки (0-7)
@@ -666,7 +679,7 @@ class MarketDataManager:
             self.stats["errors"] += 1
     
     def _on_bybit_ticker_update(self, symbol: str, ticker_data: dict):
-        """✅ Thread-safe callback для Bybit тикера с распределением по очередям"""
+        """Thread-safe callback для Bybit тикера с распределением по очередям"""
         try:
             self.stats["bybit_websocket_updates"] += 1
             self.stats["last_bybit_websocket_data"] = datetime.now()
@@ -690,43 +703,8 @@ class MarketDataManager:
             self.stats["bybit_callback_errors"] += 1
             self.stats["errors"] += 1
     
-    def _on_bybit_orderbook_update(self, symbol: str, orderbook_data: dict):
-        """✅ Thread-safe callback для Bybit ордербука с распределением"""
-        try:
-            if self._bybit_event_queues:
-                queue_idx = self._get_queue_index_for_symbol(symbol)
-                target_queue = self._bybit_event_queues[queue_idx]
-                
-                try:
-                    target_queue.put_nowait({
-                        "type": "orderbook",
-                        "symbol": symbol,
-                        "data": orderbook_data
-                    })
-                except queue.Full:
-                    logger.warning(f"⚠️ Очередь #{queue_idx} переполнена")
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки Bybit orderbook для {symbol}: {e}")
-            self.stats["bybit_callback_errors"] += 1
-    
-    def _on_bybit_trades_update(self, symbol: str, trades_data: list):
-        """✅ Thread-safe callback для Bybit трейдов с распределением"""
-        try:
-            if self._bybit_event_queues:
-                queue_idx = self._get_queue_index_for_symbol(symbol)
-                target_queue = self._bybit_event_queues[queue_idx]
-                
-                try:
-                    target_queue.put_nowait({
-                        "type": "trades",
-                        "symbol": symbol,
-                        "data": trades_data
-                    })
-                except queue.Full:
-                    logger.warning(f"⚠️ Очередь #{queue_idx} переполнена")
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки Bybit trades для {symbol}: {e}")
-            self.stats["bybit_callback_errors"] += 1
+    # Примечание: методы _on_bybit_orderbook_update и _on_bybit_trades_update 
+    # оставлены для совместимости, но не используются в Варианте 1
     
     async def _bybit_monitor_task(self):
         """Мониторинг Bybit WebSocket соединения"""
@@ -918,7 +896,7 @@ class MarketDataManager:
                 if self.stats["errors"] > 100:
                     self.stats["errors"] = 10
                 
-                # ✅ ИЗМЕНЕНО: Очищаем переполненные очереди
+                # Очищаем переполненные очереди
                 for i, q in enumerate(self._bybit_event_queues):
                     if q.qsize() > 8000:
                         logger.warning(f"🧹 Очищаю переполненную очередь #{i}")
@@ -1292,7 +1270,7 @@ class MarketDataManager:
             "background_tasks_count": len(self.background_tasks),
             "background_tasks_active": sum(1 for task in self.background_tasks if not task.done()),
             
-            # ✅ ИЗМЕНЕНО: Статистика всех очередей
+            # Статистика всех очередей
             "bybit_queues_size": [q.qsize() for q in self._bybit_event_queues],
             "bybit_queues_total": sum(q.qsize() for q in self._bybit_event_queues),
             "yfinance_queue_size": self._yfinance_event_queue.qsize() if self._yfinance_event_queue else 0,
@@ -1355,7 +1333,7 @@ class MarketDataManager:
             else:
                 yfinance_freshness = "very_stale"
         
-        # ✅ ИЗМЕНЕНО: Статус всех очередей
+        # Статус всех очередей
         queues_status = "healthy"
         if self._bybit_event_queues:
             max_queue_size = max(q.qsize() for q in self._bybit_event_queues)
@@ -1455,7 +1433,7 @@ class MarketDataManager:
             self.data_subscribers.clear()
             self.futures_subscribers.clear()
             
-            # ✅ ИЗМЕНЕНО: Очищаем все очереди
+            # Очищаем все очереди
             events_cleared = 0
             for i, q in enumerate(self._bybit_event_queues):
                 while not q.empty():
@@ -1522,7 +1500,7 @@ class MarketDataManager:
         
         providers = []
         if self.bybit_websocket_provider and self.bybit_websocket_provider.is_running():
-            providers.append("Bybit-WS")
+            providers.append("Bybit-WS(TICKER)")
         if self.yfinance_websocket_provider and self.yfinance_websocket_provider.is_running():
             providers.append("YFinance-WS")
         if self.rest_api_provider:
@@ -1543,7 +1521,7 @@ class MarketDataManager:
         return (f"MarketDataManager(crypto_symbols={self.symbols_crypto}, futures_symbols={self.symbols_futures}, "
                 f"running={self.is_running}, bybit_ws={stats['bybit_websocket_updates']}, "
                 f"yfinance_ws={stats['yfinance_websocket_updates']}, rest={stats['bybit_rest_api_calls']}, "
-                f"errors={stats['errors']}, processors={self._num_processors})")
+                f"errors={stats['errors']}, processors={self._num_processors}, mode=TICKER_ONLY)")
 
 
 # Export main components
@@ -1555,4 +1533,4 @@ __all__ = [
     "HealthStatus"
 ]
 
-logger.info("✅ Market Data Manager module loaded successfully with 8 processors and symbol distribution")
+logger.info("✅ Market Data Manager loaded: VARIANT 1 - TICKER ONLY (no orderbook/trades)")
