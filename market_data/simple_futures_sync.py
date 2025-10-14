@@ -22,6 +22,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
+from database.models.market_data import CandleInterval, MarketDataCandle
+
 logger = logging.getLogger(__name__)
 
 
@@ -328,7 +330,6 @@ class SimpleFuturesSync:
                 logger.debug(f"📥 {symbol} {interval}: догрузка с {start_time.strftime('%Y-%m-%d %H:%M')}")
             else:
                 # Первая загрузка - берем lookback_candles
-                from ..models.market_data import CandleInterval
                 interval_enum = CandleInterval(interval)
                 interval_seconds = interval_enum.to_seconds()
                 
@@ -352,7 +353,6 @@ class SimpleFuturesSync:
                 return 0
             
             # Сохраняем в БД
-            from ..models.market_data import MarketDataCandle
             candle_objects = []
             
             for candle_dict in candles:
@@ -546,7 +546,6 @@ class SimpleFuturesSync:
                 return
             
             # Сохраняем в БД
-            from ..models.market_data import MarketDataCandle
             candle_objects = []
             
             for candle_dict in candles:
