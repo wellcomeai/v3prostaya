@@ -1,37 +1,34 @@
 """
 Модуль для работы с рыночными данными
 
-Предоставляет провайдеры для получения данных из различных источников:
-- Bybit WebSocket для криптовалют в реальном времени
-- YFinance WebSocket для фьючерсов CME в реальном времени
-- REST API для исторических данных
-- Менеджер для управления всеми источниками данных
-- Агрегатор свечей для сохранения WebSocket данных в БД
-- Сервис синхронизации исторических свечей
+Предоставляет надежную синхронизацию свечей через REST API:
+- SimpleCandleSync: Синхронизация криптовалютных свечей (Bybit REST)
+- SimpleFuturesSync: Синхронизация фьючерсных свечей (YFinance REST)
+- MarketDataManager: Опциональный WebSocket ticker для real-time цен
+
+Version 3.0.0 - SimpleCandleSync + SimpleFuturesSync Architecture
 """
 
-# ========== BYBIT ПРОВАЙДЕРЫ ==========
-from .websocket_provider import WebSocketProvider, RealtimeMarketData
-from .rest_api_provider import RestApiProvider
+# ========== 🚀 ОСНОВНЫЕ СИНХРОНИЗАТОРЫ ==========
+from .simple_candle_sync import SimpleCandleSync
+from .simple_futures_sync import SimpleFuturesSync  # 🆕 ДОБАВЛЕНО
 
-# ========== 🆕 YFINANCE ПРОВАЙДЕРЫ ==========
-from .yfinance_websocket_provider import (
-    YFinanceWebSocketProvider,
-    RealtimeFuturesData
-)
-
-# ========== 🆕 CANDLE ОБРАБОТКА ==========
-from .candle_aggregator import CandleAggregator, CandleBuilder
-from .candle_sync_service import CandleSyncService, SyncConfig
-
-# ========== МЕНЕДЖЕР И МОДЕЛИ ДАННЫХ ==========
-from .market_data_manager import (
-    MarketDataManager,
-    MarketDataSnapshot,
-    FuturesSnapshot,
-    DataSourceType,
-    HealthStatus
-)
+# ========== 📊 ОПЦИОНАЛЬНЫЙ WEBSOCKET (только ticker) ==========
+try:
+    from .market_data_manager import (
+        MarketDataManager,
+        MarketDataSnapshot,
+        FuturesSnapshot,
+        DataSourceType,
+        HealthStatus
+    )
+except ImportError:
+    # Если MarketDataManager не нужен, создаем заглушки
+    MarketDataManager = None
+    MarketDataSnapshot = None
+    FuturesSnapshot = None
+    DataSourceType = None
+    HealthStatus = None
 
 # ========== ТИПЫ ДЛЯ БЭКТЕСТИНГА (ЗАГЛУШКИ) ==========
 try:
@@ -44,27 +41,14 @@ except ImportError:
 
 
 __all__ = [
-    # Bybit провайдеры
-    "WebSocketProvider",
-    "RealtimeMarketData",
-    "RestApiProvider",
+    # 🚀 Основные синхронизаторы (REST API)
+    "SimpleCandleSync",      # Криптовалюты (Bybit)
+    "SimpleFuturesSync",     # Фьючерсы (YFinance) 🆕
     
-    # 🆕 YFinance провайдеры
-    "YFinanceWebSocketProvider",
-    "RealtimeFuturesData",
-    
-    # 🆕 Candle обработка
-    "CandleAggregator",
-    "CandleBuilder",
-    "CandleSyncService", 
-    "SyncConfig",
-    
-    # Менеджер и снимки данных
-    "MarketDataManager",
+    # 📊 Опциональный WebSocket ticker
+    "MarketDataManager",     # Только для real-time цен (опционально)
     "MarketDataSnapshot",
     "FuturesSnapshot",
-    
-    # Типы и перечисления
     "DataSourceType",
     "HealthStatus",
     
@@ -74,14 +58,12 @@ __all__ = [
 
 
 # ========== ИНФОРМАЦИЯ О МОДУЛЕ ==========
-__version__ = "2.1.0"  # 🆕 Версия 2.1 с CandleAggregator + CandleSync
+__version__ = "3.0.0"  # 🆕 Версия 3.0 - SimpleCandleSync + SimpleFuturesSync
 __author__ = "Trading Bot Team"
-__description__ = "Market data providers with real-time aggregation and historical sync"
+__description__ = "Reliable candle synchronization via REST API for crypto and futures"
 
 
 # ========== УДОБНЫЕ АЛИАСЫ ==========
-# Для обратной совместимости и удобства
-BybitWebSocket = WebSocketProvider
-YFinanceWebSocket = YFinanceWebSocketProvider
-CryptoData = RealtimeMarketData
-FuturesData = RealtimeFuturesData
+# Для обратной совместимости
+CryptoSync = SimpleCandleSync
+FuturesSync = SimpleFuturesSync
