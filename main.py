@@ -15,6 +15,9 @@ from core import SignalManager, StrategyOrchestrator
 from core.data_models import SystemConfig, StrategyConfig, create_default_system_config
 from strategies import MomentumStrategy
 
+# ✅ НОВОЕ: SimpleCandleSync
+from market_data.simple_candle_sync import SimpleCandleSync
+
 # База данных
 from database import initialize_database, close_database, get_database_health
 
@@ -34,11 +37,12 @@ WEBHOOK_SECRET = "bybit_trading_bot_secret_2025"
 # URL вашего сервера
 BASE_WEBHOOK_URL = "https://bybitmybot.onrender.com"
 
-# Глобальные переменные
+# ✅ ОБНОВЛЕНО: Глобальные переменные
 bot_instance = None
 market_data_manager = None
 signal_manager = None
 strategy_orchestrator = None
+simple_candle_sync = None  # ✅ ДОБАВЛЕНО
 system_config = None
 database_initialized = False
 
@@ -85,13 +89,22 @@ async def health_check(request):
         # Проверяем БД
         db_health = await get_database_health()
         
-        # Проверяем торговую систему
+        # ✅ ОБНОВЛЕНО: Проверяем SimpleCandleSync
         trading_system_status = {
+            "simple_candle_sync": "inactive",
             "market_data_manager": "inactive",
             "signal_manager": "inactive", 
             "strategy_orchestrator": "inactive",
             "strategies_active": 0
         }
+        
+        # SimpleCandleSync статус
+        if simple_candle_sync:
+            try:
+                trading_system_status["simple_candle_sync"] = "running" if simple_candle_sync.is_running else "inactive"
+            except Exception as e:
+                logger.warning(f"SimpleCandleSync health check failed: {e}")
+                trading_system_status["simple_candle_sync"] = "error"
         
         if market_data_manager:
             try:
@@ -191,6 +204,42 @@ async def database_status(request):
             "message": str(e),
             "initialized": database_initialized,
             "timestamp": datetime.now().isoformat()
+        }, status=500)
+
+
+# ========== ✅ НОВЫЙ ENDPOINT: SimpleCandleSync Status ==========
+
+async def simple_sync_status_handler(request):
+    """✅ НОВЫЙ: Endpoint для статуса SimpleCandleSync"""
+    try:
+        if not simple_candle_sync:
+            return web.json_response({
+                "status": "error",
+                "message": "SimpleCandleSync not initialized"
+            }, status=503)
+        
+        stats = simple_candle_sync.get_stats()
+        health = simple_candle_sync.get_health_status()
+        
+        response_data = {
+            "status": "running" if simple_candle_sync.is_running else "stopped",
+            "health": health,
+            "stats": stats,
+            "symbols": simple_candle_sync.symbols,
+            "intervals": [s.interval for s in simple_candle_sync.schedule],
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        response_data = serialize_datetime_objects(response_data)
+        
+        return web.json_response(response_data)
+        
+    except Exception as e:
+        logger.error(f"Error getting SimpleCandleSync status: {e}")
+        logger.error(traceback.format_exc())
+        return web.json_response({
+            "status": "error",
+            "error": str(e)
         }, status=500)
 
 
@@ -327,36 +376,45 @@ async def market_data_status_handler(request):
 async def trading_system_status_handler(request):
     """Endpoint для статуса торговой системы"""
     try:
-        if not market_data_manager or not signal_manager or not strategy_orchestrator:
-            return web.json_response({
-                "status": "inactive",
-                "message": "Trading system not initialized",
-                "timestamp": datetime.now().isoformat()
-            }, status=503)
-        
-        # Собираем статистику
+        # ✅ ОБНОВЛЕНО: Включаем SimpleCandleSync
         response_data = {}
         
-        try:
-            response_data["market_data_manager"] = market_data_manager.get_stats()
-        except Exception as e:
-            logger.warning(f"Failed to get market data stats: {e}")
-            response_data["market_data_manager"] = {"error": str(e)}
+        # SimpleCandleSync статус
+        if simple_candle_sync:
+            try:
+                response_data["simple_candle_sync"] = simple_candle_sync.get_stats()
+            except Exception as e:
+                logger.warning(f"Failed to get simple_candle_sync stats: {e}")
+                response_data["simple_candle_sync"] = {"error": str(e)}
         
-        try:
-            response_data["signal_manager"] = signal_manager.get_stats()
-        except Exception as e:
-            logger.warning(f"Failed to get signal manager stats: {e}")
-            response_data["signal_manager"] = {"error": str(e)}
+        # MarketDataManager статус
+        if market_data_manager:
+            try:
+                response_data["market_data_manager"] = market_data_manager.get_stats()
+            except Exception as e:
+                logger.warning(f"Failed to get market data stats: {e}")
+                response_data["market_data_manager"] = {"error": str(e)}
         
-        try:
-            response_data["strategy_orchestrator"] = strategy_orchestrator.get_stats()
-        except Exception as e:
-            logger.warning(f"Failed to get orchestrator stats: {e}")
-            response_data["strategy_orchestrator"] = {"error": str(e)}
+        # SignalManager статус
+        if signal_manager:
+            try:
+                response_data["signal_manager"] = signal_manager.get_stats()
+            except Exception as e:
+                logger.warning(f"Failed to get signal manager stats: {e}")
+                response_data["signal_manager"] = {"error": str(e)}
         
+        # StrategyOrchestrator статус
+        if strategy_orchestrator:
+            try:
+                response_data["strategy_orchestrator"] = strategy_orchestrator.get_stats()
+            except Exception as e:
+                logger.warning(f"Failed to get orchestrator stats: {e}")
+                response_data["strategy_orchestrator"] = {"error": str(e)}
+        
+        # System health
         try:
             response_data["system_health"] = {
+                "simple_candle_sync": simple_candle_sync.get_health_status() if simple_candle_sync else None,
                 "market_data": market_data_manager.get_health_status() if market_data_manager else None,
                 "strategies": strategy_orchestrator.get_health_status() if strategy_orchestrator else None
             }
@@ -364,6 +422,7 @@ async def trading_system_status_handler(request):
             logger.warning(f"Failed to get system health: {e}")
             response_data["system_health"] = {"error": str(e)}
         
+        # Database
         try:
             response_data["database"] = await get_database_health()
         except Exception as e:
@@ -846,33 +905,33 @@ async def root_handler(request):
     """Root endpoint с информацией о системе"""
     try:
         system_info = {
-            "message": "Bybit Trading Bot v2.1 - Production Ready with YFinance Support",
+            "message": "Bybit Trading Bot v2.2 - SimpleCandleSync Edition",
             "features": [
                 "✅ PostgreSQL Database Integration",
                 "✅ Historical Data Storage", 
-                "✅ Modular Market Data Management",
-                "✅ Bybit WebSocket (Crypto)",
-                "🆕 YFinance WebSocket (CME Futures)",
+                "🆕 SimpleCandleSync - REST API Based Sync",
+                "✅ Bybit WebSocket (Ticker Only)",
                 "✅ Strategy Orchestration System",
                 "✅ Advanced Signal Management",
-                "✅ REST API + WebSocket Integration",
                 "✅ OpenAI Integration",
                 "✅ Telegram Notifications",
                 "✅ Historical Data Loading via API",
                 "✅ Backtesting Engine with Interactive Dashboard",
                 "✅ Dynamic Strategy Loading",
-                "🆕 Smart Candle Aggregation"
+                "✅ Smart Candle Aggregation",
+                "🚀 No Deadlock, Maximum Reliability"
             ],
             "status": "active",
             "timestamp": datetime.now().isoformat(),
             "database_enabled": database_initialized,
-            "trading_system_active": bool(strategy_orchestrator and strategy_orchestrator.is_running),
+            "simple_candle_sync_active": bool(simple_candle_sync and simple_candle_sync.is_running),
             "environment": Config.ENVIRONMENT,
             "webhook_path": WEBHOOK_PATH,
             "api_endpoints": {
                 "health": "/health",
                 "database_status": "/database/status", 
                 "trading_status": "/trading/status",
+                "simple_sync_status": "/admin/sync-status",
                 "market_data_status": "/admin/market-data-status",
                 "yfinance_status": "/admin/yfinance-status",
                 "check_data": "/admin/check-data",
@@ -884,6 +943,14 @@ async def root_handler(request):
         }
         
         # Дополнительная информация
+        if simple_candle_sync:
+            try:
+                health = simple_candle_sync.get_health_status()
+                system_info["simple_candle_sync_health"] = health.get("healthy", False)
+                system_info["candles_synced"] = simple_candle_sync.stats.get("candles_synced", 0)
+            except Exception as e:
+                logger.warning(f"Failed to get SimpleCandleSync status: {e}")
+        
         if market_data_manager:
             try:
                 system_info["market_data_status"] = market_data_manager.get_health_status().get("overall_status", "unknown")
@@ -969,10 +1036,19 @@ async def on_shutdown(bot) -> None:
 
 
 async def cleanup_resources():
-    """Освобождение всех ресурсов"""
-    global bot_instance, market_data_manager, signal_manager, strategy_orchestrator, database_initialized
+    """✅ ОБНОВЛЕНО: Освобождение всех ресурсов"""
+    global bot_instance, market_data_manager, signal_manager, strategy_orchestrator, simple_candle_sync, database_initialized
     
     try:
+        # ✅ ДОБАВЛЕНО: Останавливаем SimpleCandleSync
+        if simple_candle_sync:
+            logger.info("🔄 Остановка SimpleCandleSync...")
+            try:
+                await simple_candle_sync.stop()
+                logger.info("✅ SimpleCandleSync остановлен")
+            except Exception as e:
+                logger.error(f"❌ Ошибка остановки SimpleCandleSync: {e}")
+        
         # Останавливаем торговую систему
         if strategy_orchestrator:
             logger.info("🔄 Остановка StrategyOrchestrator...")
@@ -1058,11 +1134,11 @@ async def initialize_database_system():
 
 
 async def initialize_trading_system():
-    """Инициализация торговой системы с поддержкой YFinance"""
-    global market_data_manager, signal_manager, strategy_orchestrator, system_config
+    """✅ ПОЛНОСТЬЮ ПЕРЕПИСАНО: Инициализация с SimpleCandleSync"""
+    global market_data_manager, signal_manager, strategy_orchestrator, simple_candle_sync, system_config
     
     try:
-        logger.info("🚀 Инициализация торговой системы...")
+        logger.info("🚀 Инициализация торговой системы с SimpleCandleSync...")
         
         # Создаем конфигурацию системы
         system_config = create_default_system_config()
@@ -1070,21 +1146,54 @@ async def initialize_trading_system():
         system_config.bybit_testnet = Config.BYBIT_TESTNET
         system_config.default_symbol = Config.SYMBOL
         
-        # Инициализируем менеджер рыночных данных с поддержкой YFinance
-        logger.info("📊 Инициализация MarketDataManager...")
-        market_data_manager = MarketDataManager(
-            symbols_crypto=Config.get_bybit_symbols(),
-            symbols_futures=Config.get_yfinance_symbols(),
-            testnet=Config.BYBIT_TESTNET,
-            enable_bybit_websocket=Config.BYBIT_WEBSOCKET_ENABLED,
-            enable_yfinance_websocket=Config.YFINANCE_WEBSOCKET_ENABLED,
-            enable_rest_api=Config.REST_API_ENABLED,
-            enable_candle_sync=Config.CANDLE_SYNC_ENABLED,
-            rest_cache_minutes=Config.REST_API_CACHE_MINUTES,
-            websocket_reconnect=Config.WEBSOCKET_RECONNECT_ENABLED
+        # ✅ ШАГ 1: SimpleCandleSync для надежной синхронизации свечей
+        logger.info("🔄 Инициализация SimpleCandleSync...")
+        from database.repositories import get_market_data_repository
+        from bybit_client import BybitClient
+        
+        repository = await get_market_data_repository()
+        bybit_client = BybitClient()
+        
+        # Создаем SimpleCandleSync
+        simple_candle_sync = SimpleCandleSync(
+            symbols=Config.get_bybit_symbols(),
+            bybit_client=bybit_client,
+            repository=repository,
+            check_gaps_on_start=True  # Проверять пропуски при старте
         )
         
-        # Инициализируем менеджер сигналов
+        # Запускаем синхронизацию
+        await simple_candle_sync.start()
+        logger.info("✅ SimpleCandleSync запущен и работает")
+        logger.info(f"   • Символы: {', '.join(Config.get_bybit_symbols())}")
+        logger.info(f"   • Интервалы: 1m, 5m, 15m, 1h, 4h, 1d")
+        
+        # ✅ ШАГ 2: MarketDataManager (ОПЦИОНАЛЬНО - только для WebSocket ticker)
+        if Config.BYBIT_WEBSOCKET_ENABLED:
+            logger.info("📊 Инициализация MarketDataManager (только WebSocket ticker)...")
+            market_data_manager = MarketDataManager(
+                symbols_crypto=Config.get_bybit_symbols(),
+                symbols_futures=[],  # Фьючерсы отключены
+                testnet=Config.BYBIT_TESTNET,
+                enable_bybit_websocket=True,  # Только для real-time ticker
+                enable_yfinance_websocket=False,
+                enable_rest_api=False,  # REST через SimpleCandleSync
+                enable_candle_sync=False,  # Синхронизация через SimpleCandleSync
+                rest_cache_minutes=Config.REST_API_CACHE_MINUTES,
+                websocket_reconnect=Config.WEBSOCKET_RECONNECT_ENABLED
+            )
+            
+            market_data_started = await market_data_manager.start()
+            if market_data_started:
+                logger.info("✅ MarketDataManager (ticker only) активен")
+            else:
+                logger.warning("⚠️ MarketDataManager не запустился, продолжаем без WebSocket")
+                market_data_manager = None
+        else:
+            logger.info("⏭️ WebSocket отключен в конфиге, используем только SimpleCandleSync")
+            market_data_manager = None
+        
+        # ✅ ШАГ 3: SignalManager
         logger.info("🎛️ Инициализация SignalManager...")
         signal_manager = SignalManager(
             max_queue_size=1000,
@@ -1096,41 +1205,44 @@ async def initialize_trading_system():
             signal_manager.add_subscriber(bot_instance.broadcast_signal)
             logger.info("📡 Telegram бот подписан на торговые сигналы")
         
-        # Инициализируем оркестратор стратегий
-        logger.info("🎭 Инициализация StrategyOrchestrator...")
-        strategy_orchestrator = StrategyOrchestrator(
-            market_data_manager=market_data_manager,
-            signal_manager=signal_manager,
-            system_config=system_config,
-            analysis_interval=30.0,
-            max_concurrent_analyses=3,
-            enable_performance_monitoring=True
-        )
-        
-        # Запускаем все компоненты
-        logger.info("▶️ Запуск торговой системы...")
-        
-        # Запускаем менеджер данных
-        market_data_started = await market_data_manager.start()
-        if not market_data_started:
-            raise Exception("Не удалось запустить MarketDataManager")
-        
         # Запускаем менеджер сигналов
         await signal_manager.start()
+        logger.info("✅ SignalManager запущен")
         
-        # Запускаем оркестратор стратегий
-        orchestrator_started = await strategy_orchestrator.start()
-        if not orchestrator_started:
-            raise Exception("Не удалось запустить StrategyOrchestrator")
+        # ✅ ШАГ 4: StrategyOrchestrator (ОПЦИОНАЛЬНО - только если есть WebSocket)
+        if market_data_manager:
+            logger.info("🎭 Инициализация StrategyOrchestrator...")
+            strategy_orchestrator = StrategyOrchestrator(
+                market_data_manager=market_data_manager,
+                signal_manager=signal_manager,
+                system_config=system_config,
+                analysis_interval=30.0,
+                max_concurrent_analyses=3,
+                enable_performance_monitoring=True
+            )
+            
+            orchestrator_started = await strategy_orchestrator.start()
+            if orchestrator_started:
+                logger.info("✅ StrategyOrchestrator активен")
+            else:
+                logger.warning("⚠️ StrategyOrchestrator не запустился")
+                strategy_orchestrator = None
+        else:
+            logger.info("⏭️ StrategyOrchestrator пропущен (нет real-time WebSocket данных)")
+            strategy_orchestrator = None
         
-        logger.info("✅ Торговая система запущена успешно!")
-        logger.info(f"📊 MarketDataManager: активен")
-        logger.info(f"   • Bybit WebSocket: {'✅' if Config.BYBIT_WEBSOCKET_ENABLED else '❌'}")
-        logger.info(f"   • YFinance WebSocket: {'✅' if Config.YFINANCE_WEBSOCKET_ENABLED else '❌'}")
-        logger.info(f"   • Crypto symbols: {', '.join(Config.get_bybit_symbols())}")
-        logger.info(f"   • Futures symbols: {', '.join(Config.get_yfinance_symbols())}")
-        logger.info(f"🎛️ SignalManager: активен") 
-        logger.info(f"🎭 StrategyOrchestrator: активен")
+        # ✅ ФИНАЛЬНАЯ СТАТИСТИКА
+        logger.info("=" * 60)
+        logger.info("✅ ТОРГОВАЯ СИСТЕМА ЗАПУЩЕНА УСПЕШНО!")
+        logger.info("=" * 60)
+        logger.info(f"🔄 SimpleCandleSync: ✅ АКТИВЕН")
+        logger.info(f"   • Символы: {len(Config.get_bybit_symbols())}")
+        logger.info(f"   • Интервалы: 6 (1m, 5m, 15m, 1h, 4h, 1d)")
+        logger.info(f"   • Режим: REST API (надежно, без deadlock)")
+        logger.info(f"📊 WebSocket ticker: {'✅ АКТИВЕН' if market_data_manager else '❌ ОТКЛЮЧЕН'}")
+        logger.info(f"🎛️ SignalManager: ✅ АКТИВЕН")
+        logger.info(f"🎭 StrategyOrchestrator: {'✅ АКТИВЕН' if strategy_orchestrator else '❌ ОТКЛЮЧЕН'}")
+        logger.info("=" * 60)
         
         return True
         
@@ -1145,7 +1257,7 @@ async def create_app():
     global bot_instance
     
     logger.info("=" * 50)
-    logger.info("🚀 ЗАПУСК BYBIT TRADING BOT v2.1")
+    logger.info("🚀 ЗАПУСК BYBIT TRADING BOT v2.2 - SimpleCandleSync Edition")
     logger.info("=" * 50)
     
     # Шаг 1: Инициализация базы данных
@@ -1166,7 +1278,6 @@ async def create_app():
     if trading_system_started:
         logger.info("✅ Торговая система активна")
         logger.info(f"📊 Crypto: {', '.join(Config.get_bybit_symbols())}")
-        logger.info(f"📈 Futures: {', '.join(Config.get_yfinance_symbols())}")
         logger.info(f"🔧 Режим: {'Testnet' if Config.BYBIT_TESTNET else 'Mainnet'}")
         logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
     else:
@@ -1188,7 +1299,10 @@ async def create_app():
     app.router.add_post("/admin/load-history", load_historical_data_handler)
     app.router.add_get("/admin/check-data", check_database_data_handler)
     
-    # YFinance endpoints
+    # ✅ ДОБАВЛЕНО: SimpleCandleSync endpoint
+    app.router.add_get("/admin/sync-status", simple_sync_status_handler)
+    
+    # YFinance endpoints (если используется)
     app.router.add_get("/admin/yfinance-status", yfinance_status_handler)
     app.router.add_get("/admin/market-data-status", market_data_status_handler)
     
@@ -1220,12 +1334,11 @@ async def main():
     """Главная функция приложения"""
     
     try:
-        logger.info("🌟 Запуск Bybit Trading Bot v2.1 (Production Ready with YFinance)")
+        logger.info("🌟 Запуск Bybit Trading Bot v2.2 - SimpleCandleSync Edition")
         logger.info(f"🔧 Порт: {WEB_SERVER_PORT}")
         logger.info(f"🔧 Webhook URL: {BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
         logger.info(f"🔧 Testnet: {Config.BYBIT_TESTNET}")
         logger.info(f"🔧 Crypto: {', '.join(Config.get_bybit_symbols())}")
-        logger.info(f"🔧 Futures: {', '.join(Config.get_yfinance_symbols())}")
         logger.info(f"🔧 Environment: {Config.ENVIRONMENT}")
         logger.info(f"🔧 Database: {'настроена' if Config.get_database_url() else 'НЕ НАСТРОЕНА'}")
         
@@ -1245,14 +1358,15 @@ async def main():
         logger.info(f"🌐 Веб-сервер: {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
         logger.info(f"🤖 Telegram бот: активен")
         logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
+        logger.info(f"🔄 SimpleCandleSync: {'активен' if simple_candle_sync and simple_candle_sync.is_running else 'неактивен'}")
         logger.info(f"🚀 Торговая система: {'активна' if strategy_orchestrator and strategy_orchestrator.is_running else 'неактивна'}")
         logger.info("=" * 50)
         logger.info("📡 Endpoints:")
         logger.info(f"   • Health: {BASE_WEBHOOK_URL}/health")
         logger.info(f"   • Database: {BASE_WEBHOOK_URL}/database/status")
         logger.info(f"   • Trading: {BASE_WEBHOOK_URL}/trading/status")
+        logger.info(f"   • Sync Status: {BASE_WEBHOOK_URL}/admin/sync-status")
         logger.info(f"   • Market Data: {BASE_WEBHOOK_URL}/admin/market-data-status")
-        logger.info(f"   • YFinance: {BASE_WEBHOOK_URL}/admin/yfinance-status")
         logger.info(f"   • Check Data: {BASE_WEBHOOK_URL}/admin/check-data")
         logger.info(f"   • Load History: {BASE_WEBHOOK_URL}/admin/load-history")
         logger.info(f"   • Strategies: {BASE_WEBHOOK_URL}/backtest/strategies")
@@ -1264,6 +1378,15 @@ async def main():
             while True:
                 await asyncio.sleep(3600)
                 
+                # Мониторинг SimpleCandleSync
+                if simple_candle_sync and not simple_candle_sync.is_running:
+                    logger.warning("⚠️ SimpleCandleSync остановился, перезапуск...")
+                    try:
+                        await simple_candle_sync.start()
+                        logger.info("✅ SimpleCandleSync перезапущен")
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось перезапустить SimpleCandleSync: {e}")
+                
                 if strategy_orchestrator and not strategy_orchestrator.is_running:
                     logger.warning("⚠️ StrategyOrchestrator остановился, перезапуск...")
                     try:
@@ -1272,13 +1395,20 @@ async def main():
                     except Exception as e:
                         logger.error(f"❌ Не удалось перезапустить StrategyOrchestrator: {e}")
                 
-                if bot_instance and strategy_orchestrator:
+                # Статистика
+                if bot_instance and simple_candle_sync:
                     try:
                         subscribers_count = len(bot_instance.signal_subscribers)
-                        strategies_active = strategy_orchestrator._count_active_strategies()
+                        sync_stats = simple_candle_sync.get_stats()
+                        strategies_active = strategy_orchestrator._count_active_strategies() if strategy_orchestrator else 0
                         db_status = "OK" if database_initialized else "OFF"
-                        logger.info(f"📊 Статистика: {subscribers_count} подписчиков, "
-                                  f"{strategies_active} стратегий, БД: {db_status}")
+                        
+                        logger.info(f"📊 Статистика:")
+                        logger.info(f"   • Подписчики: {subscribers_count}")
+                        logger.info(f"   • Свечей синхронизировано: {sync_stats.get('candles_synced', 0)}")
+                        logger.info(f"   • API запросов: {sync_stats.get('api_calls', 0)}")
+                        logger.info(f"   • Стратегии: {strategies_active}")
+                        logger.info(f"   • БД: {db_status}")
                     except Exception as e:
                         logger.warning(f"⚠️ Не удалось получить статистику: {e}")
                 
