@@ -15,8 +15,11 @@ from core import SignalManager, StrategyOrchestrator
 from core.data_models import SystemConfig, StrategyConfig, create_default_system_config
 from strategies import MomentumStrategy
 
-# ✅ НОВОЕ: SimpleCandleSync
+# ✅ SimpleCandleSync для криптовалют (Bybit)
 from market_data.simple_candle_sync import SimpleCandleSync
+
+# ✅ НОВОЕ: SimpleFuturesSync для фьючерсов (YFinance)
+from market_data.simple_futures_sync import SimpleFuturesSync
 
 # База данных
 from database import initialize_database, close_database, get_database_health
@@ -37,12 +40,13 @@ WEBHOOK_SECRET = "bybit_trading_bot_secret_2025"
 # URL вашего сервера
 BASE_WEBHOOK_URL = "https://bybitmybot.onrender.com"
 
-# ✅ ОБНОВЛЕНО: Глобальные переменные
+# ✅ ОБНОВЛЕНО: Глобальные переменные с SimpleFuturesSync
 bot_instance = None
 market_data_manager = None
 signal_manager = None
 strategy_orchestrator = None
-simple_candle_sync = None  # ✅ ДОБАВЛЕНО
+simple_candle_sync = None
+simple_futures_sync = None  # ✅ ДОБАВЛЕНО
 system_config = None
 database_initialized = False
 
@@ -89,9 +93,10 @@ async def health_check(request):
         # Проверяем БД
         db_health = await get_database_health()
         
-        # ✅ ОБНОВЛЕНО: Проверяем SimpleCandleSync
+        # ✅ ОБНОВЛЕНО: Проверяем SimpleCandleSync + SimpleFuturesSync
         trading_system_status = {
             "simple_candle_sync": "inactive",
+            "simple_futures_sync": "inactive",  # ✅ ДОБАВЛЕНО
             "market_data_manager": "inactive",
             "signal_manager": "inactive", 
             "strategy_orchestrator": "inactive",
@@ -105,6 +110,14 @@ async def health_check(request):
             except Exception as e:
                 logger.warning(f"SimpleCandleSync health check failed: {e}")
                 trading_system_status["simple_candle_sync"] = "error"
+        
+        # ✅ ДОБАВЛЕНО: SimpleFuturesSync статус
+        if simple_futures_sync:
+            try:
+                trading_system_status["simple_futures_sync"] = "running" if simple_futures_sync.is_running else "inactive"
+            except Exception as e:
+                logger.warning(f"SimpleFuturesSync health check failed: {e}")
+                trading_system_status["simple_futures_sync"] = "error"
         
         if market_data_manager:
             try:
@@ -207,10 +220,10 @@ async def database_status(request):
         }, status=500)
 
 
-# ========== ✅ НОВЫЙ ENDPOINT: SimpleCandleSync Status ==========
+# ========== SYNC STATUS ENDPOINTS ==========
 
 async def simple_sync_status_handler(request):
-    """✅ НОВЫЙ: Endpoint для статуса SimpleCandleSync"""
+    """Endpoint для статуса SimpleCandleSync (крипта)"""
     try:
         if not simple_candle_sync:
             return web.json_response({
@@ -236,6 +249,40 @@ async def simple_sync_status_handler(request):
         
     except Exception as e:
         logger.error(f"Error getting SimpleCandleSync status: {e}")
+        logger.error(traceback.format_exc())
+        return web.json_response({
+            "status": "error",
+            "error": str(e)
+        }, status=500)
+
+
+async def futures_sync_status_handler(request):
+    """✅ НОВЫЙ: Endpoint для статуса SimpleFuturesSync (фьючерсы)"""
+    try:
+        if not simple_futures_sync:
+            return web.json_response({
+                "status": "error",
+                "message": "SimpleFuturesSync not initialized"
+            }, status=503)
+        
+        stats = simple_futures_sync.get_stats()
+        health = simple_futures_sync.get_health_status()
+        
+        response_data = {
+            "status": "running" if simple_futures_sync.is_running else "stopped",
+            "health": health,
+            "stats": stats,
+            "symbols": simple_futures_sync.symbols,
+            "intervals": [s.interval for s in simple_futures_sync.schedule],
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        response_data = serialize_datetime_objects(response_data)
+        
+        return web.json_response(response_data)
+        
+    except Exception as e:
+        logger.error(f"Error getting SimpleFuturesSync status: {e}")
         logger.error(traceback.format_exc())
         return web.json_response({
             "status": "error",
@@ -376,7 +423,7 @@ async def market_data_status_handler(request):
 async def trading_system_status_handler(request):
     """Endpoint для статуса торговой системы"""
     try:
-        # ✅ ОБНОВЛЕНО: Включаем SimpleCandleSync
+        # ✅ ОБНОВЛЕНО: Включаем SimpleCandleSync + SimpleFuturesSync
         response_data = {}
         
         # SimpleCandleSync статус
@@ -386,6 +433,14 @@ async def trading_system_status_handler(request):
             except Exception as e:
                 logger.warning(f"Failed to get simple_candle_sync stats: {e}")
                 response_data["simple_candle_sync"] = {"error": str(e)}
+        
+        # ✅ ДОБАВЛЕНО: SimpleFuturesSync статус
+        if simple_futures_sync:
+            try:
+                response_data["simple_futures_sync"] = simple_futures_sync.get_stats()
+            except Exception as e:
+                logger.warning(f"Failed to get simple_futures_sync stats: {e}")
+                response_data["simple_futures_sync"] = {"error": str(e)}
         
         # MarketDataManager статус
         if market_data_manager:
@@ -415,6 +470,7 @@ async def trading_system_status_handler(request):
         try:
             response_data["system_health"] = {
                 "simple_candle_sync": simple_candle_sync.get_health_status() if simple_candle_sync else None,
+                "simple_futures_sync": simple_futures_sync.get_health_status() if simple_futures_sync else None,  # ✅ ДОБАВЛЕНО
                 "market_data": market_data_manager.get_health_status() if market_data_manager else None,
                 "strategies": strategy_orchestrator.get_health_status() if strategy_orchestrator else None
             }
@@ -761,7 +817,7 @@ async def get_strategies_handler(request):
 
 
 async def run_backtest_handler(request):
-    """✅ ИСПРАВЛЕНО: Endpoint для бэктестинга с умной агрегацией данных"""
+    """Endpoint для бэктестинга с умной агрегацией данных"""
     try:
         if not database_initialized:
             return web.json_response({
@@ -794,9 +850,9 @@ async def run_backtest_handler(request):
         
         logger.info(f"🎯 Запуск бэктестинга: {symbol}, {interval}, капитал=${initial_capital:,.2f}, стратегия={strategy_type}, период={days}д")
         
-        # ✅ ИСПРАВЛЕННЫЕ ИМПОРТЫ
+        # Импорты
         from backtesting import BacktestEngine, ReportGenerator
-        from database.repositories import get_market_data_repository  # ✅ Правильный импорт
+        from database.repositories import get_market_data_repository
         from strategies import create_strategy, get_available_strategies
         
         # Проверяем доступность стратегии
@@ -808,8 +864,8 @@ async def run_backtest_handler(request):
                 "available_strategies": list(available_strategies.keys())
             }, status=400)
         
-        # ✅ ИСПРАВЛЕНО: Загружаем данные через репозиторий с умной агрегацией
-        repository = await get_market_data_repository()  # ✅ Правильный вызов с await
+        # Загружаем данные через репозиторий с умной агрегацией
+        repository = await get_market_data_repository()
         
         # Определяем временной диапазон
         end_time = datetime.now()
@@ -819,7 +875,6 @@ async def run_backtest_handler(request):
         
         try:
             # Используем get_candles_smart для автоматической агрегации
-            # Если запрошенный интервал отсутствует в БД, метод автоматически агрегирует из меньших
             candles_raw = await repository.get_candles_smart(
                 symbol=symbol.upper(),
                 interval=interval,
@@ -905,11 +960,12 @@ async def root_handler(request):
     """Root endpoint с информацией о системе"""
     try:
         system_info = {
-            "message": "Bybit Trading Bot v2.2 - SimpleCandleSync Edition",
+            "message": "Bybit Trading Bot v2.3 - SimpleCandleSync + SimpleFuturesSync Edition",
             "features": [
                 "✅ PostgreSQL Database Integration",
                 "✅ Historical Data Storage", 
-                "🆕 SimpleCandleSync - REST API Based Sync",
+                "✅ SimpleCandleSync - REST API Based Sync (Crypto)",
+                "🆕 SimpleFuturesSync - YFinance REST API Sync (Futures)",
                 "✅ Bybit WebSocket (Ticker Only)",
                 "✅ Strategy Orchestration System",
                 "✅ Advanced Signal Management",
@@ -925,6 +981,7 @@ async def root_handler(request):
             "timestamp": datetime.now().isoformat(),
             "database_enabled": database_initialized,
             "simple_candle_sync_active": bool(simple_candle_sync and simple_candle_sync.is_running),
+            "simple_futures_sync_active": bool(simple_futures_sync and simple_futures_sync.is_running),  # ✅ ДОБАВЛЕНО
             "environment": Config.ENVIRONMENT,
             "webhook_path": WEBHOOK_PATH,
             "api_endpoints": {
@@ -932,6 +989,7 @@ async def root_handler(request):
                 "database_status": "/database/status", 
                 "trading_status": "/trading/status",
                 "simple_sync_status": "/admin/sync-status",
+                "futures_sync_status": "/admin/futures-sync-status",  # ✅ ДОБАВЛЕНО
                 "market_data_status": "/admin/market-data-status",
                 "yfinance_status": "/admin/yfinance-status",
                 "check_data": "/admin/check-data",
@@ -950,6 +1008,15 @@ async def root_handler(request):
                 system_info["candles_synced"] = simple_candle_sync.stats.get("candles_synced", 0)
             except Exception as e:
                 logger.warning(f"Failed to get SimpleCandleSync status: {e}")
+        
+        # ✅ ДОБАВЛЕНО: SimpleFuturesSync info
+        if simple_futures_sync:
+            try:
+                health = simple_futures_sync.get_health_status()
+                system_info["simple_futures_sync_health"] = health.get("healthy", False)
+                system_info["futures_candles_synced"] = simple_futures_sync.stats.get("candles_synced", 0)
+            except Exception as e:
+                logger.warning(f"Failed to get SimpleFuturesSync status: {e}")
         
         if market_data_manager:
             try:
@@ -1036,11 +1103,20 @@ async def on_shutdown(bot) -> None:
 
 
 async def cleanup_resources():
-    """✅ ОБНОВЛЕНО: Освобождение всех ресурсов"""
-    global bot_instance, market_data_manager, signal_manager, strategy_orchestrator, simple_candle_sync, database_initialized
+    """✅ ОБНОВЛЕНО: Освобождение всех ресурсов включая SimpleFuturesSync"""
+    global bot_instance, market_data_manager, signal_manager, strategy_orchestrator, simple_candle_sync, simple_futures_sync, database_initialized
     
     try:
-        # ✅ ДОБАВЛЕНО: Останавливаем SimpleCandleSync
+        # ✅ ДОБАВЛЕНО: Останавливаем SimpleFuturesSync
+        if simple_futures_sync:
+            logger.info("🔄 Остановка SimpleFuturesSync...")
+            try:
+                await simple_futures_sync.stop()
+                logger.info("✅ SimpleFuturesSync остановлен")
+            except Exception as e:
+                logger.error(f"❌ Ошибка остановки SimpleFuturesSync: {e}")
+        
+        # Останавливаем SimpleCandleSync
         if simple_candle_sync:
             logger.info("🔄 Остановка SimpleCandleSync...")
             try:
@@ -1134,11 +1210,11 @@ async def initialize_database_system():
 
 
 async def initialize_trading_system():
-    """✅ ПОЛНОСТЬЮ ПЕРЕПИСАНО: Инициализация с SimpleCandleSync"""
-    global market_data_manager, signal_manager, strategy_orchestrator, simple_candle_sync, system_config
+    """✅ ПОЛНОСТЬЮ ПЕРЕПИСАНО: Инициализация с SimpleCandleSync + SimpleFuturesSync"""
+    global market_data_manager, signal_manager, strategy_orchestrator, simple_candle_sync, simple_futures_sync, system_config
     
     try:
-        logger.info("🚀 Инициализация торговой системы с SimpleCandleSync...")
+        logger.info("🚀 Инициализация торговой системы с SimpleCandleSync + SimpleFuturesSync...")
         
         # Создаем конфигурацию системы
         system_config = create_default_system_config()
@@ -1146,8 +1222,8 @@ async def initialize_trading_system():
         system_config.bybit_testnet = Config.BYBIT_TESTNET
         system_config.default_symbol = Config.SYMBOL
         
-        # ✅ ШАГ 1: SimpleCandleSync для надежной синхронизации свечей
-        logger.info("🔄 Инициализация SimpleCandleSync...")
+        # ✅ ШАГ 1: SimpleCandleSync для крипты (Bybit)
+        logger.info("🔄 Инициализация SimpleCandleSync для криптовалют...")
         from database.repositories import get_market_data_repository
         from bybit_client import BybitClient
         
@@ -1167,6 +1243,27 @@ async def initialize_trading_system():
         logger.info("✅ SimpleCandleSync запущен и работает")
         logger.info(f"   • Символы: {', '.join(Config.get_bybit_symbols())}")
         logger.info(f"   • Интервалы: 1m, 5m, 15m, 1h, 4h, 1d")
+        
+        # ✅ ШАГ 1.5: SimpleFuturesSync для фьючерсов (YFinance)
+        logger.info("🔄 Инициализация SimpleFuturesSync для фьючерсов...")
+        
+        # Проверяем что фьючерсы включены в конфиге
+        futures_symbols = Config.get_yfinance_symbols() if hasattr(Config, 'get_yfinance_symbols') else []
+        
+        if futures_symbols:
+            simple_futures_sync = SimpleFuturesSync(
+                symbols=futures_symbols,
+                repository=repository,
+                check_gaps_on_start=True
+            )
+            
+            await simple_futures_sync.start()
+            logger.info("✅ SimpleFuturesSync запущен и работает")
+            logger.info(f"   • Символы: {', '.join(futures_symbols)}")
+            logger.info(f"   • Интервалы: 1m, 5m, 15m, 1h, 4h, 1d")
+        else:
+            logger.info("⏭️ SimpleFuturesSync пропущен (нет фьючерсных символов в Config)")
+            simple_futures_sync = None
         
         # ✅ ШАГ 2: MarketDataManager (ОПЦИОНАЛЬНО - только для WebSocket ticker)
         if Config.BYBIT_WEBSOCKET_ENABLED:
@@ -1235,10 +1332,19 @@ async def initialize_trading_system():
         logger.info("=" * 60)
         logger.info("✅ ТОРГОВАЯ СИСТЕМА ЗАПУЩЕНА УСПЕШНО!")
         logger.info("=" * 60)
-        logger.info(f"🔄 SimpleCandleSync: ✅ АКТИВЕН")
+        logger.info(f"🔄 SimpleCandleSync (Crypto): ✅ АКТИВЕН")
         logger.info(f"   • Символы: {len(Config.get_bybit_symbols())}")
         logger.info(f"   • Интервалы: 6 (1m, 5m, 15m, 1h, 4h, 1d)")
-        logger.info(f"   • Режим: REST API (надежно, без deadlock)")
+        logger.info(f"   • Режим: Bybit REST API")
+        
+        if simple_futures_sync:
+            logger.info(f"🔄 SimpleFuturesSync (Futures): ✅ АКТИВЕН")
+            logger.info(f"   • Символы: {len(futures_symbols)}")
+            logger.info(f"   • Интервалы: 6 (1m, 5m, 15m, 1h, 4h, 1d)")
+            logger.info(f"   • Режим: YFinance REST API")
+        else:
+            logger.info(f"🔄 SimpleFuturesSync: ❌ ОТКЛЮЧЕН")
+        
         logger.info(f"📊 WebSocket ticker: {'✅ АКТИВЕН' if market_data_manager else '❌ ОТКЛЮЧЕН'}")
         logger.info(f"🎛️ SignalManager: ✅ АКТИВЕН")
         logger.info(f"🎭 StrategyOrchestrator: {'✅ АКТИВЕН' if strategy_orchestrator else '❌ ОТКЛЮЧЕН'}")
@@ -1257,7 +1363,7 @@ async def create_app():
     global bot_instance
     
     logger.info("=" * 50)
-    logger.info("🚀 ЗАПУСК BYBIT TRADING BOT v2.2 - SimpleCandleSync Edition")
+    logger.info("🚀 ЗАПУСК BYBIT TRADING BOT v2.3 - SimpleCandleSync + SimpleFuturesSync")
     logger.info("=" * 50)
     
     # Шаг 1: Инициализация базы данных
@@ -1278,6 +1384,9 @@ async def create_app():
     if trading_system_started:
         logger.info("✅ Торговая система активна")
         logger.info(f"📊 Crypto: {', '.join(Config.get_bybit_symbols())}")
+        futures_symbols = Config.get_yfinance_symbols() if hasattr(Config, 'get_yfinance_symbols') else []
+        if futures_symbols:
+            logger.info(f"📊 Futures: {', '.join(futures_symbols)}")
         logger.info(f"🔧 Режим: {'Testnet' if Config.BYBIT_TESTNET else 'Mainnet'}")
         logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
     else:
@@ -1299,8 +1408,9 @@ async def create_app():
     app.router.add_post("/admin/load-history", load_historical_data_handler)
     app.router.add_get("/admin/check-data", check_database_data_handler)
     
-    # ✅ ДОБАВЛЕНО: SimpleCandleSync endpoint
+    # SimpleCandleSync + SimpleFuturesSync endpoints
     app.router.add_get("/admin/sync-status", simple_sync_status_handler)
+    app.router.add_get("/admin/futures-sync-status", futures_sync_status_handler)  # ✅ ДОБАВЛЕНО
     
     # YFinance endpoints (если используется)
     app.router.add_get("/admin/yfinance-status", yfinance_status_handler)
@@ -1334,11 +1444,16 @@ async def main():
     """Главная функция приложения"""
     
     try:
-        logger.info("🌟 Запуск Bybit Trading Bot v2.2 - SimpleCandleSync Edition")
+        logger.info("🌟 Запуск Bybit Trading Bot v2.3 - SimpleCandleSync + SimpleFuturesSync")
         logger.info(f"🔧 Порт: {WEB_SERVER_PORT}")
         logger.info(f"🔧 Webhook URL: {BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
         logger.info(f"🔧 Testnet: {Config.BYBIT_TESTNET}")
         logger.info(f"🔧 Crypto: {', '.join(Config.get_bybit_symbols())}")
+        
+        futures_symbols = Config.get_yfinance_symbols() if hasattr(Config, 'get_yfinance_symbols') else []
+        if futures_symbols:
+            logger.info(f"🔧 Futures: {', '.join(futures_symbols)}")
+        
         logger.info(f"🔧 Environment: {Config.ENVIRONMENT}")
         logger.info(f"🔧 Database: {'настроена' if Config.get_database_url() else 'НЕ НАСТРОЕНА'}")
         
@@ -1359,13 +1474,15 @@ async def main():
         logger.info(f"🤖 Telegram бот: активен")
         logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
         logger.info(f"🔄 SimpleCandleSync: {'активен' if simple_candle_sync and simple_candle_sync.is_running else 'неактивен'}")
+        logger.info(f"🔄 SimpleFuturesSync: {'активен' if simple_futures_sync and simple_futures_sync.is_running else 'неактивен'}")
         logger.info(f"🚀 Торговая система: {'активна' if strategy_orchestrator and strategy_orchestrator.is_running else 'неактивна'}")
         logger.info("=" * 50)
         logger.info("📡 Endpoints:")
         logger.info(f"   • Health: {BASE_WEBHOOK_URL}/health")
         logger.info(f"   • Database: {BASE_WEBHOOK_URL}/database/status")
         logger.info(f"   • Trading: {BASE_WEBHOOK_URL}/trading/status")
-        logger.info(f"   • Sync Status: {BASE_WEBHOOK_URL}/admin/sync-status")
+        logger.info(f"   • Crypto Sync: {BASE_WEBHOOK_URL}/admin/sync-status")
+        logger.info(f"   • Futures Sync: {BASE_WEBHOOK_URL}/admin/futures-sync-status")
         logger.info(f"   • Market Data: {BASE_WEBHOOK_URL}/admin/market-data-status")
         logger.info(f"   • Check Data: {BASE_WEBHOOK_URL}/admin/check-data")
         logger.info(f"   • Load History: {BASE_WEBHOOK_URL}/admin/load-history")
@@ -1387,6 +1504,15 @@ async def main():
                     except Exception as e:
                         logger.error(f"❌ Не удалось перезапустить SimpleCandleSync: {e}")
                 
+                # ✅ ДОБАВЛЕНО: Мониторинг SimpleFuturesSync
+                if simple_futures_sync and not simple_futures_sync.is_running:
+                    logger.warning("⚠️ SimpleFuturesSync остановился, перезапуск...")
+                    try:
+                        await simple_futures_sync.start()
+                        logger.info("✅ SimpleFuturesSync перезапущен")
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось перезапустить SimpleFuturesSync: {e}")
+                
                 if strategy_orchestrator and not strategy_orchestrator.is_running:
                     logger.warning("⚠️ StrategyOrchestrator остановился, перезапуск...")
                     try:
@@ -1396,17 +1522,19 @@ async def main():
                         logger.error(f"❌ Не удалось перезапустить StrategyOrchestrator: {e}")
                 
                 # Статистика
-                if bot_instance and simple_candle_sync:
+                if bot_instance:
                     try:
                         subscribers_count = len(bot_instance.signal_subscribers)
-                        sync_stats = simple_candle_sync.get_stats()
                         strategies_active = strategy_orchestrator._count_active_strategies() if strategy_orchestrator else 0
                         db_status = "OK" if database_initialized else "OFF"
                         
+                        crypto_synced = simple_candle_sync.get_stats().get('candles_synced', 0) if simple_candle_sync else 0
+                        futures_synced = simple_futures_sync.get_stats().get('candles_synced', 0) if simple_futures_sync else 0
+                        
                         logger.info(f"📊 Статистика:")
                         logger.info(f"   • Подписчики: {subscribers_count}")
-                        logger.info(f"   • Свечей синхронизировано: {sync_stats.get('candles_synced', 0)}")
-                        logger.info(f"   • API запросов: {sync_stats.get('api_calls', 0)}")
+                        logger.info(f"   • Крипта свечей: {crypto_synced}")
+                        logger.info(f"   • Фьючерсы свечей: {futures_synced}")
                         logger.info(f"   • Стратегии: {strategies_active}")
                         logger.info(f"   • БД: {db_status}")
                     except Exception as e:
