@@ -132,7 +132,7 @@ class ATRCalculator:
             if current_price:
                 price = current_price
             elif candles:
-                price = float(candles[-1].close_price)
+                price = float(candles[-1]['close_price'])
             else:
                 price = 1.0  # Fallback
             
@@ -145,7 +145,7 @@ class ATRCalculator:
             if current_price and len(candles) > 0:
                 # Берем текущий бар (последний)
                 today_candle = candles[-1]
-                today_range = abs(float(today_candle.high_price) - float(today_candle.low_price))
+                today_range = abs(float(today_candle['high_price']) - float(today_candle['low_price']))
                 
                 # Процент использования = пройденный диапазон / ATR
                 if calculated_atr > 0:
@@ -205,8 +205,8 @@ class ATRCalculator:
             # Вычисляем диапазоны High-Low
             ranges = []
             for candle in recent_candles:
-                high = float(candle.high_price)
-                low = float(candle.low_price)
+                high = float(candle['high_price'])
+                low = float(candle['low_price'])
                 range_val = high - low
                 
                 if range_val < 0:
@@ -388,8 +388,8 @@ class ATRCalculator:
                 return False, 0.0
             
             today_candle = candles[-1]
-            today_high = float(today_candle.high_price)
-            today_low = float(today_candle.low_price)
+            today_high = float(today_candle['high_price'])
+            today_low = float(today_candle['low_price'])
             today_range = today_high - today_low
             
             # Процент использования
