@@ -7,7 +7,8 @@ from .data_models import (
     RiskParameters,
     NotificationSettings
 )
-from .strategy_orchestrator import StrategyOrchestrator  # ← Раскомментировать
+from .strategy_orchestrator import StrategyOrchestrator
+from .data_source_adapter import DataSourceAdapter  # ← ДОБАВЛЕНО
 
 __all__ = [
     # Signal Management
@@ -24,5 +25,6 @@ __all__ = [
     "NotificationSettings",
     
     # Strategy Management
-    "StrategyOrchestrator"  # ← Раскомментировать
+    "StrategyOrchestrator",
+    "DataSourceAdapter"  # ← ДОБАВЛЕНО
 ]
