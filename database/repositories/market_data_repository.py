@@ -183,7 +183,7 @@ class MarketDataRepository:
             order_desc: Order by time descending (newest first)
             
         Returns:
-            List[Dict]: Candle data as dictionaries
+            List[Dict]: Candle data as dictionaries with correct keys for analyzers
         """
         try:
             conditions = ["symbol = $1", "interval = $2"]
@@ -219,26 +219,26 @@ class MarketDataRepository:
             
             results = await self.db.fetch(query, *params)
             
-            # Convert to dictionaries
+            # ✅ ИСПРАВЛЕНО: Правильные ключи для анализаторов
             candles = []
             for row in results:
                 candles.append({
                     'id': row['id'],
                     'symbol': row['symbol'],
                     'interval': row['interval'],
-                    'open_time': row['open_time'].isoformat(),
-                    'close_time': row['close_time'].isoformat(),
-                    'open': float(row['open_price']),
-                    'high': float(row['high_price']),
-                    'low': float(row['low_price']),
-                    'close': float(row['close_price']),
+                    'open_time': row['open_time'],  # ✅ datetime объект (не string)
+                    'close_time': row['close_time'],  # ✅ datetime объект
+                    'open_price': float(row['open_price']),  # ✅ Правильный ключ
+                    'high_price': float(row['high_price']),  # ✅ Правильный ключ
+                    'low_price': float(row['low_price']),    # ✅ Правильный ключ
+                    'close_price': float(row['close_price']),  # ✅ Правильный ключ
                     'volume': float(row['volume']),
                     'quote_volume': float(row['quote_volume']) if row['quote_volume'] else 0,
                     'number_of_trades': row['number_of_trades'],
                     'taker_buy_base_volume': float(row['taker_buy_base_volume']) if row['taker_buy_base_volume'] else 0,
                     'taker_buy_quote_volume': float(row['taker_buy_quote_volume']) if row['taker_buy_quote_volume'] else 0,
                     'data_source': row['data_source'],
-                    'created_at': row['created_at'].isoformat()
+                    'created_at': row['created_at']  # ✅ datetime объект
                 })
             
             self.stats["candles_queried"] += len(candles)
@@ -337,7 +337,7 @@ class MarketDataRepository:
             sma_data = []
             for row in results:
                 sma_data.append({
-                    'open_time': row['open_time'].isoformat(),
+                    'open_time': row['open_time'],  # ✅ datetime объект
                     'close_price': float(row['close_price']),
                     'sma': float(row['sma']) if row['sma'] else None
                 })
@@ -585,7 +585,7 @@ class MarketDataRepository:
             end_time: End time for aggregation
         
         Returns:
-            List[Dict]: Aggregated candles
+            List[Dict]: Aggregated candles with correct keys
             
         Example: 
             base_interval='1m', target_interval='5m' → 5 свечей по 1m → 1 свеча 5m
@@ -618,7 +618,7 @@ class MarketDataRepository:
             if not base_candles:
                 return []
             
-            # Агрегируем
+            # ✅ ИСПРАВЛЕНО: Агрегируем с правильными ключами
             aggregated = []
             for i in range(0, len(base_candles), multiplier):
                 chunk = base_candles[i:i+multiplier]
@@ -633,11 +633,13 @@ class MarketDataRepository:
                     'interval': target_interval,
                     'open_time': chunk[0]['open_time'],
                     'close_time': chunk[-1]['close_time'],
-                    'open': chunk[0]['open'],
-                    'high': max(c['high'] for c in chunk),
-                    'low': min(c['low'] for c in chunk),
-                    'close': chunk[-1]['close'],
+                    'open_price': chunk[0]['open_price'],                          # ✅ Правильный ключ
+                    'high_price': max(c['high_price'] for c in chunk),             # ✅ Правильный ключ
+                    'low_price': min(c['low_price'] for c in chunk),               # ✅ Правильный ключ
+                    'close_price': chunk[-1]['close_price'],                       # ✅ Правильный ключ
                     'volume': sum(c['volume'] for c in chunk),
+                    'quote_volume': sum(c.get('quote_volume', 0) for c in chunk),
+                    'number_of_trades': sum(c.get('number_of_trades', 0) for c in chunk),
                     'data_source': 'aggregated'
                 }
                 aggregated.append(agg_candle)
