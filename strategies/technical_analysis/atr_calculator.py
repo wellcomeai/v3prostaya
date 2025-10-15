@@ -80,9 +80,9 @@ class ATRCalculator:
         }
         
         logger.info("🔧 ATRCalculator инициализирован")
-        logger.info(f"   • Lookback: {lookback_days} дней")
-        logger.info(f"   • Паранормальные фильтры: {paranormal_lower}×ATR < bar < {paranormal_upper}×ATR")
-        logger.info(f"   • Порог исчерпания: {exhaustion_threshold*100}%")
+        logger.info(f"   • Lookback: {self.lookback_days} дней")
+        logger.info(f"   • Паранормальные фильтры: {self.paranormal_lower}×ATR < bar < {self.paranormal_upper}×ATR")  # ✅ ИСПРАВЛЕНО
+        logger.info(f"   • Порог исчерпания: {self.exhaustion_threshold*100}%")  # ✅ ИСПРАВЛЕНО
     
     # ==================== ОСНОВНОЙ МЕТОД ====================
     
