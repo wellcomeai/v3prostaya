@@ -6,9 +6,10 @@ Technical Analysis Context Manager
 - Уровни D1: каждые 24 часа
 - ATR: каждый час  
 - Свечи: каждую минуту
+- Рыночные условия: каждые 15 минут
 
 Author: Trading Bot Team
-Version: 1.0.0
+Version: 2.0.0 (Production Ready)
 """
 
 import asyncio
@@ -26,53 +27,105 @@ from .context import (
     TrendDirection
 )
 
+from .level_analyzer import LevelAnalyzer
+from .atr_calculator import ATRCalculator
+from .pattern_detector import PatternDetector
+from .breakout_analyzer import BreakoutAnalyzer
+from .market_conditions import MarketConditionsAnalyzer
+
 logger = logging.getLogger(__name__)
 
 
 class TechnicalAnalysisContextManager:
     """
-    🧠 Менеджер контекстов технического анализа
+    🧠 Менеджер контекстов технического анализа (PRODUCTION READY)
     
     Централизованное управление техническим анализом для всех символов:
     - Кэширование данных с автоматическим обновлением
     - Фоновые задачи обновления по расписанию
     - Ленивая инициализация (контексты создаются по запросу)
     - Интеграция с MarketDataRepository
+    - Полная интеграция всех анализаторов
     - Мониторинг и статистика
     
     Расписание обновлений:
     - Уровни D1: раз в 24 часа (в 00:00 UTC)
     - ATR: раз в час
     - Свечи: каждую минуту
+    - Рыночные условия: каждые 15 минут
     
     Usage:
-        manager = TechnicalAnalysisContextManager(repository, level_analyzer, atr_calculator)
+        manager = TechnicalAnalysisContextManager(repository)
         await manager.start()
         
         context = await manager.get_context("BTCUSDT")
         levels = context.levels_d1
+        
+        if context.is_suitable_for_breakout:
+            # Торговать пробой
+            pass
     """
     
     def __init__(
         self,
         repository,  # MarketDataRepository
-        level_analyzer=None,  # LevelAnalyzer (будет создан позже)
-        atr_calculator=None,  # ATRCalculator (будет создан позже)
-        auto_start_background_updates: bool = True
+        auto_start_background_updates: bool = True,
+        
+        # Параметры анализаторов
+        level_analyzer_config: Optional[Dict] = None,
+        atr_calculator_config: Optional[Dict] = None,
+        pattern_detector_config: Optional[Dict] = None,
+        breakout_analyzer_config: Optional[Dict] = None,
+        market_conditions_config: Optional[Dict] = None,
     ):
         """
         Инициализация менеджера
         
         Args:
             repository: MarketDataRepository для доступа к БД
-            level_analyzer: Анализатор уровней (опционально)
-            atr_calculator: Калькулятор ATR (опционально)
             auto_start_background_updates: Автоматически запускать фоновые обновления
+            level_analyzer_config: Конфигурация для LevelAnalyzer
+            atr_calculator_config: Конфигурация для ATRCalculator
+            pattern_detector_config: Конфигурация для PatternDetector
+            breakout_analyzer_config: Конфигурация для BreakoutAnalyzer
+            market_conditions_config: Конфигурация для MarketConditionsAnalyzer
         """
         self.repository = repository
-        self.level_analyzer = level_analyzer
-        self.atr_calculator = atr_calculator
         self.auto_start = auto_start_background_updates
+        
+        # ==================== ИНИЦИАЛИЗАЦИЯ АНАЛИЗАТОРОВ ====================
+        
+        logger.info("🔧 Инициализация анализаторов...")
+        
+        # 1. Level Analyzer - анализ уровней поддержки/сопротивления
+        self.level_analyzer = LevelAnalyzer(
+            **(level_analyzer_config or {})
+        )
+        logger.info("✅ LevelAnalyzer инициализирован")
+        
+        # 2. ATR Calculator - расчет запаса хода
+        self.atr_calculator = ATRCalculator(
+            **(atr_calculator_config or {})
+        )
+        logger.info("✅ ATRCalculator инициализирован")
+        
+        # 3. Pattern Detector - детекция паттернов (БСУ-БПУ, поджатие, пучки)
+        self.pattern_detector = PatternDetector(
+            **(pattern_detector_config or {})
+        )
+        logger.info("✅ PatternDetector инициализирован")
+        
+        # 4. Breakout Analyzer - анализ пробоев (истинные/ложные)
+        self.breakout_analyzer = BreakoutAnalyzer(
+            **(breakout_analyzer_config or {})
+        )
+        logger.info("✅ BreakoutAnalyzer инициализирован")
+        
+        # 5. Market Conditions Analyzer - анализ рыночных условий
+        self.market_conditions_analyzer = MarketConditionsAnalyzer(
+            **(market_conditions_config or {})
+        )
+        logger.info("✅ MarketConditionsAnalyzer инициализирован")
         
         # Кэш контекстов для каждого символа
         self.contexts: Dict[str, TechnicalAnalysisContext] = {}
@@ -91,13 +144,17 @@ class TechnicalAnalysisContextManager:
             "levels_updates": 0,
             "atr_updates": 0,
             "candles_updates": 0,
+            "market_conditions_updates": 0,
             "last_update_time": None,
             "update_times": defaultdict(list),  # Время обновления по типу
             "errors_by_type": defaultdict(int)
         }
         
+        logger.info("=" * 70)
         logger.info("🏗️ TechnicalAnalysisContextManager инициализирован")
         logger.info(f"   • Auto-start background updates: {auto_start}")
+        logger.info(f"   • Анализаторов подключено: 5")
+        logger.info("=" * 70)
     
     # ==================== ОСНОВНЫЕ МЕТОДЫ ====================
     
@@ -183,6 +240,9 @@ class TechnicalAnalysisContextManager:
                 if "candles" in updates_needed:
                     await self._update_candles(context)
                 
+                # После обновления основных данных - обновляем рыночные условия
+                await self._update_market_conditions(context)
+                
                 context.last_full_update = datetime.now(timezone.utc)
                 context.update_count += 1
             
@@ -202,6 +262,7 @@ class TechnicalAnalysisContextManager:
             await self._update_levels(context)
             await self._update_atr(context)
             await self._update_candles(context)
+            await self._update_market_conditions(context)
             
             # Обновляем метаданные
             context.last_full_update = datetime.now(timezone.utc)
@@ -227,7 +288,7 @@ class TechnicalAnalysisContextManager:
         """
         Обновить уровни поддержки/сопротивления D1
         
-        Загружает 180 дней истории и анализирует уровни.
+        Использует LevelAnalyzer для поиска уровней.
         """
         try:
             update_start = datetime.now()
@@ -248,17 +309,19 @@ class TechnicalAnalysisContextManager:
             # Сохраняем свечи D1 в контексте
             context.recent_candles_d1 = candles_d1
             
-            # Анализируем уровни (пока заглушка, будет реализовано в level_analyzer)
-            if self.level_analyzer:
-                levels = self.level_analyzer.find_all_levels(candles_d1)
-                context.levels_d1 = levels
-                logger.info(f"✅ Найдено {len(levels)} уровней для {context.symbol}")
-            else:
-                # Временная заглушка - создаем простые уровни
-                context.levels_d1 = self._create_dummy_levels(candles_d1)
-                logger.debug(f"⚠️ LevelAnalyzer не подключен, используется заглушка")
+            # Текущая цена
+            current_price = float(candles_d1[-1].close_price)
             
+            # ИСПОЛЬЗУЕМ РЕАЛЬНЫЙ LEVEL ANALYZER
+            levels = self.level_analyzer.find_all_levels(
+                candles=candles_d1,
+                current_price=current_price
+            )
+            
+            context.levels_d1 = levels
             context.levels_updated_at = datetime.now(timezone.utc)
+            
+            logger.info(f"✅ Найдено {len(levels)} уровней для {context.symbol}")
             
             self.stats["levels_updates"] += 1
             update_duration = (datetime.now() - update_start).total_seconds()
@@ -269,55 +332,13 @@ class TechnicalAnalysisContextManager:
             self.stats["errors_by_type"]["levels"] += 1
             raise
     
-    def _create_dummy_levels(self, candles: List) -> List[SupportResistanceLevel]:
-        """
-        Временная заглушка для создания простых уровней
-        
-        Будет заменена на level_analyzer.find_all_levels()
-        """
-        if not candles or len(candles) < 20:
-            return []
-        
-        levels = []
-        
-        # Берем последние 30 свечей
-        recent_candles = candles[-30:]
-        
-        # Находим максимумы и минимумы
-        highs = [float(c.high_price) for c in recent_candles]
-        lows = [float(c.low_price) for c in recent_candles]
-        
-        # Сопротивление - максимум
-        max_high = max(highs)
-        levels.append(SupportResistanceLevel(
-            price=max_high,
-            level_type="resistance",
-            strength=0.7,
-            touches=1,
-            last_touch=recent_candles[-1].close_time,
-            metadata={"type": "dummy", "source": "max_high"}
-        ))
-        
-        # Поддержка - минимум
-        min_low = min(lows)
-        levels.append(SupportResistanceLevel(
-            price=min_low,
-            level_type="support",
-            strength=0.7,
-            touches=1,
-            last_touch=recent_candles[-1].close_time,
-            metadata={"type": "dummy", "source": "min_low"}
-        ))
-        
-        return levels
-    
     # ==================== ОБНОВЛЕНИЕ ATR ====================
     
     async def _update_atr(self, context: TechnicalAnalysisContext):
         """
         Обновить данные ATR (Average True Range)
         
-        Рассчитывает расчетный и технический ATR на основе последних 5 дней.
+        Использует ATRCalculator для расчета ATR.
         """
         try:
             update_start = datetime.now()
@@ -337,26 +358,19 @@ class TechnicalAnalysisContextManager:
                 logger.warning(f"⚠️ Недостаточно данных для ATR {context.symbol}")
                 return
             
-            # Рассчитываем ATR (пока заглушка, будет реализовано в atr_calculator)
-            if self.atr_calculator:
-                atr_result = self.atr_calculator.calculate_atr(candles_for_atr)
-                
-                context.atr_data = ATRData(
-                    calculated_atr=atr_result["calculated_atr"],
-                    technical_atr=atr_result["technical_atr"],
-                    atr_percent=atr_result["atr_percent"],
-                    current_range_used=atr_result.get("current_range_used", 0.0),
-                    is_exhausted=atr_result.get("is_exhausted", False),
-                    last_5_ranges=atr_result.get("last_5_ranges", []),
-                    updated_at=datetime.now(timezone.utc)
-                )
-            else:
-                # Временная заглушка - простой расчет
-                atr_simple = self._calculate_simple_atr(candles_for_atr)
-                context.atr_data = atr_simple
-                logger.debug(f"⚠️ ATRCalculator не подключен, используется простой расчет")
+            # Текущая цена
+            current_price = float(candles_for_atr[-1].close_price)
             
-            logger.debug(f"✅ ATR обновлен для {context.symbol}: {context.atr_data.calculated_atr:.2f}")
+            # ИСПОЛЬЗУЕМ РЕАЛЬНЫЙ ATR CALCULATOR
+            atr_data = self.atr_calculator.calculate_atr(
+                candles=candles_for_atr,
+                levels=context.levels_d1,
+                current_price=current_price
+            )
+            
+            context.atr_data = atr_data
+            
+            logger.debug(f"✅ ATR обновлен для {context.symbol}: {atr_data.calculated_atr:.2f}")
             
             self.stats["atr_updates"] += 1
             update_duration = (datetime.now() - update_start).total_seconds()
@@ -366,36 +380,6 @@ class TechnicalAnalysisContextManager:
             logger.error(f"❌ Ошибка обновления ATR {context.symbol}: {e}")
             self.stats["errors_by_type"]["atr"] += 1
             raise
-    
-    def _calculate_simple_atr(self, candles: List) -> ATRData:
-        """
-        Простой расчет ATR (заглушка)
-        
-        Будет заменен на atr_calculator.calculate_atr()
-        """
-        if not candles:
-            return ATRData(
-                calculated_atr=0.0,
-                technical_atr=0.0,
-                atr_percent=0.0,
-                updated_at=datetime.now(timezone.utc)
-            )
-        
-        # Среднее High - Low за последние свечи
-        ranges = [float(c.high_price - c.low_price) for c in candles]
-        avg_range = sum(ranges) / len(ranges)
-        
-        # Текущая цена
-        current_price = float(candles[-1].close_price)
-        atr_percent = (avg_range / current_price) * 100
-        
-        return ATRData(
-            calculated_atr=avg_range,
-            technical_atr=avg_range,  # Упрощенно
-            atr_percent=atr_percent,
-            last_5_ranges=ranges,
-            updated_at=datetime.now(timezone.utc)
-        )
     
     # ==================== ОБНОВЛЕНИЕ СВЕЧЕЙ ====================
     
@@ -440,16 +424,126 @@ class TechnicalAnalysisContextManager:
             self.stats["errors_by_type"]["candles"] += 1
             raise
     
+    # ==================== ОБНОВЛЕНИЕ РЫНОЧНЫХ УСЛОВИЙ ====================
+    
+    async def _update_market_conditions(self, context: TechnicalAnalysisContext):
+        """
+        Обновить рыночные условия и паттерны
+        
+        Использует все анализаторы для полного анализа рынка:
+        - MarketConditionsAnalyzer - тренды, волатильность, консолидация
+        - PatternDetector - поджатие, пучки, V-формации
+        - BreakoutAnalyzer - проверка пробоев (если есть уровни)
+        """
+        try:
+            update_start = datetime.now()
+            
+            # Проверяем что есть необходимые данные
+            if not context.recent_candles_h1 or not context.atr_data:
+                logger.debug(f"⚠️ Недостаточно данных для анализа условий {context.symbol}")
+                return
+            
+            current_price = float(context.recent_candles_h1[-1].close_price) if context.recent_candles_h1 else None
+            
+            # 1. АНАЛИЗ РЫНОЧНЫХ УСЛОВИЙ
+            market_analysis = self.market_conditions_analyzer.analyze_conditions(
+                candles_h1=context.recent_candles_h1,
+                candles_d1=context.recent_candles_d1,
+                atr=context.atr_data.calculated_atr if context.atr_data else None,
+                current_price=current_price
+            )
+            
+            # Обновляем контекст
+            context.market_condition = market_analysis.market_condition
+            context.dominant_trend_h1 = market_analysis.trend_direction
+            context.volatility_level = market_analysis.volatility_level.value
+            context.consolidation_detected = market_analysis.has_consolidation
+            context.consolidation_bars_count = market_analysis.consolidation_bars
+            context.has_v_formation = market_analysis.has_v_formation
+            
+            logger.debug(f"📊 Рыночные условия {context.symbol}: {market_analysis.market_condition.value}, "
+                        f"trend={market_analysis.trend_direction.value}, "
+                        f"volatility={market_analysis.volatility_level.value}")
+            
+            # 2. АНАЛИЗ ТРЕНДА НА D1 (долгосрочный)
+            if context.recent_candles_d1 and len(context.recent_candles_d1) >= 10:
+                d1_analysis = self.market_conditions_analyzer.analyze_conditions(
+                    candles_d1=context.recent_candles_d1,
+                    current_price=current_price
+                )
+                context.dominant_trend_d1 = d1_analysis.trend_direction
+            
+            # 3. ДЕТЕКЦИЯ ПАТТЕРНОВ
+            
+            # Поджатие (для стратегии пробоя)
+            if context.recent_candles_m5 and context.levels_d1:
+                # Проверяем поджатие у ближайших уровней
+                nearest_resistance = context.get_nearest_resistance(current_price) if current_price else None
+                nearest_support = context.get_nearest_support(current_price) if current_price else None
+                
+                has_compression = False
+                
+                if nearest_resistance:
+                    compression_up, _ = self.pattern_detector.detect_compression(
+                        candles=context.recent_candles_m5,
+                        level=nearest_resistance,
+                        atr=context.atr_data.calculated_atr if context.atr_data else None
+                    )
+                    has_compression = has_compression or compression_up
+                
+                if nearest_support:
+                    compression_down, _ = self.pattern_detector.detect_compression(
+                        candles=context.recent_candles_m5,
+                        level=nearest_support,
+                        atr=context.atr_data.calculated_atr if context.atr_data else None
+                    )
+                    has_compression = has_compression or compression_down
+                
+                context.has_compression = has_compression
+            
+            # 4. ПРОВЕРКА НЕДАВНИХ ПРОБОЕВ
+            if context.recent_candles_h1 and context.levels_d1 and current_price:
+                # Проверяем был ли недавний пробой какого-либо уровня
+                has_recent_breakout = False
+                
+                for level in context.levels_d1[:5]:  # Проверяем топ-5 уровней
+                    breakout_analysis = self.breakout_analyzer.analyze_breakout(
+                        candles=context.recent_candles_h1[-20:],  # Последние 20 баров
+                        level=level,
+                        atr=context.atr_data.calculated_atr if context.atr_data else None,
+                        current_price=current_price,
+                        has_compression=context.has_compression
+                    )
+                    
+                    if breakout_analysis.is_true_breakout or breakout_analysis.is_false_breakout:
+                        has_recent_breakout = True
+                        break
+                
+                context.has_recent_breakout = has_recent_breakout
+            
+            self.stats["market_conditions_updates"] += 1
+            update_duration = (datetime.now() - update_start).total_seconds()
+            self.stats["update_times"]["market_conditions"].append(update_duration)
+            
+            logger.info(f"✅ Рыночные условия обновлены для {context.symbol}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления рыночных условий {context.symbol}: {e}")
+            logger.error(traceback.format_exc())
+            self.stats["errors_by_type"]["market_conditions"] += 1
+            # Не бросаем исключение - это не критичная ошибка
+    
     # ==================== ФОНОВЫЕ ОБНОВЛЕНИЯ ====================
     
     async def start_background_updates(self):
         """
         Запустить фоновые задачи автоматического обновления
         
-        Создает 3 фоновых задачи:
+        Создает 4 фоновых задачи:
         - Обновление свечей (каждую минуту)
         - Обновление ATR (каждый час)
         - Обновление уровней (раз в сутки)
+        - Обновление рыночных условий (каждые 15 минут)
         """
         if self.is_running:
             logger.warning("⚠️ Фоновые обновления уже запущены")
@@ -475,10 +569,16 @@ class TechnicalAnalysisContextManager:
             asyncio.create_task(self._levels_update_loop(), name="levels_update")
         )
         
+        # Задача 4: Обновление рыночных условий (каждые 15 минут)
+        self._update_tasks.append(
+            asyncio.create_task(self._market_conditions_update_loop(), name="market_conditions_update")
+        )
+        
         logger.info(f"✅ Запущено {len(self._update_tasks)} фоновых задач")
         logger.info("   • Свечи: каждую минуту")
         logger.info("   • ATR: каждый час")
         logger.info("   • Уровни: раз в сутки (00:00 UTC)")
+        logger.info("   • Рыночные условия: каждые 15 минут")
     
     async def stop_background_updates(self):
         """Остановить все фоновые задачи"""
@@ -581,6 +681,30 @@ class TechnicalAnalysisContextManager:
                 logger.error(traceback.format_exc())
                 await asyncio.sleep(86400)  # 24 часа
     
+    async def _market_conditions_update_loop(self):
+        """Цикл обновления рыночных условий (каждые 15 минут)"""
+        logger.info("🔄 Запущен цикл обновления рыночных условий (15 минут)")
+        
+        while self.is_running:
+            try:
+                # Обновляем рыночные условия для всех контекстов
+                for symbol, context in self.contexts.items():
+                    try:
+                        await self._update_market_conditions(context)
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка обновления рыночных условий {symbol}: {e}")
+                
+                # Ждем 15 минут
+                await asyncio.sleep(900)
+                
+            except asyncio.CancelledError:
+                logger.info("🛑 Цикл обновления рыночных условий остановлен")
+                break
+            except Exception as e:
+                logger.error(f"❌ Критическая ошибка в цикле рыночных условий: {e}")
+                logger.error(traceback.format_exc())
+                await asyncio.sleep(900)
+    
     # ==================== УПРАВЛЕНИЕ ====================
     
     async def refresh_all_contexts(self):
@@ -631,7 +755,14 @@ class TechnicalAnalysisContextManager:
             "contexts_symbols": list(self.contexts.keys()),
             "success_rate": (self.stats["successful_updates"] / self.stats["total_updates"] * 100) 
                            if self.stats["total_updates"] > 0 else 100,
-            **avg_times
+            **avg_times,
+            "analyzers_stats": {
+                "level_analyzer": self.level_analyzer.get_stats(),
+                "atr_calculator": self.atr_calculator.get_stats(),
+                "pattern_detector": self.pattern_detector.get_stats(),
+                "breakout_analyzer": self.breakout_analyzer.get_stats(),
+                "market_conditions_analyzer": self.market_conditions_analyzer.get_stats()
+            }
         }
     
     def get_health_status(self) -> Dict[str, Any]:
@@ -665,6 +796,42 @@ class TechnicalAnalysisContextManager:
             "uptime_seconds": stats["uptime_seconds"]
         }
     
+    def get_analyzer_stats_summary(self) -> Dict[str, Any]:
+        """Краткая сводка статистики всех анализаторов"""
+        return {
+            "level_analyzer": {
+                "analyses": self.level_analyzer.stats["analyses_count"],
+                "levels_found": self.level_analyzer.stats["total_levels_found"],
+                "avg_strength": self.level_analyzer.stats["average_level_strength"]
+            },
+            "atr_calculator": {
+                "calculations": self.atr_calculator.stats["calculations_count"],
+                "avg_atr": self.atr_calculator.stats["average_atr"],
+                "paranormal_filtered": self.atr_calculator.stats["paranormal_bars_filtered"]
+            },
+            "pattern_detector": {
+                "total_patterns": self.pattern_detector.stats["total_patterns"],
+                "compressions": self.pattern_detector.stats["compressions_detected"],
+                "bsu_found": self.pattern_detector.stats["bsu_found"],
+                "bpu_found": self.pattern_detector.stats["bpu_found"]
+            },
+            "breakout_analyzer": {
+                "analyses": self.breakout_analyzer.stats["analyses_count"],
+                "true_breakouts": self.breakout_analyzer.stats["true_breakouts"],
+                "false_breakouts_total": (
+                    self.breakout_analyzer.stats["false_breakouts_simple"] +
+                    self.breakout_analyzer.stats["false_breakouts_strong"] +
+                    self.breakout_analyzer.stats["false_breakouts_complex"]
+                )
+            },
+            "market_conditions": {
+                "analyses": self.market_conditions_analyzer.stats["analyses_count"],
+                "consolidations": self.market_conditions_analyzer.stats["consolidations_detected"],
+                "trends": self.market_conditions_analyzer.stats["trends_detected"],
+                "v_formations": self.market_conditions_analyzer.stats["v_formations_detected"]
+            }
+        }
+    
     def __repr__(self) -> str:
         """Представление для отладки"""
         return (f"TechnicalAnalysisContextManager(contexts={len(self.contexts)}, "
@@ -679,10 +846,11 @@ class TechnicalAnalysisContextManager:
                 f"  Contexts: {len(self.contexts)} active\n"
                 f"  Updates: {stats['total_updates']} total, {stats['successful_updates']} successful\n"
                 f"  Success rate: {stats['success_rate']:.1f}%\n"
-                f"  Tasks: {stats['active_tasks']}/{len(self._update_tasks)} active")
+                f"  Tasks: {stats['active_tasks']}/{len(self._update_tasks)} active\n"
+                f"  Analyzers: 5 integrated")
 
 
 # Export
 __all__ = ["TechnicalAnalysisContextManager"]
 
-logger.info("✅ Technical Analysis Context Manager module loaded")
+logger.info("✅ Technical Analysis Context Manager module loaded (PRODUCTION READY v2.0.0)")
