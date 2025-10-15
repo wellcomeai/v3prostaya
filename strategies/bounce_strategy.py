@@ -564,7 +564,7 @@ class BounceStrategy(BaseStrategy):
             close_far_from_level = False
             if ta_context.recent_candles_m30:
                 last_candle = ta_context.recent_candles_m30[-1]
-                close = float(last_candle.close_price)
+                close = float(last_candle['close_price'])
                 
                 distance = abs(close - level.price)
                 distance_percent = distance / level.price * 100
