@@ -9,7 +9,7 @@ Technical Analysis Context Manager
 - Рыночные условия: каждые 15 минут
 
 Author: Trading Bot Team
-Version: 2.0.0 (Production Ready)
+Version: 2.0.1 (Production Ready - Fixed)
 """
 
 import asyncio
@@ -358,8 +358,8 @@ class TechnicalAnalysisContextManager:
                 logger.warning(f"⚠️ Недостаточно данных для ATR {context.symbol}")
                 return
             
-            # Текущая цена
-            price = float(candles_for_atr[-1]['close_price'])
+            # ✅ ИСПРАВЛЕНИЕ: Определяем current_price из последней свечи
+            current_price = float(candles_for_atr[-1]['close_price'])
             
             # ИСПОЛЬЗУЕМ РЕАЛЬНЫЙ ATR CALCULATOR
             atr_data = self.atr_calculator.calculate_atr(
@@ -853,4 +853,4 @@ class TechnicalAnalysisContextManager:
 # Export
 __all__ = ["TechnicalAnalysisContextManager"]
 
-logger.info("✅ Technical Analysis Context Manager module loaded (PRODUCTION READY v2.0.0)")
+logger.info("✅ Technical Analysis Context Manager module loaded (PRODUCTION READY v2.0.1)")
