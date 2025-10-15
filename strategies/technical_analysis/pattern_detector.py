@@ -212,7 +212,7 @@ class PatternDetector:
             
             # Если нет ATR - рассчитываем средний диапазон
             if atr is None:
-                ranges = [float(c.high_price - c.low_price) for c in recent_candles]
+                ranges = [float(c['high_price'] - c['low_price']) for c in recent_candles]
                 atr = mean(ranges) if ranges else 0
             
             if atr <= 0:
@@ -224,7 +224,7 @@ class PatternDetector:
             small_bars_indices = []
             
             for i, candle in enumerate(recent_candles):
-                bar_range = float(candle.high_price - candle.low_price)
+                bar_range = float(candle['high_price'] - candle['low_price'])
                 
                 # Проверяем что бар маленький
                 if bar_range < (atr * self.compression_threshold):
@@ -240,7 +240,7 @@ class PatternDetector:
             near_level = False
             if level and has_compression:
                 last_candles = recent_candles[-self.compression_min_bars:]
-                prices = [float(c.close_price) for c in last_candles]
+                prices = [float(c['close_price']) for c in last_candles]
                 avg_price = mean(prices)
                 
                 distance_percent = abs(avg_price - level.price) / level.price
@@ -295,8 +295,8 @@ class PatternDetector:
                 return False, {}
             
             # Собираем High и Low
-            highs = [float(c.high_price) for c in recent_candles]
-            lows = [float(c.low_price) for c in recent_candles]
+            highs = [float(c['high_price']) for c in recent_candles]
+            lows = [float(c['low_price']) for c in recent_candles]
             
             # Диапазон High
             max_high = max(highs)
@@ -368,10 +368,10 @@ class PatternDetector:
             for candle in candles:
                 if level.level_type == "support":
                     # Для поддержки смотрим на Low
-                    candle_price = float(candle.low_price)
+                    candle_price = float(candle['low_price'])
                 else:
                     # Для сопротивления смотрим на High
-                    candle_price = float(candle.high_price)
+                    candle_price = float(candle['high_price'])
                 
                 # Проверяем совпадение с уровнем
                 if abs(candle_price - level.price) <= tolerance:
@@ -443,10 +443,10 @@ class PatternDetector:
             for i, candle in enumerate(recent_candles):
                 if level.level_type == "support":
                     # Для поддержки смотрим на Low
-                    candle_price = float(candle.low_price)
+                    candle_price = float(candle['low_price'])
                 else:
                     # Для сопротивления смотрим на High
-                    candle_price = float(candle.high_price)
+                    candle_price = float(candle['high_price'])
                 
                 # Проверяем касание
                 distance = abs(candle_price - level.price)
@@ -508,13 +508,13 @@ class PatternDetector:
             candle2 = bpu2.candle
             
             # Сравниваем High
-            high1 = float(candle1.high_price)
-            high2 = float(candle2.high_price)
+            high1 = float(candle1['high_price'])
+            high2 = float(candle2['high_price'])
             high_diff_percent = abs(high1 - high2) / high1
             
             # Сравниваем Low
-            low1 = float(candle1.low_price)
-            low2 = float(candle2.low_price)
+            low1 = float(candle1['low_price'])
+            low2 = float(candle2['low_price'])
             low_diff_percent = abs(low1 - low2) / low1
             
             # Проверяем что оба в пределах допуска
@@ -568,14 +568,14 @@ class PatternDetector:
                 return False, {}
             
             # Собираем High и Low
-            highs = [float(c.high_price) for c in recent_candles]
-            lows = [float(c.low_price) for c in recent_candles]
+            highs = [float(c['high_price']) for c in recent_candles]
+            lows = [float(c['low_price']) for c in recent_candles]
             
             max_high = max(highs)
             min_low = min(lows)
             
             # Средняя цена
-            closes = [float(c.close_price) for c in recent_candles]
+            closes = [float(c['close_price']) for c in recent_candles]
             avg_close = mean(closes)
             
             # Диапазон консолидации
@@ -657,11 +657,11 @@ class PatternDetector:
             if len(recent_candles) < 5:
                 return False, {}
             
-            closes = [float(c.close_price) for c in recent_candles]
+            closes = [float(c['close_price']) for c in recent_candles]
             
             # Ищем экстремум (дно или вершину V)
-            highs = [float(c.high_price) for c in recent_candles]
-            lows = [float(c.low_price) for c in recent_candles]
+            highs = [float(c['high_price']) for c in recent_candles]
+            lows = [float(c['low_price']) for c in recent_candles]
             
             max_high = max(highs)
             min_low = min(lows)
@@ -756,7 +756,7 @@ class PatternDetector:
             True если закрытие у уровня
         """
         try:
-            close_price = float(candle.close_price)
+            close_price = float(candle['close_price'])
             distance_percent = abs(close_price - level.price) / level.price * 100
             
             is_near = distance_percent <= tolerance_percent
@@ -789,9 +789,9 @@ class PatternDetector:
             Tuple[is_near_extreme, extreme_type ("high" или "low")]
         """
         try:
-            high = float(candle.high_price)
-            low = float(candle.low_price)
-            close = float(candle.close_price)
+            high = float(candle['high_price'])
+            low = float(candle['low_price'])
+            close = float(candle['close_price'])
             
             candle_range = high - low
             
