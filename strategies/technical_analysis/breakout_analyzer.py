@@ -230,7 +230,7 @@ class BreakoutAnalyzer:
             
             # Определяем текущую цену
             if current_price is None:
-                current_price = float(candles[-1].close_price)
+                current_price = float(candles[-1]['close_price'])
             
             # Берем последние N свечей
             recent_candles = candles[-lookback:] if len(candles) > lookback else candles
@@ -344,8 +344,8 @@ class BreakoutAnalyzer:
         try:
             # Проверяем что хотя бы одна свеча пробила уровень
             for candle in candles:
-                high = float(candle.high_price)
-                low = float(candle.low_price)
+                high = float(candle['high_price'])
+                low = float(candle['low_price'])
                 
                 # Пробой вверх (через сопротивление)
                 if level.level_type == "resistance" and high > level.price:
@@ -382,8 +382,8 @@ class BreakoutAnalyzer:
         """
         try:
             for candle in reversed(candles):
-                high = float(candle.high_price)
-                low = float(candle.low_price)
+                high = float(candle['high_price'])
+                low = float(candle['low_price'])
                 
                 if direction == BreakoutDirection.UPWARD and high > level.price:
                     return candle
@@ -484,9 +484,9 @@ class BreakoutAnalyzer:
                 return False
             
             last_candle = candles[-1]
-            high = float(last_candle.high_price)
-            low = float(last_candle.low_price)
-            close = float(last_candle.close_price)
+            high = float(last_candle['high_price'])
+            low = float(last_candle['low_price'])
+            close = float(last_candle['close_price'])
             
             # Допуск для зоны пробоя
             tolerance = level.price * self.false_tolerance
@@ -575,8 +575,8 @@ class BreakoutAnalyzer:
             # Пробой вверх
             if direction == BreakoutDirection.UPWARD:
                 # Первый бар: пробил и закрылся в зоне пробоя
-                first_high = float(first_candle.high_price)
-                first_close = float(first_candle.close_price)
+                first_high = float(first_candle['high_price'])
+                first_close = float(first_candle['close_price'])
                 
                 if first_high <= level.price:
                     return False
@@ -585,8 +585,8 @@ class BreakoutAnalyzer:
                     return False  # Не закрылся в зоне пробоя
                 
                 # Второй бар: открылся в зоне пробоя, закрылся под уровнем
-                second_open = float(second_candle.open_price)
-                second_close = float(second_candle.close_price)
+                second_open = float(second_candle['open_price'])
+                second_close = float(second_candle['close_price'])
                 
                 if second_open < level.price:
                     return False  # Не открылся в зоне пробоя
@@ -600,8 +600,8 @@ class BreakoutAnalyzer:
             # Пробой вниз
             elif direction == BreakoutDirection.DOWNWARD:
                 # Первый бар: пробил и закрылся в зоне пробоя
-                first_low = float(first_candle.low_price)
-                first_close = float(first_candle.close_price)
+                first_low = float(first_candle['low_price'])
+                first_close = float(first_candle['close_price'])
                 
                 if first_low >= level.price:
                     return False
@@ -610,8 +610,8 @@ class BreakoutAnalyzer:
                     return False  # Не закрылся в зоне пробоя
                 
                 # Второй бар: открылся в зоне пробоя, закрылся над уровнем
-                second_open = float(second_candle.open_price)
-                second_close = float(second_candle.close_price)
+                second_open = float(second_candle['open_price'])
+                second_close = float(second_candle['close_price'])
                 
                 if second_open > level.price:
                     return False  # Не открылся в зоне пробоя
@@ -665,22 +665,22 @@ class BreakoutAnalyzer:
             first = recent[0]
             
             if direction == BreakoutDirection.UPWARD:
-                if float(first.high_price) <= level.price:
+                if float(first['high_price']) <= level.price:
                     return False
-                if float(first.close_price) < level.price:
+                if float(first['close_price']) < level.price:
                     return False
             elif direction == BreakoutDirection.DOWNWARD:
-                if float(first.low_price) >= level.price:
+                if float(first['low_price']) >= level.price:
                     return False
-                if float(first.close_price) > level.price:
+                if float(first['close_price']) > level.price:
                     return False
             
             # Следующие 2+ бара в зоне пробоя
             middle_bars = recent[1:-1]
             
             for bar in middle_bars:
-                bar_open = float(bar.open_price)
-                bar_close = float(bar.close_price)
+                bar_open = float(bar['open_price'])
+                bar_close = float(bar['close_price'])
                 
                 if direction == BreakoutDirection.UPWARD:
                     # Должны быть в зоне пробоя (выше уровня)
@@ -693,7 +693,7 @@ class BreakoutAnalyzer:
             
             # Последний бар - разворот
             last = recent[-1]
-            last_close = float(last.close_price)
+            last_close = float(last['close_price'])
             
             if direction == BreakoutDirection.UPWARD:
                 if last_close >= (level.price - tolerance):
@@ -740,8 +740,8 @@ class BreakoutAnalyzer:
             # Находим свечу пробоя
             breakout_candle = None
             for candle in reversed(candles):
-                high = float(candle.high_price)
-                low = float(candle.low_price)
+                high = float(candle['high_price'])
+                low = float(candle['low_price'])
                 
                 if direction == BreakoutDirection.UPWARD and high > level.price:
                     breakout_candle = candle
@@ -755,9 +755,9 @@ class BreakoutAnalyzer:
             
             # Рассчитываем глубину пробоя
             if direction == BreakoutDirection.UPWARD:
-                depth = float(breakout_candle.high_price) - level.price
+                depth = float(breakout_candle['high_price']) - level.price
             else:
-                depth = level.price - float(breakout_candle.low_price)
+                depth = level.price - float(breakout_candle['low_price'])
             
             # Проверяем минимальную глубину
             if atr and atr > 0:
@@ -770,7 +770,7 @@ class BreakoutAnalyzer:
             tolerance = level.price * 0.01  # 1%
             
             for candle in candles[candles.index(breakout_candle)+1:]:
-                close = float(candle.close_price)
+                close = float(candle['close_price'])
                 
                 if direction == BreakoutDirection.UPWARD:
                     if close < (level.price + tolerance):
@@ -799,9 +799,9 @@ class BreakoutAnalyzer:
         """Расчет глубины пробоя в пунктах"""
         try:
             if direction == BreakoutDirection.UPWARD:
-                return float(candle.high_price) - level.price
+                return float(candle['high_price']) - level.price
             elif direction == BreakoutDirection.DOWNWARD:
-                return level.price - float(candle.low_price)
+                return level.price - float(candle['low_price'])
             return 0.0
         except:
             return 0.0
@@ -928,7 +928,7 @@ class BreakoutAnalyzer:
     ) -> bool:
         """Проверка закрытия вблизи уровня"""
         try:
-            close = float(candle.close_price)
+            close = float(candle['close_price'])
             distance_percent = abs(close - level.price) / level.price * 100
             return distance_percent <= tolerance_percent
         except:
