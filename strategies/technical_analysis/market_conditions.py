@@ -254,7 +254,7 @@ class MarketConditionsAnalyzer:
             
             # Определяем текущую цену
             if current_price is None:
-                current_price = float(primary_candles[-1].close_price)
+                current_price = float(primary_candles[-1]['close_price'])
             
             # 1. ТРЕНД (направление и сила)
             trend_direction, trend_strength = self._analyze_trend(primary_candles)
@@ -377,8 +377,8 @@ class MarketConditionsAnalyzer:
             second_half = candles[mid:]
             
             # Средние цены
-            first_avg = mean([float(c.close_price) for c in first_half])
-            second_avg = mean([float(c.close_price) for c in second_half])
+            first_avg = mean([float(c['close_price']) for c in first_half])
+            second_avg = mean([float(c['close_price']) for c in second_half])
             
             # Процент изменения
             change_percent = (second_avg - first_avg) / first_avg
@@ -438,7 +438,7 @@ class MarketConditionsAnalyzer:
             # Берем последние 20 свечей
             recent = candles[-20:] if len(candles) > 20 else candles
             
-            closes = [float(c.close_price) for c in recent]
+            closes = [float(c['close_price']) for c in recent]
             avg_close = mean(closes)
             
             # Метод 1: Стандартное отклонение
@@ -449,7 +449,7 @@ class MarketConditionsAnalyzer:
                 volatility_percent = 0
             
             # Метод 2: Средний диапазон
-            ranges = [float(c.high_price - c.low_price) for c in recent]
+            ranges = [float(c['high_price'] - c['low_price']) for c in recent]
             avg_range = mean(ranges)
             range_percent = (avg_range / avg_close) if avg_close > 0 else 0
             
@@ -507,9 +507,9 @@ class MarketConditionsAnalyzer:
                     subset = recent[start_idx:end_idx]
                     
                     # Проверяем диапазон
-                    highs = [float(c.high_price) for c in subset]
-                    lows = [float(c.low_price) for c in subset]
-                    closes = [float(c.close_price) for c in subset]
+                    highs = [float(c['high_price']) for c in subset]
+                    lows = [float(c['low_price']) for c in subset]
+                    closes = [float(c['close_price']) for c in subset]
                     
                     max_high = max(highs)
                     min_low = min(lows)
@@ -581,7 +581,7 @@ class MarketConditionsAnalyzer:
             # Дополнительная проверка - сжатие диапазона
             if len(candles) >= 20:
                 recent = candles[-20:]
-                ranges = [float(c.high_price - c.low_price) for c in recent]
+                ranges = [float(c['high_price'] - c['low_price']) for c in recent]
                 
                 # Если диапазоны уменьшаются - энергия растет
                 first_half_avg = mean(ranges[:10])
@@ -621,9 +621,9 @@ class MarketConditionsAnalyzer:
             # Берем последние 10 свечей
             recent = candles[-10:] if len(candles) > 10 else candles
             
-            closes = [float(c.close_price) for c in recent]
-            highs = [float(c.high_price) for c in recent]
-            lows = [float(c.low_price) for c in recent]
+            closes = [float(c['close_price']) for c in recent]
+            highs = [float(c['high_price']) for c in recent]
+            lows = [float(c['low_price']) for c in recent]
             
             # Ищем экстремум (дно или вершину V)
             max_high = max(highs)
