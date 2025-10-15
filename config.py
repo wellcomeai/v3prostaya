@@ -17,12 +17,12 @@ class Config:
     BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "YOUR_BYBIT_TEST_SECRET")
     BYBIT_TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
     
-    # 🆕 Настройки крипто символов Bybit - ✅ ВСЕ 15 ПАР
+    # ✅ ИСПРАВЛЕНО: Все 17 пар криптовалют (в алфавитном порядке)
     BYBIT_SYMBOLS = os.getenv(
         "BYBIT_SYMBOLS", 
-        "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,MATICUSDT,DOTUSDT,LTCUSDT,AVAXUSDT,LINKUSDT,UNIUSDT,ATOMUSDT,NEARUSDT"
+        "ADAUSDT,APTUSDT,ATOMUSDT,AVAXUSDT,BNBUSDT,BTCUSDT,DOGEUSDT,DOTUSDT,ETHUSDT,LINKUSDT,LTCUSDT,NEARUSDT,SOLUSDT,SUIUSDT,UNIUSDT,XLMUSDT,XRPUSDT"
     ).split(",")
-    SYMBOL = BYBIT_SYMBOLS[0]  # Основной символ (для обратной совместимости)
+    SYMBOL = BYBIT_SYMBOLS[0] if BYBIT_SYMBOLS else "BTCUSDT"  # Основной символ (для обратной совместимости)
     CATEGORY = "linear"  # Деривативы (USDT перпетуалы)
     
     # 🆕 Включение/выключение Bybit WebSocket
@@ -36,7 +36,7 @@ class Config:
     # Символы фьючерсов CME
     YFINANCE_SYMBOLS_STR = os.getenv(
         "YFINANCE_SYMBOLS", 
-        "MCL,MGC,MES,MNQ"  # Micro фьючерсы с суффиксом =F
+        "MCL,MGC,MES,MNQ"  # Micro фьючерсы
     )
     YFINANCE_SYMBOLS = [s.strip() for s in YFINANCE_SYMBOLS_STR.split(",")]
     
@@ -195,7 +195,7 @@ class Config:
     
     @classmethod
     def get_bybit_symbols(cls) -> List[str]:
-        """Получить список крипто символов Bybit"""
+        """✅ Получить список всех 17 крипто символов Bybit"""
         return [s.strip().upper() for s in cls.BYBIT_SYMBOLS if s.strip()]
     
     @classmethod
@@ -242,14 +242,16 @@ class Config:
             "pool_size": f"{cls.get_pool_size()[0]}-{cls.get_pool_size()[1]}",
             "auto_migrate": cls.should_auto_migrate(),
             
-            # Bybit (крипта)
+            # Bybit (крипта) - ✅ все 17 пар
             "bybit_testnet": cls.BYBIT_TESTNET,
             "bybit_symbols": cls.get_bybit_symbols(),
+            "bybit_symbols_count": len(cls.get_bybit_symbols()),
             "bybit_websocket_enabled": cls.BYBIT_WEBSOCKET_ENABLED,
             "candle_sync_enabled": cls.CANDLE_SYNC_ENABLED,
             
             # 🆕 YFinance (фьючерсы)
             "yfinance_symbols": cls.get_yfinance_symbols(),
+            "yfinance_symbols_count": len(cls.get_yfinance_symbols()),
             "yfinance_websocket_enabled": cls.YFINANCE_WEBSOCKET_ENABLED,
             "yfinance_symbols_valid": cls.validate_yfinance_symbols(),
             
@@ -287,9 +289,11 @@ class Config:
         if not cls.OPENAI_API_KEY or cls.OPENAI_API_KEY == "YOUR_OPENAI_API_KEY":
             issues.append("⚠️ OpenAI API key not configured")
         
-        # Bybit
+        # Bybit - ✅ Проверка всех 17 пар
         if not cls.BYBIT_SYMBOLS or not cls.get_bybit_symbols():
             issues.append("⚠️ No Bybit symbols configured")
+        elif len(cls.get_bybit_symbols()) != 17:
+            issues.append(f"⚠️ Expected 17 Bybit symbols, found {len(cls.get_bybit_symbols())}")
         
         if cls.BYBIT_WEBSOCKET_ENABLED:
             if not cls.BYBIT_API_KEY or cls.BYBIT_API_KEY == "YOUR_BYBIT_TEST_API_KEY":
@@ -312,9 +316,9 @@ class Config:
     @classmethod
     def print_config(cls, verbose: bool = False):
         """🆕 Красиво печатает конфигурацию"""
-        print("=" * 60)
-        print("🔧 TRADING BOT CONFIGURATION")
-        print("=" * 60)
+        print("=" * 80)
+        print("🔧 TRADING BOT CONFIGURATION - ALL 17 CRYPTO PAIRS")
+        print("=" * 80)
         
         config_summary = cls.get_config_summary()
         
@@ -331,15 +335,24 @@ class Config:
         print(f"  • Pool Size: {config_summary['pool_size']}")
         print(f"  • Auto Migrate: {config_summary['auto_migrate']}")
         
-        # Секция: Bybit (Криптовалюты)
-        print("\n₿ BYBIT (CRYPTO):")
+        # ✅ Секция: Bybit (Все 17 криптовалют)
+        print("\n₿ BYBIT CRYPTO (17 PAIRS):")
         print(f"  • Testnet: {config_summary['bybit_testnet']}")
         print(f"  • WebSocket: {'✅' if config_summary['bybit_websocket_enabled'] else '❌'}")
-        print(f"  • Symbols ({len(config_summary['bybit_symbols'])}): {', '.join(config_summary['bybit_symbols'][:5])}{'...' if len(config_summary['bybit_symbols']) > 5 else ''}")
+        print(f"  • Candle Sync: {'✅' if config_summary['candle_sync_enabled'] else '❌'}")
+        print(f"  • Total Pairs: {config_summary['bybit_symbols_count']}")
+        
+        # Показываем все пары
+        symbols = config_summary['bybit_symbols']
+        print(f"  • Symbols:")
+        for i in range(0, len(symbols), 5):
+            batch = symbols[i:i+5]
+            print(f"    {', '.join(batch)}")
         
         # 🆕 Секция: YFinance (Фьючерсы)
-        print("\n📈 YFINANCE (FUTURES):")
+        print("\n📈 YFINANCE FUTURES:")
         print(f"  • WebSocket: {'✅' if config_summary['yfinance_websocket_enabled'] else '❌'}")
+        print(f"  • Total Pairs: {config_summary['yfinance_symbols_count']}")
         print(f"  • Symbols: {', '.join(config_summary['yfinance_symbols'])}")
         print(f"  • Valid: {'✅' if config_summary['yfinance_symbols_valid'] else '❌'}")
         
@@ -366,7 +379,7 @@ class Config:
         else:
             print("\n✅ Configuration looks good!")
         
-        print("=" * 60)
+        print("=" * 80)
 
 
 # ========== VALIDATION ПРИ ИМПОРТЕ ==========
