@@ -171,7 +171,7 @@ class LevelAnalyzer:
             
             # Определяем текущую цену если не передана
             if current_price is None:
-                current_price = float(candles[-1].close_price)
+                current_price = float(candles[-1]['close_price'])
             
             # ШАГ 1: Поиск локальных экстремумов
             support_candidates = self._find_local_minima(candles)
@@ -272,14 +272,14 @@ class LevelAnalyzer:
         
         for i in range(window, len(candles) - window):
             current_candle = candles[i]
-            current_low = float(current_candle.low_price)
+            current_low = float(current_candle['low_price'])
             
             # Проверяем что это локальный минимум
             is_local_min = True
             
             # Проверяем левое окно
             for j in range(i - window, i):
-                if float(candles[j].low_price) < current_low:
+                if float(candles[j]['low_price']) < current_low:
                     is_local_min = False
                     break
             
@@ -288,7 +288,7 @@ class LevelAnalyzer:
             
             # Проверяем правое окно
             for j in range(i + 1, min(i + window + 1, len(candles))):
-                if float(candles[j].low_price) < current_low:
+                if float(candles[j]['low_price']) < current_low:
                     is_local_min = False
                     break
             
@@ -321,14 +321,14 @@ class LevelAnalyzer:
         
         for i in range(window, len(candles) - window):
             current_candle = candles[i]
-            current_high = float(current_candle.high_price)
+            current_high = float(current_candle['high_price'])
             
             # Проверяем что это локальный максимум
             is_local_max = True
             
             # Проверяем левое окно
             for j in range(i - window, i):
-                if float(candles[j].high_price) > current_high:
+                if float(candles[j]['high_price']) > current_high:
                     is_local_max = False
                     break
             
@@ -337,7 +337,7 @@ class LevelAnalyzer:
             
             # Проверяем правое окно
             for j in range(i + 1, min(i + window + 1, len(candles))):
-                if float(candles[j].high_price) > current_high:
+                if float(candles[j]['high_price']) > current_high:
                     is_local_max = False
                     break
             
@@ -448,10 +448,10 @@ class LevelAnalyzer:
         for candle in candles:
             if level_type == "support":
                 # Для поддержки смотрим на Low
-                price = float(candle.low_price)
+                price = float(candle['low_price'])
             else:
                 # Для сопротивления смотрим на High
-                price = float(candle.high_price)
+                price = float(candle['high_price'])
             
             # Проверяем касание
             distance = abs(price - level.price)
