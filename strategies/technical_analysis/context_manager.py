@@ -359,7 +359,7 @@ class TechnicalAnalysisContextManager:
                 return
             
             # Текущая цена
-            current_price = float(candles_for_atr[-1].close_price)
+            price = float(candles_for_atr[-1]['close_price'])
             
             # ИСПОЛЬЗУЕМ РЕАЛЬНЫЙ ATR CALCULATOR
             atr_data = self.atr_calculator.calculate_atr(
