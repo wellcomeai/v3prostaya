@@ -296,7 +296,7 @@ class LevelAnalyzer:
                 candidate = LevelCandidate(
                     price=current_low,
                     level_type="support",
-                    created_at=current_candle.open_time
+                    created_at=current_candle['open_time']
                 )
                 candidates.append(candidate)
                 
@@ -345,7 +345,7 @@ class LevelAnalyzer:
                 candidate = LevelCandidate(
                     price=current_high,
                     level_type="resistance",
-                    created_at=current_candle.open_time
+                    created_at=current_candle['open_time']
                 )
                 candidates.append(candidate)
                 
