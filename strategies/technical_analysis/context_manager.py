@@ -310,7 +310,7 @@ class TechnicalAnalysisContextManager:
             context.recent_candles_d1 = candles_d1
             
             # Текущая цена
-            current_price = float(candles_d1[-1].close_price)
+            current_price = float(candles_d1[-1]['close_price'])
             
             # ИСПОЛЬЗУЕМ РЕАЛЬНЫЙ LEVEL ANALYZER
             levels = self.level_analyzer.find_all_levels(
