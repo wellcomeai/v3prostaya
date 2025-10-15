@@ -443,7 +443,7 @@ class TechnicalAnalysisContextManager:
                 logger.debug(f"⚠️ Недостаточно данных для анализа условий {context.symbol}")
                 return
             
-            current_price = float(context.recent_candles_h1[-1].close_price) if context.recent_candles_h1 else None
+            current_price = float(context.recent_candles_h1[-1]['close_price']) if context.recent_candles_h1 else None
             
             # 1. АНАЛИЗ РЫНОЧНЫХ УСЛОВИЙ
             market_analysis = self.market_conditions_analyzer.analyze_conditions(
