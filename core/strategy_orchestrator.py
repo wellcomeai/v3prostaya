@@ -8,8 +8,14 @@ from collections import defaultdict, deque
 import traceback
 import weakref
 
-# Импорты из наших модулей
-from market_data import MarketDataManager, MarketDataSnapshot
+# ✅ ИЗМЕНЕНИЕ 1: Импорты - сделаны опциональными для избежания циклических зависимостей
+from market_data import MarketDataSnapshot
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from market_data import MarketDataManager
+    from .data_source_adapter import DataSourceAdapter
+
 from strategies import BaseStrategy, TradingSignal, MomentumStrategy, get_available_strategies, create_strategy
 from .signal_manager import SignalManager
 from .data_models import SystemConfig, StrategyConfig, SignalMetrics, MarketCondition
@@ -132,9 +138,12 @@ class StrategyOrchestrator:
     6. Error recovery и health monitoring
     """
     
+    # ✅ ИЗМЕНЕНИЕ 2: Конструктор - market_data_manager теперь опционален, добавлены новые параметры
     def __init__(self, 
-                 market_data_manager: MarketDataManager,
                  signal_manager: SignalManager,
+                 market_data_manager: Optional['MarketDataManager'] = None,
+                 data_source_adapter: Optional['DataSourceAdapter'] = None,
+                 ta_context_manager = None,
                  system_config: Optional[SystemConfig] = None,
                  analysis_interval: float = 30.0,  # секунд между анализами
                  max_concurrent_analyses: int = 5,
@@ -143,16 +152,30 @@ class StrategyOrchestrator:
         Инициализация оркестратора
         
         Args:
-            market_data_manager: Менеджер рыночных данных
             signal_manager: Менеджер сигналов
+            market_data_manager: Менеджер рыночных данных (WebSocket, опционально)
+            data_source_adapter: Адаптер источника данных (REST API, опционально)
+            ta_context_manager: Менеджер технического анализа (опционально)
             system_config: Конфигурация системы
             analysis_interval: Интервал между анализами в секундах
             max_concurrent_analyses: Максимум одновременных анализов
             enable_performance_monitoring: Включить мониторинг производительности
         """
+        # ✅ ИЗМЕНЕНИЕ 3: НОВАЯ ЛОГИКА - Поддержка обоих источников данных
         self.market_data_manager = market_data_manager
+        self.data_source_adapter = data_source_adapter
+        self.ta_context_manager = ta_context_manager
         self.signal_manager = signal_manager
         self.system_config = system_config
+        
+        # Определяем активный источник данных
+        if not market_data_manager and not data_source_adapter:
+            raise ValueError("Необходим либо market_data_manager либо data_source_adapter!")
+        
+        self.data_source = market_data_manager if market_data_manager else data_source_adapter
+        self.using_adapter = data_source_adapter is not None and market_data_manager is None
+        
+        logger.info(f"📊 Источник данных: {'DataSourceAdapter (REST API)' if self.using_adapter else 'MarketDataManager (WebSocket)'}")
         
         # Настройки работы
         self.analysis_interval = analysis_interval
@@ -220,8 +243,16 @@ class StrategyOrchestrator:
             self.is_running = True
             self.stats["start_time"] = datetime.now()
             
-            # Подписываемся на обновления рыночных данных
-            self.market_data_manager.add_data_subscriber(self._on_market_data_update)
+            # ✅ ИЗМЕНЕНИЕ 4: Подписываемся на правильный источник данных
+            if self.using_adapter:
+                # Используем адаптер - запускаем его обновления
+                self.data_source_adapter.add_data_subscriber(self._on_market_data_update)
+                await self.data_source_adapter.start_updates(update_interval=60.0)
+                logger.info("✅ Подписались на обновления через DataSourceAdapter")
+            else:
+                # Используем WebSocket
+                self.market_data_manager.add_data_subscriber(self._on_market_data_update)
+                logger.info("✅ Подписались на обновления через MarketDataManager")
             
             # Загружаем стратегии из конфигурации
             await self._load_strategies()
@@ -275,8 +306,14 @@ class StrategyOrchestrator:
                 await asyncio.gather(*self.background_tasks, return_exceptions=True)
                 logger.info("✅ Фоновые задачи остановлены")
             
-            # Отписываемся от обновлений данных
-            self.market_data_manager.remove_data_subscriber(self._on_market_data_update)
+            # ✅ ИЗМЕНЕНИЕ 5: Правильно отписываемся от источника данных
+            if self.using_adapter:
+                await self.data_source_adapter.stop_updates()
+                self.data_source_adapter.remove_data_subscriber(self._on_market_data_update)
+                logger.info("✅ Отписались от DataSourceAdapter")
+            else:
+                self.market_data_manager.remove_data_subscriber(self._on_market_data_update)
+                logger.info("✅ Отписались от MarketDataManager")
             
             # Деактивируем все стратегии
             for strategy_instance in self.strategy_instances.values():
@@ -473,8 +510,13 @@ class StrategyOrchestrator:
             try:
                 cycle_start_time = datetime.now()
                 
-                # Получаем актуальный снимок рынка
-                market_data = await self.market_data_manager.get_market_snapshot()
+                # ✅ ИЗМЕНЕНИЕ 6: Получаем данные из правильного источника
+                if self.using_adapter:
+                    # Используем адаптер (REST API based)
+                    market_data = await self.data_source.get_market_snapshot()
+                else:
+                    # Используем WebSocket
+                    market_data = await self.data_source.get_market_snapshot()
                 
                 if market_data:
                     # Запускаем анализ всех активных стратегий параллельно
