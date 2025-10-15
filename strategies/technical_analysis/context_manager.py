@@ -152,7 +152,7 @@ class TechnicalAnalysisContextManager:
         
         logger.info("=" * 70)
         logger.info("🏗️ TechnicalAnalysisContextManager инициализирован")
-        logger.info(f"   • Auto-start background updates: {auto_start}")
+        logger.info(f"   • Auto-start background updates: {self.auto_start}")
         logger.info(f"   • Анализаторов подключено: 5")
         logger.info("=" * 70)
     
