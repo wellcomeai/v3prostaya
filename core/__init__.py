@@ -16,12 +16,10 @@ from .data_models import (
     SystemConfig,
     StrategyConfig,
     create_default_system_config,
-    TradingSignal,
-    SignalType,
-    SignalConfidence
+    # ❌ УДАЛЕНО: TradingSignal,
+    # ❌ УДАЛЕНО: SignalType,
+    # ❌ УДАЛЕНО: SignalConfidence
 )
-
-# ❌ УДАЛЕНА СТРОКА: from .data_source_adapter import DataSourceAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +29,9 @@ __all__ = [
     "SystemConfig",
     "StrategyConfig", 
     "create_default_system_config",
-    "TradingSignal",
-    "SignalType",
-    "SignalConfidence",
-    # ❌ УДАЛЕНО: "DataSourceAdapter"
+    # ❌ УДАЛЕНО: "TradingSignal",
+    # ❌ УДАЛЕНО: "SignalType",
+    # ❌ УДАЛЕНО: "SignalConfidence",
 ]
 
 logger.info("✅ Core module loaded successfully (Simplified v2.0)")
