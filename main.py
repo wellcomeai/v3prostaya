@@ -1479,9 +1479,10 @@ async def create_app():
     # ========== ШАГ 3: Создаем экземпляр бота ====================
     logger.info("🤖 Инициализация Telegram бота...")
     
-    # ✅ Создаем бот БЕЗ market_analyzer
     bot_instance = TelegramBot(
-        Config.TELEGRAM_BOT_TOKEN
+        token=Config.TELEGRAM_BOT_TOKEN,
+        repository=repository,
+        ta_context_manager=ta_context_manager
     )
     
     logger.info(f"✅ Telegram бот инициализирован")
