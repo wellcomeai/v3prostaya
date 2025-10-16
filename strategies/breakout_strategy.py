@@ -19,7 +19,7 @@ Breakout Strategy v3.0 - Стратегия торговли пробоя с ana
 - Отмена ордера если цена отошла на 1 ATR от заявки
 
 Author: Trading Bot Team
-Version: 3.0.0 - Orchestrator Integration
+Version: 3.0.1 - FIXED: KeyError 'close' -> 'close_price'
 """
 
 import logging
@@ -38,10 +38,11 @@ class BreakoutStrategy(BaseStrategy):
     Ставка на импульсное движение после преодоления ключевого уровня.
     Требует накопления энергии (консолидации) перед пробоем.
     
-    Изменения v3.0:
-    - ✅ Реализован analyze_with_data() - получает готовые данные
-    - ✅ Убрана зависимость от MarketDataSnapshot
-    - ✅ Работа напрямую со свечами из параметров
+    Изменения v3.0.1:
+    - ✅ ИСПРАВЛЕНО: KeyError 'close' -> используем 'close_price'
+    - ✅ ИСПРАВЛЕНО: KeyError 'high' -> используем 'high_price'
+    - ✅ ИСПРАВЛЕНО: KeyError 'low' -> используем 'low_price'
+    - ✅ ИСПРАВЛЕНО: KeyError 'open' -> используем 'open_price'
     
     Сильные стороны:
     - Ловит крупные импульсные движения
@@ -171,7 +172,7 @@ class BreakoutStrategy(BaseStrategy):
             "setups_filtered_by_compression": 0
         }
         
-        logger.info("💥 BreakoutStrategy v3.0 инициализирована")
+        logger.info("💥 BreakoutStrategy v3.0.1 инициализирована (FIXED)")
         logger.info(f"   • Symbol: {symbol}")
         logger.info(f"   • Require compression: {require_compression}")
         logger.info(f"   • Require consolidation: {require_consolidation}")
@@ -226,8 +227,8 @@ class BreakoutStrategy(BaseStrategy):
                     logger.debug(f"⚠️ {symbol}: недостаточно D1 свечей")
                 return None
             
-            # Текущая цена из последней M5 свечи
-            current_price = float(candles_5m[-1]['close'])
+            # ✅ ИСПРАВЛЕНО: используем 'close_price' вместо 'close'
+            current_price = float(candles_5m[-1]['close_price'])
             
             # Шаг 1: Проверка технического контекста
             if ta_context is None:
@@ -433,12 +434,11 @@ class BreakoutStrategy(BaseStrategy):
             if self.require_compression and len(candles_5m) >= 20:
                 recent_m5 = candles_5m[-20:]
                 
-                # Простая проверка: последние свечи должны быть маленькими
-                # Считаем средний размер свечи
-                avg_size = sum(abs(float(c['high']) - float(c['low'])) for c in recent_m5) / len(recent_m5)
+                # ✅ ИСПРАВЛЕНО: используем 'high_price' и 'low_price'
+                avg_size = sum(abs(float(c['high_price']) - float(c['low_price'])) for c in recent_m5) / len(recent_m5)
                 
                 # Последние 3 свечи должны быть меньше среднего
-                last_3_sizes = [abs(float(c['high']) - float(c['low'])) for c in recent_m5[-3:]]
+                last_3_sizes = [abs(float(c['high_price']) - float(c['low_price'])) for c in recent_m5[-3:]]
                 avg_last_3 = sum(last_3_sizes) / len(last_3_sizes)
                 
                 has_compression = avg_last_3 < avg_size * 0.8  # На 20% меньше среднего
@@ -471,7 +471,8 @@ class BreakoutStrategy(BaseStrategy):
             # УСЛОВИЕ 3: Закрытие вблизи уровня
             close_near_level = False
             if candles_5m:
-                last_close = float(candles_5m[-1]['close'])
+                # ✅ ИСПРАВЛЕНО: используем 'close_price'
+                last_close = float(candles_5m[-1]['close_price'])
                 distance = abs(last_close - level.price) / level.price * 100
                 
                 close_near_level = distance <= self.close_near_level_tolerance
@@ -489,8 +490,10 @@ class BreakoutStrategy(BaseStrategy):
             if self.require_consolidation and len(candles_1h) >= 10:
                 # Простая проверка: последние 10 часов цена в узком диапазоне
                 recent_h1 = candles_1h[-10:]
-                highs = [float(c['high']) for c in recent_h1]
-                lows = [float(c['low']) for c in recent_h1]
+                
+                # ✅ ИСПРАВЛЕНО: используем 'high_price' и 'low_price'
+                highs = [float(c['high_price']) for c in recent_h1]
+                lows = [float(c['low_price']) for c in recent_h1]
                 
                 price_range = max(highs) - min(lows)
                 avg_price = (max(highs) + min(lows)) / 2
@@ -516,9 +519,11 @@ class BreakoutStrategy(BaseStrategy):
             close_near_extreme = False
             if candles_5m:
                 last_candle = candles_5m[-1]
-                high = float(last_candle['high'])
-                low = float(last_candle['low'])
-                close = float(last_candle['close'])
+                
+                # ✅ ИСПРАВЛЕНО: используем 'high_price', 'low_price', 'close_price'
+                high = float(last_candle['high_price'])
+                low = float(last_candle['low_price'])
+                close = float(last_candle['close_price'])
                 
                 candle_size = high - low
                 
@@ -897,4 +902,4 @@ class BreakoutStrategy(BaseStrategy):
 # Export
 __all__ = ["BreakoutStrategy"]
 
-logger.info("✅ Breakout Strategy v3.0 loaded - Orchestrator Integration Ready")
+logger.info("✅ Breakout Strategy v3.0.1 loaded (FIXED: KeyError resolved)")
