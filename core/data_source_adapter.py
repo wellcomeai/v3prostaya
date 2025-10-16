@@ -5,7 +5,7 @@ Data Source Adapter
 Преобразует данные из базы данных в формат MarketDataSnapshot для стратегий.
 
 Author: Trading Bot Team  
-Version: 1.0.0
+Version: 1.0.1
 """
 
 import asyncio
@@ -175,7 +175,7 @@ class DataSourceAdapter:
             
             # Берем последнюю свечу H1 как основу
             latest_candle = context.recent_candles_h1[-1]
-            current_price = float(latest_candle.close_price)
+            current_price = float(latest_candle['close_price'])
             
             # Рассчитываем изменения цены
             price_changes = self._calculate_price_changes(context, current_price)
@@ -232,22 +232,22 @@ class DataSourceAdapter:
         try:
             # 1 минута (из M5 свечей)
             if len(context.recent_candles_m5) >= 1:
-                price_1m_ago = float(context.recent_candles_m5[-1].open_price)
+                price_1m_ago = float(context.recent_candles_m5[-1]['open_price'])
                 changes["1m"] = ((current_price - price_1m_ago) / price_1m_ago * 100)
             
             # 5 минут (из M5 свечей)
             if len(context.recent_candles_m5) >= 2:
-                price_5m_ago = float(context.recent_candles_m5[-2].open_price)
+                price_5m_ago = float(context.recent_candles_m5[-2]['open_price'])
                 changes["5m"] = ((current_price - price_5m_ago) / price_5m_ago * 100)
             
             # 1 час (из H1 свечей)
             if len(context.recent_candles_h1) >= 2:
-                price_1h_ago = float(context.recent_candles_h1[-2].close_price)
+                price_1h_ago = float(context.recent_candles_h1[-2]['close_price'])
                 changes["1h"] = ((current_price - price_1h_ago) / price_1h_ago * 100)
             
             # 24 часа (из D1 свечей)
             if len(context.recent_candles_d1) >= 2:
-                price_24h_ago = float(context.recent_candles_d1[-2].close_price)
+                price_24h_ago = float(context.recent_candles_d1[-2]['close_price'])
                 changes["24h"] = ((current_price - price_24h_ago) / price_24h_ago * 100)
             
         except Exception as e:
@@ -269,14 +269,14 @@ class DataSourceAdapter:
             # Суммируем объем из последних 24 H1 свечей
             if len(context.recent_candles_h1) >= 24:
                 volume_24h = sum(
-                    float(candle.volume) 
+                    float(candle['volume']) 
                     for candle in context.recent_candles_h1[-24:]
                 )
                 return volume_24h
             
             # Если нет 24 H1 свечей - берем из D1
             if context.recent_candles_d1:
-                return float(context.recent_candles_d1[-1].volume)
+                return float(context.recent_candles_d1[-1]['volume'])
             
             return 0.0
             
