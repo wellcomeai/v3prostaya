@@ -313,6 +313,45 @@ class BaseStrategy(ABC):
             logger.error(f"Stack trace: {traceback.format_exc()}")
             return None
     
+    @abstractmethod
+    async def analyze_market_opinion(
+        self,
+        market_snapshot,
+        ta_context
+    ) -> Dict[str, Any]:
+        """
+        Анализирует рынок и возвращает мнение стратегии БЕЗ генерации сигнала
+        
+        Используется для получения аналитического мнения стратегии
+        о текущем состоянии рынка.
+        
+        Args:
+            market_snapshot: MarketDataSnapshot с рыночными данными
+            ta_context: TechnicalAnalysisContext с техническим анализом
+            
+        Returns:
+            Dict с полями:
+                - opinion: str ("BULLISH", "BEARISH", "NEUTRAL")
+                - confidence: float (0.0 - 1.0)
+                - reasoning: str (краткое обоснование)
+                - signal_strength: float (0.0 - 1.0)
+                - key_points: List[str] (ключевые моменты)
+        
+        Example:
+            {
+                "opinion": "BULLISH",
+                "confidence": 0.75,
+                "reasoning": "Сильный импульс роста с увеличением объемов",
+                "signal_strength": 0.8,
+                "key_points": [
+                    "Рост +2.5% за 5 минут",
+                    "Объем на 30% выше среднего",
+                    "Пробой ключевого уровня $50,000"
+                ]
+            }
+        """
+        pass
+    
     def _validate_market_data(self, market_data: MarketDataSnapshot) -> bool:
         """Валидация рыночных данных"""
         try:
