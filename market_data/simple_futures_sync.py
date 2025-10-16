@@ -12,7 +12,7 @@ SimpleFuturesSync - Надежная синхронизация фьючерсн
 - Надежность и отказоустойчивость
 
 Author: Trading Bot Team
-Version: 1.0.0
+Version: 1.0.1 - FIXED: YFinance API требует =F для фьючерсов
 """
 
 import asyncio
@@ -63,6 +63,11 @@ class SimpleFuturesSync:
     - Заполняет обнаруженные пропуски
     - Работает параллельно с SimpleCandleSync (крипта)
     
+    ⚠️ ВАЖНО: 
+    - В Config символы БЕЗ =F (MCL, MGC, MES, MNQ)
+    - При запросах к YFinance добавляем =F автоматически
+    - В БД сохраняем БЕЗ =F для единообразия
+    
     YFinance ограничения на историю:
     - 1m: максимум 7 дней
     - 5m, 15m: максимум 60 дней
@@ -92,12 +97,13 @@ class SimpleFuturesSync:
         Инициализация SimpleFuturesSync
         
         Args:
-            symbols: Список фьючерсных символов (MCL, MGC, MES, MNQ)
+            symbols: Список фьючерсных символов БЕЗ =F (MCL, MGC, MES, MNQ)
             repository: MarketDataRepository для работы с БД
             check_gaps_on_start: Проверять пропуски при запуске
             max_gap_fill_attempts: Максимум попыток заполнить пропуск
         """
-        self.symbols = symbols
+        # Убираем =F если случайно передали
+        self.symbols = [s.replace("=F", "") for s in symbols]
         self.repository = repository
         self.check_gaps_on_start = check_gaps_on_start
         self.max_gap_fill_attempts = max_gap_fill_attempts
@@ -140,7 +146,8 @@ class SimpleFuturesSync:
         self.yf = None
         
         logger.info(f"🏗️ SimpleFuturesSync initialized")
-        logger.info(f"   • Symbols: {', '.join(symbols)}")
+        logger.info(f"   • Symbols (DB format): {', '.join(self.symbols)}")
+        logger.info(f"   • Symbols (API format): {', '.join([f'{s}=F' for s in self.symbols])}")
         logger.info(f"   • Check gaps on start: {check_gaps_on_start}")
         logger.info(f"   • Intervals: {[s.interval for s in self.schedule]}")
     
@@ -310,7 +317,7 @@ class SimpleFuturesSync:
         Синхронизация свечей для одного символа и интервала
         
         Args:
-            symbol: Фьючерсный символ (MCL, MGC, MES, MNQ)
+            symbol: Фьючерсный символ БЕЗ =F (MCL, MGC, MES, MNQ)
             interval: Интервал свечей
             lookback_candles: Сколько последних свечей загрузить
             
@@ -318,7 +325,7 @@ class SimpleFuturesSync:
             Количество синхронизированных свечей
         """
         try:
-            # Получаем последнюю свечу из БД
+            # Получаем последнюю свечу из БД (ищем без =F)
             last_candle_time = await self.repository.get_latest_candle_time(symbol, interval)
             
             # Определяем период загрузки
@@ -345,20 +352,20 @@ class SimpleFuturesSync:
                 logger.warning(f"   • Корректирую на {min_allowed_start.date()}")
                 start_time = min_allowed_start
             
-            # Загружаем данные через YFinance
+            # Загружаем данные через YFinance (передаем symbol БЕЗ =F)
             candles = await self._fetch_yfinance_data(symbol, interval, start_time, end_time)
             
             if not candles:
                 logger.debug(f"📭 {symbol} {interval}: нет новых данных")
                 return 0
             
-            # Сохраняем в БД
+            # Сохраняем в БД (symbol БЕЗ =F)
             candle_objects = []
             
             for candle_dict in candles:
                 try:
                     candle = MarketDataCandle.create_from_yfinance_data(
-                        symbol=symbol,
+                        symbol=symbol,  # Сохраняем БЕЗ =F
                         interval=interval,
                         yf_data=candle_dict
                     )
@@ -394,7 +401,7 @@ class SimpleFuturesSync:
         Загрузка данных через YFinance API
         
         Args:
-            symbol: Фьючерсный символ
+            symbol: Фьючерсный символ БЕЗ =F (MCL, MGC, MES, MNQ)
             interval: Интервал свечей
             start_time: Начало периода
             end_time: Конец периода
@@ -418,8 +425,12 @@ class SimpleFuturesSync:
             
             yf_interval = yf_interval_map.get(interval, interval)
             
-            # Создаем ticker
-            ticker = self.yf.Ticker(symbol)
+            # ✅ КРИТИЧЕСКИ ВАЖНО: YFinance требует =F для фьючерсов!
+            yf_symbol = f"{symbol}=F"
+            logger.debug(f"📡 YFinance запрос: {yf_symbol} (DB: {symbol})")
+            
+            # Создаем ticker С =F для YFinance API
+            ticker = self.yf.Ticker(yf_symbol)
             
             # Запускаем синхронный вызов в executor
             loop = asyncio.get_event_loop()
@@ -435,7 +446,7 @@ class SimpleFuturesSync:
             )
             
             if df.empty:
-                logger.debug(f"📭 YFinance: нет данных для {symbol} {interval}")
+                logger.debug(f"📭 YFinance: нет данных для {yf_symbol} {interval}")
                 return []
             
             # Конвертируем DataFrame в список словарей
@@ -451,11 +462,11 @@ class SimpleFuturesSync:
                 }
                 candles.append(candle_dict)
             
-            logger.debug(f"✅ YFinance: получено {len(candles)} свечей для {symbol} {interval}")
+            logger.debug(f"✅ YFinance: получено {len(candles)} свечей для {yf_symbol} {interval}")
             return candles
             
         except Exception as e:
-            logger.error(f"❌ YFinance API error для {symbol} {interval}: {e}")
+            logger.error(f"❌ YFinance API error для {symbol}=F {interval}: {e}")
             self.stats["yfinance_errors"] += 1
             raise
     
@@ -471,7 +482,7 @@ class SimpleFuturesSync:
                 interval = schedule.interval
                 
                 try:
-                    # Проверяем пропуски
+                    # Проверяем пропуски (ищем БЕЗ =F)
                     expected_end = datetime.now(timezone.utc)
                     gap_info = await self.repository.check_data_gaps(
                         symbol=symbol,
@@ -515,7 +526,7 @@ class SimpleFuturesSync:
         Заполнение обнаруженного пропуска
         
         Args:
-            symbol: Фьючерсный символ
+            symbol: Фьючерсный символ БЕЗ =F
             interval: Интервал свечей
             gap_start: Начало пропуска (может быть None если данных вообще нет)
             gap_end: Конец пропуска
@@ -538,20 +549,20 @@ class SimpleFuturesSync:
                 logger.warning(f"⚠️ gap_start {gap_start.date()} старше лимита YFinance")
                 gap_start = min_allowed_start
             
-            # Загружаем данные
+            # Загружаем данные (symbol БЕЗ =F, функция добавит =F сама)
             candles = await self._fetch_yfinance_data(symbol, interval, gap_start, gap_end)
             
             if not candles:
                 logger.warning(f"⚠️ Нет данных для заполнения пропуска {symbol} {interval}")
                 return
             
-            # Сохраняем в БД
+            # Сохраняем в БД (БЕЗ =F)
             candle_objects = []
             
             for candle_dict in candles:
                 try:
                     candle = MarketDataCandle.create_from_yfinance_data(
-                        symbol=symbol,
+                        symbol=symbol,  # БЕЗ =F
                         interval=interval,
                         yf_data=candle_dict
                     )
@@ -589,6 +600,7 @@ class SimpleFuturesSync:
             "is_running": self.is_running,
             "status": self.status.value,
             "symbols": self.symbols,
+            "symbols_api_format": [f"{s}=F" for s in self.symbols],
             "intervals": [s.interval for s in self.schedule],
             "schedule_details": [
                 {
