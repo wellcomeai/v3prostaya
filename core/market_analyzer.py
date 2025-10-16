@@ -7,7 +7,7 @@ Market Analyzer - Модуль для комплексного анализа р
 - StrategyOrchestrator (мнения стратегий)
 - OpenAI (AI анализ)
 
-Version: 1.0.0
+Version: 1.0.1 - Fixed level object access
 """
 
 import logging
@@ -76,9 +76,9 @@ class MarketAnalysisReport:
 📉 **Диапазон:** ${self.low_24h:,.2f} - ${self.high_24h:,.2f}
 
 🔍 **ТЕХНИЧЕСКИЙ АНАЛИЗ**
-• Тренд: {trend_emoji.get(self.trend, '🔶')} {self.trend}
-• Волатильность: {self.volatility}
-• ATR: {self.atr_value:.2f}
+- Тренд: {trend_emoji.get(self.trend, '🔶')} {self.trend}
+- Волатильность: {self.volatility}
+- ATR: {self.atr_value:.2f}
 
 🎯 **КЛЮЧЕВЫЕ УРОВНИ:**"""
         
@@ -176,13 +176,33 @@ class MarketAnalyzer:
             logger.debug("🧠 Получение технического анализа...")
             ta_context = await self.ta_context_manager.get_context(symbol)
             
-            # Извлекаем ключевые уровни
+            # ✅ ИСПРАВЛЕНО: Извлекаем ключевые уровни через атрибуты объекта
             key_levels = []
-            for level in ta_context.levels_d1[:5]:  # Топ-5 уровней
+            if ta_context.levels_d1:  # Проверяем что список не пустой
+                for level in ta_context.levels_d1[:5]:  # Топ-5 уровней
+                    try:
+                        # Обращаемся к атрибутам объекта через точку, а не через .get()
+                        key_levels.append({
+                            "type": getattr(level, "type", "support"),
+                            "price": float(getattr(level, "price", 0)),
+                            "strength": getattr(level, "strength", 0)
+                        })
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка обработки уровня: {e}")
+                        continue
+            
+            if not key_levels:
+                logger.debug("⚠️ Ключевые уровни не найдены, используем дефолтные")
+                # Добавляем минимальную информацию если уровни не найдены
                 key_levels.append({
-                    "type": level.get("type", "support"),
-                    "price": float(level.get("price", 0)),
-                    "strength": level.get("strength", 0)
+                    "type": "support",
+                    "price": market_snapshot.current_price * 0.98,
+                    "strength": 0.5
+                })
+                key_levels.append({
+                    "type": "resistance",
+                    "price": market_snapshot.current_price * 1.02,
+                    "strength": 0.5
                 })
             
             # ATR и волатильность
@@ -207,7 +227,7 @@ class MarketAnalyzer:
             else:
                 trend = "NEUTRAL"
             
-            logger.debug(f"✅ TA: тренд={trend}, волатильность={volatility}")
+            logger.debug(f"✅ TA: тренд={trend}, волатильность={volatility}, уровней={len(key_levels)}")
             
             # ========== ШАГ 3: Получаем мнения стратегий ==========
             logger.debug("🎭 Получение мнений стратегий...")
@@ -430,4 +450,4 @@ class MarketAnalyzer:
 
 __all__ = ["MarketAnalyzer", "MarketAnalysisReport", "StrategyOpinion"]
 
-logger.info("✅ Market Analyzer module loaded (v1.0.0)")
+logger.info("✅ Market Analyzer module loaded (v1.0.1 - Fixed)")
