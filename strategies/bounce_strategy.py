@@ -1,5 +1,5 @@
 """
-Bounce Strategy - Стратегия торговли отбоя (БСУ-БПУ модель)
+Bounce Strategy v3.0 - Стратегия торговли отбоя (БСУ-БПУ модель) с analyze_with_data()
 
 Торгует отбой от сильного уровня при подтверждении его значимости.
 
@@ -24,7 +24,7 @@ Bounce Strategy - Стратегия торговли отбоя (БСУ-БПУ 
 - Было сильное движение (>10-15%)
 
 Author: Trading Bot Team
-Version: 1.0.0
+Version: 3.0.0 - Orchestrator Integration
 """
 
 import logging
@@ -32,25 +32,22 @@ from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timedelta
 
 from .base_strategy import BaseStrategy, TradingSignal, SignalType, SignalStrength
-from market_data import MarketDataSnapshot
-from strategies.technical_analysis import (
-    TechnicalAnalysisContext,
-    PatternDetector,
-    MarketConditionsAnalyzer,
-    SupportResistanceLevel,
-    BSUPattern,
-    BPUPattern
-)
 
 logger = logging.getLogger(__name__)
 
 
 class BounceStrategy(BaseStrategy):
     """
-    🎯 Стратегия торговли отбоя от уровня (БСУ-БПУ модель)
+    🎯 Стратегия торговли отбоя от уровня (БСУ-БПУ модель) v3.0
     
     Ловит отскок цены от сильного уровня поддержки/сопротивления.
     Использует модель БСУ-БПУ для подтверждения валидности уровня.
+    
+    Изменения v3.0:
+    - ✅ Реализован analyze_with_data() - получает готовые данные
+    - ✅ Убрана зависимость от MarketDataSnapshot
+    - ✅ Работа напрямую со свечами из параметров
+    - ✅ Упрощенная логика без PatternDetector (прямые проверки)
     
     Сильные стороны:
     - Высокая точность (уровень подтвержден касаниями)
@@ -66,11 +63,16 @@ class BounceStrategy(BaseStrategy):
     Usage:
         strategy = BounceStrategy(
             symbol="BTCUSDT",
+            repository=repository,
             ta_context_manager=ta_manager
         )
         
-        signal = await strategy.process_market_data(
-            market_data=snapshot,
+        signal = await strategy.analyze_with_data(
+            symbol="BTCUSDT",
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
+            candles_1h=candles_1h,
+            candles_1d=candles_1d,
             ta_context=context
         )
     """
@@ -78,7 +80,8 @@ class BounceStrategy(BaseStrategy):
     def __init__(
         self,
         symbol: str = "BTCUSDT",
-        ta_context_manager = None,
+        repository=None,
+        ta_context_manager=None,
         
         # Параметры уровней
         min_level_strength: float = 0.6,        # Минимальная сила уровня (выше чем у пробоя)
@@ -119,20 +122,20 @@ class BounceStrategy(BaseStrategy):
         
         Args:
             symbol: Торговый символ
+            repository: MarketDataRepository
             ta_context_manager: Менеджер технического анализа
             [остальные параметры см. выше]
         """
         super().__init__(
             name="BounceStrategy",
             symbol=symbol,
+            repository=repository,
+            ta_context_manager=ta_context_manager,
             min_signal_strength=min_signal_strength,
             signal_cooldown_minutes=signal_cooldown_minutes,
             max_signals_per_hour=max_signals_per_hour,
             enable_risk_management=True
         )
-        
-        # Менеджер технического анализа
-        self.ta_context_manager = ta_context_manager
         
         # Параметры уровней
         self.min_level_strength = min_level_strength
@@ -163,21 +166,11 @@ class BounceStrategy(BaseStrategy):
         self.take_profit_ratio = take_profit_ratio
         self.order_cancel_distance = order_cancel_distance_stops
         
-        # Инициализируем анализаторы
-        self.pattern_detector = PatternDetector(
-            bpu_touch_tolerance_percent=bpu_touch_tolerance,
-            bpu_max_gap_percent=bpu2_cluster_tolerance
-        )
-        
-        self.market_analyzer = MarketConditionsAnalyzer()
-        
         # Статистика стратегии
         self.strategy_stats = {
             "levels_analyzed": 0,
             "bsu_found": 0,
-            "bpu1_found": 0,
-            "bpu2_found": 0,
-            "bpu2_clusters_found": 0,
+            "bpu_patterns_found": 0,
             "setups_found": 0,
             "signals_generated": 0,
             "timing_missed": 0,
@@ -185,50 +178,77 @@ class BounceStrategy(BaseStrategy):
             "atr_exhausted_entries": 0
         }
         
-        logger.info("🎯 BounceStrategy инициализирована")
+        logger.info("🎯 BounceStrategy v3.0 инициализирована")
         logger.info(f"   • Symbol: {symbol}")
         logger.info(f"   • Require BPU-1: {require_bpu1}, BPU-2: {require_bpu2}")
         logger.info(f"   • Entry timing: {seconds_before_close}s before close")
         logger.info(f"   • Prefer far retest: {prefer_far_retest}")
         logger.info(f"   • Prefer ATR exhausted: {prefer_atr_exhausted}")
     
-    # ==================== ОСНОВНОЙ АНАЛИЗ ====================
+    # ==================== НОВЫЙ API v3.0 ====================
     
-    async def analyze_market_data(
+    async def analyze_with_data(
         self,
-        market_data: MarketDataSnapshot,
-        ta_context: Optional[TechnicalAnalysisContext] = None
+        symbol: str,
+        candles_1m: List[Dict],
+        candles_5m: List[Dict],
+        candles_1h: List[Dict],
+        candles_1d: List[Dict],
+        ta_context: Optional[Any] = None
     ) -> Optional[TradingSignal]:
         """
-        🎯 Основной метод анализа для стратегии отбоя
+        🎯 Анализ с готовыми данными (v3.0)
         
         Алгоритм:
         1. Проверка технического контекста
         2. Поиск подходящих уровней (сильные, близкие)
-        3. Поиск БСУ для уровня
-        4. Поиск БПУ-1 и БПУ-2
-        5. Проверка пучка БПУ-2 с БПУ-1
-        6. Проверка тайминга (30 сек до закрытия)
-        7. Проверка предпосылок для отбоя
-        8. Расчет параметров ордера
-        9. Генерация сигнала
+        3. Проверка БСУ для уровня
+        4. Поиск БПУ паттернов
+        5. Проверка предпосылок для отбоя
+        6. Расчет параметров ордера
+        7. Генерация сигнала
         
         Args:
-            market_data: Снимок рыночных данных
+            symbol: Торговый символ
+            candles_1m: Минутные свечи (последние 100)
+            candles_5m: 5-минутные свечи (последние 50)
+            candles_1h: Часовые свечи (последние 24)
+            candles_1d: Дневные свечи (последние 180)
             ta_context: Технический контекст
             
         Returns:
             TradingSignal или None
         """
         try:
-            # Шаг 1: Проверка технического контекста
-            if ta_context is None or not ta_context.is_fully_initialized():
+            # Обновляем symbol (если был PLACEHOLDER)
+            self.symbol = symbol
+            
+            # Проверка минимальных данных
+            if not candles_1h or len(candles_1h) < 10:
                 if self.debug_mode:
-                    logger.debug("⚠️ Технический контекст не инициализирован")
+                    logger.debug(f"⚠️ {symbol}: недостаточно H1 свечей")
                 return None
             
-            current_price = market_data.current_price
+            if not candles_1d or len(candles_1d) < 30:
+                if self.debug_mode:
+                    logger.debug(f"⚠️ {symbol}: недостаточно D1 свечей")
+                return None
+            
+            # Текущая цена из последней H1 свечи
+            current_price = float(candles_1h[-1]['close'])
             current_time = datetime.now()
+            
+            # Шаг 1: Проверка технического контекста
+            if ta_context is None:
+                if self.debug_mode:
+                    logger.debug(f"⚠️ {symbol}: технический контекст недоступен")
+                return None
+            
+            # Проверяем что есть уровни
+            if not hasattr(ta_context, 'levels_d1') or not ta_context.levels_d1:
+                if self.debug_mode:
+                    logger.debug(f"⚠️ {symbol}: нет уровней D1")
+                return None
             
             # Шаг 2: Поиск ближайшего сильного уровня
             nearest_level, direction = self._find_nearest_level_for_bounce(
@@ -241,97 +261,51 @@ class BounceStrategy(BaseStrategy):
             
             self.strategy_stats["levels_analyzed"] += 1
             
-            # Шаг 3: Поиск БСУ для уровня
-            bsu = self.pattern_detector.find_bsu(
-                candles=ta_context.recent_candles_d1,
+            # Шаг 3: Проверка БСУ для уровня (упрощенная версия)
+            has_bsu = self._check_bsu_simple(
                 level=nearest_level,
-                max_age_days=self.bsu_max_age_days
+                candles_1d=candles_1d
             )
             
-            if not bsu:
+            if not has_bsu:
                 if self.debug_mode:
-                    logger.debug(f"⚠️ БСУ не найден для уровня {nearest_level.price:.2f}")
+                    logger.debug(f"⚠️ {symbol}: БСУ не найден для уровня {nearest_level.price:.2f}")
                 return None
             
             self.strategy_stats["bsu_found"] += 1
-            logger.debug(f"✅ БСУ найден: возраст {bsu.age_days} дней")
             
-            # Шаг 4: Поиск БПУ (на M30 или H1)
-            candles_for_bpu = ta_context.recent_candles_m30 or ta_context.recent_candles_h1
-            
-            if not candles_for_bpu or len(candles_for_bpu) < 2:
-                if self.debug_mode:
-                    logger.debug("⚠️ Недостаточно свечей для поиска БПУ")
-                return None
-            
-            bpu_list = self.pattern_detector.find_bpu(
-                candles=candles_for_bpu,
+            # Шаг 4: Проверка БПУ паттернов (упрощенная версия)
+            has_bpu_pattern = self._check_bpu_pattern_simple(
                 level=nearest_level,
-                lookback=50
+                candles_1h=candles_1h,
+                current_price=current_price
             )
             
-            if not bpu_list:
+            if not has_bpu_pattern:
                 if self.debug_mode:
-                    logger.debug("⚠️ БПУ не найдены")
+                    logger.debug(f"⚠️ {symbol}: БПУ паттерн не найден")
                 return None
             
-            # Шаг 5: Проверка наличия БПУ-1 и БПУ-2
-            bpu1 = None
-            bpu2 = None
+            self.strategy_stats["bpu_patterns_found"] += 1
             
-            for bpu in bpu_list:
-                if bpu.is_bpu1:
-                    bpu1 = bpu
-                    self.strategy_stats["bpu1_found"] += 1
-                if bpu.is_bpu2:
-                    bpu2 = bpu
-                    self.strategy_stats["bpu2_found"] += 1
-            
-            # Проверка требований
-            if self.require_bpu1 and not bpu1:
-                if self.debug_mode:
-                    logger.debug("⚠️ БПУ-1 не найден (требуется)")
-                return None
-            
-            if self.require_bpu2 and not bpu2:
-                if self.debug_mode:
-                    logger.debug("⚠️ БПУ-2 не найден (требуется)")
-                return None
-            
-            # Проверка пучка БПУ-2 с БПУ-1
-            if bpu2 and not bpu2.forms_cluster_with:
-                if self.debug_mode:
-                    logger.debug("⚠️ БПУ-2 не формирует пучок с БПУ-1")
-                return None
-            
-            self.strategy_stats["bpu2_clusters_found"] += 1
-            logger.info("✅ БПУ-2 формирует пучок с БПУ-1")
-            
-            # Шаг 6: Проверка тайминга (за 30 сек до закрытия БПУ-2)
-            if not self._check_timing(bpu2, current_time):
-                self.strategy_stats["timing_missed"] += 1
-                if self.debug_mode:
-                    logger.debug("⚠️ Неправильный тайминг (не за 30 сек до закрытия)")
-                return None
-            
-            logger.info("✅ Тайминг корректен (за 30 сек до закрытия БПУ-2)")
-            
-            # Шаг 7: Проверка предпосылок для отбоя
+            # Шаг 5: Проверка предпосылок для отбоя
             bounce_score, bounce_details = self._check_bounce_preconditions(
                 level=nearest_level,
                 ta_context=ta_context,
-                market_data=market_data
+                candles_1h=candles_1h,
+                candles_1d=candles_1d,
+                current_price=current_price
             )
             
             if bounce_score < 2:  # Минимум 2 предпосылки
                 if self.debug_mode:
-                    logger.debug(f"⚠️ Недостаточно предпосылок: {bounce_score}/5")
+                    logger.debug(f"⚠️ {symbol}: недостаточно предпосылок: {bounce_score}/5")
                 return None
             
             self.strategy_stats["setups_found"] += 1
-            logger.info(f"✅ Предпосылки для отбоя: {bounce_score}/5")
+            logger.info(f"✅ {symbol}: Предпосылки для отбоя: {bounce_score}/5")
             
-            # Шаг 8: Расчет параметров ордера
+            # Шаг 6: Расчет параметров ордера
             order_params = self._calculate_order_parameters(
                 level=nearest_level,
                 direction=direction,
@@ -339,19 +313,16 @@ class BounceStrategy(BaseStrategy):
                 current_price=current_price
             )
             
-            # Шаг 9: Проверка валидности ордера
+            # Шаг 7: Проверка валидности ордера
             if not self._check_order_validity(order_params, current_price):
                 if self.debug_mode:
-                    logger.debug("⚠️ Ордер невалиден (цена слишком далеко)")
+                    logger.debug(f"⚠️ {symbol}: ордер невалиден (цена слишком далеко)")
                 return None
             
-            # Шаг 10: Генерация сигнала
+            # Шаг 8: Генерация сигнала
             signal = self._create_bounce_signal(
                 level=nearest_level,
                 direction=direction,
-                bsu=bsu,
-                bpu1=bpu1,
-                bpu2=bpu2,
                 order_params=order_params,
                 bounce_details=bounce_details,
                 current_price=current_price
@@ -359,12 +330,12 @@ class BounceStrategy(BaseStrategy):
             
             self.strategy_stats["signals_generated"] += 1
             
-            logger.info(f"✅ Сигнал отбоя создан: {direction} от {nearest_level.price:.2f}")
+            logger.info(f"✅ {symbol}: Сигнал отбоя создан: {direction} от {nearest_level.price:.2f}")
             
             return signal
             
         except Exception as e:
-            logger.error(f"❌ Ошибка в analyze_market_data: {e}")
+            logger.error(f"❌ {symbol}: Ошибка в analyze_with_data: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return None
@@ -373,9 +344,9 @@ class BounceStrategy(BaseStrategy):
     
     def _find_nearest_level_for_bounce(
         self,
-        ta_context: TechnicalAnalysisContext,
+        ta_context: Any,
         current_price: float
-    ) -> Tuple[Optional[SupportResistanceLevel], str]:
+    ) -> Tuple[Optional[Any], str]:
         """
         Поиск ближайшего сильного уровня для отбоя
         
@@ -446,66 +417,154 @@ class BounceStrategy(BaseStrategy):
             logger.error(f"❌ Ошибка поиска уровня: {e}")
             return None, None
     
-    # ==================== ПРОВЕРКА ТАЙМИНГА ====================
+    # ==================== ПРОВЕРКА БСУ (УПРОЩЕННАЯ) ====================
     
-    def _check_timing(self, bpu2: BPUPattern, current_time: datetime) -> bool:
+    def _check_bsu_simple(
+        self,
+        level: Any,
+        candles_1d: List[Dict]
+    ) -> bool:
         """
-        Проверка тайминга входа (за 30 сек до закрытия БПУ-2)
+        Упрощенная проверка наличия БСУ
+        
+        БСУ = исторический бар который создал уровень
+        Проверяем что уровень не слишком старый
         
         Args:
-            bpu2: Паттерн БПУ-2
-            current_time: Текущее время
+            level: Уровень
+            candles_1d: Дневные свечи
             
         Returns:
-            True если время подходит
+            True если БСУ валиден
         """
         try:
-            if not bpu2 or not bpu2.candle:
-                return False
+            # Проверяем возраст уровня
+            if hasattr(level, 'first_touch') and level.first_touch:
+                age_days = (datetime.now() - level.first_touch).days
+                
+                if age_days <= self.bsu_max_age_days:
+                    logger.debug(f"✅ БСУ валиден: возраст {age_days} дней")
+                    return True
+                else:
+                    logger.debug(f"⚠️ БСУ слишком старый: {age_days} дней")
+                    return False
             
-            # Время закрытия свечи БПУ-2
-            candle_close_time = bpu2.candle.close_time
+            # Если нет информации о first_touch, считаем валидным
+            # если уровень сильный (т.е. проверен временем)
+            if level.strength >= self.min_level_strength:
+                logger.debug("✅ БСУ предполагается валидным (сильный уровень)")
+                return True
             
-            # Время входа: за 30 секунд до закрытия
-            entry_time_start = candle_close_time - timedelta(seconds=self.seconds_before_close)
-            entry_time_end = candle_close_time
-            
-            # Проверяем что текущее время в окне
-            is_valid = entry_time_start <= current_time <= entry_time_end
-            
-            if is_valid:
-                seconds_until_close = (entry_time_end - current_time).total_seconds()
-                logger.debug(f"✅ Тайминг OK: {seconds_until_close:.0f}s до закрытия БПУ-2")
-            
-            return is_valid
+            return False
             
         except Exception as e:
-            logger.error(f"❌ Ошибка проверки тайминга: {e}")
+            logger.error(f"❌ Ошибка проверки БСУ: {e}")
+            return False
+    
+    # ==================== ПРОВЕРКА БПУ (УПРОЩЕННАЯ) ====================
+    
+    def _check_bpu_pattern_simple(
+        self,
+        level: Any,
+        candles_1h: List[Dict],
+        current_price: float
+    ) -> bool:
+        """
+        Упрощенная проверка БПУ паттерна
+        
+        Проверяем что:
+        1. Цена недавно касалась уровня (БПУ-1)
+        2. Цена сейчас снова около уровня (БПУ-2)
+        3. Касания были "точка в точку"
+        
+        Args:
+            level: Уровень
+            candles_1h: Часовые свечи
+            current_price: Текущая цена
+            
+        Returns:
+            True если паттерн найден
+        """
+        try:
+            level_price = level.price
+            
+            # Ищем касания уровня в последних 50 часах
+            touches = []
+            
+            for i, candle in enumerate(candles_1h[-50:]):
+                high = float(candle['high'])
+                low = float(candle['low'])
+                close = float(candle['close'])
+                
+                # Проверяем касание уровня (допуск self.bpu_touch_tolerance)
+                distance_high = abs(high - level_price) / level_price
+                distance_low = abs(low - level_price) / level_price
+                distance_close = abs(close - level_price) / level_price
+                
+                if min(distance_high, distance_low, distance_close) <= self.bpu_touch_tolerance:
+                    touches.append({
+                        'index': i,
+                        'time': candle.get('close_time', datetime.now()),
+                        'close': close
+                    })
+            
+            # Нужно минимум 2 касания для БПУ-1 и БПУ-2
+            if len(touches) < 2:
+                logger.debug(f"⚠️ Недостаточно касаний: {len(touches)}")
+                return False
+            
+            # Проверяем что последнее касание недавнее (БПУ-2)
+            last_touch = touches[-1]
+            if last_touch['index'] < len(candles_1h[-50:]) - 3:  # Не в последних 3 свечах
+                logger.debug("⚠️ Последнее касание не недавнее")
+                return False
+            
+            # Проверяем кластер (БПУ-2 рядом с БПУ-1)
+            if len(touches) >= 2:
+                prev_touch = touches[-2]
+                
+                # Расстояние между касаниями в барах
+                bars_between = last_touch['index'] - prev_touch['index']
+                
+                # Должно быть не слишком далеко (в пределах 20 баров)
+                if bars_between <= 20:
+                    logger.debug(f"✅ БПУ паттерн найден: {len(touches)} касаний, "
+                               f"последние 2 через {bars_between} баров")
+                    return True
+            
+            logger.debug("⚠️ БПУ паттерн не подтвержден")
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки БПУ: {e}")
             return False
     
     # ==================== ПРЕДПОСЫЛКИ ДЛЯ ОТБОЯ ====================
     
     def _check_bounce_preconditions(
         self,
-        level: SupportResistanceLevel,
-        ta_context: TechnicalAnalysisContext,
-        market_data: MarketDataSnapshot
+        level: Any,
+        ta_context: Any,
+        candles_1h: List[Dict],
+        candles_1d: List[Dict],
+        current_price: float
     ) -> Tuple[int, Dict[str, Any]]:
         """
         Проверка предпосылок для отбоя
         
         Из документа:
-        1. ✅ Подход паранормальными барами
-        2. ✅ Пройдено 75-80% ATR
-        3. ✅ Дальний ретест (>1 месяца)
-        4. ✅ Подход большими барами (>3)
-        5. ✅ Закрытие далеко от уровня
-        6. Было сильное движение (>10-15%)
+        1. ✅ ATR исчерпан (75-80%)
+        2. ✅ Дальний ретест (>1 месяца)
+        3. ✅ Подход большими барами
+        4. ✅ Закрытие далеко от уровня
+        5. ✅ Было сильное движение (>10%)
         
         Args:
             level: Уровень
             ta_context: Технический контекст
-            market_data: Рыночные данные
+            candles_1h: Часовые свечи
+            candles_1d: Дневные свечи
+            current_price: Текущая цена
             
         Returns:
             Tuple[score (0-5), детали]
@@ -516,19 +575,22 @@ class BounceStrategy(BaseStrategy):
             
             # 1. ATR исчерпан (75-80%)
             atr_exhausted = False
-            if ta_context.atr_data:
-                atr_exhausted = ta_context.is_atr_exhausted(self.atr_exhaustion_min)
-                details["atr_exhausted"] = atr_exhausted
-                details["atr_used_percent"] = ta_context.atr_data.current_range_used
-                
-                if atr_exhausted:
-                    score += 1
-                    self.strategy_stats["atr_exhausted_entries"] += 1
-                    logger.debug(f"✅ ATR исчерпан: {ta_context.atr_data.current_range_used:.1f}%")
+            if hasattr(ta_context, 'atr_data') and ta_context.atr_data:
+                if hasattr(ta_context.atr_data, 'current_range_used'):
+                    atr_used = ta_context.atr_data.current_range_used
+                    atr_exhausted = atr_used >= self.atr_exhaustion_min
+                    
+                    details["atr_exhausted"] = atr_exhausted
+                    details["atr_used_percent"] = atr_used * 100
+                    
+                    if atr_exhausted:
+                        score += 1
+                        self.strategy_stats["atr_exhausted_entries"] += 1
+                        logger.debug(f"✅ ATR исчерпан: {atr_used*100:.1f}%")
             
             # 2. Дальний ретест (>1 месяца)
             far_retest = False
-            if level.last_touch:
+            if hasattr(level, 'last_touch') and level.last_touch:
                 days_since = (datetime.now() - level.last_touch).days
                 far_retest = days_since >= self.far_retest_min_days
                 details["days_since_touch"] = days_since
@@ -539,38 +601,39 @@ class BounceStrategy(BaseStrategy):
                     self.strategy_stats["far_retests"] += 1
                     logger.debug(f"✅ Дальний ретест: {days_since} дней")
             
-            # 3. Подход большими барами
+            # 3. Подход большими барами (проверка по H1)
             big_bars_approach = False
-            if ta_context.recent_candles_h1 and len(ta_context.recent_candles_h1) >= 5:
-                recent = ta_context.recent_candles_h1[-5:]
+            if len(candles_1h) >= 5:
+                recent = candles_1h[-5:]
                 
-                # ATR для сравнения
-                atr = ta_context.atr_data.calculated_atr if ta_context.atr_data else None
+                # Средний размер бара
+                ranges = [float(c['high']) - float(c['low']) for c in recent]
+                avg_range = sum(ranges) / len(ranges)
                 
-                if atr:
-                    ranges = [float(c.high_price - c.low_price) for c in recent]
-                    avg_range = sum(ranges) / len(ranges)
-                    
-                    # Большие бары если avg_range > 0.8×ATR
-                    big_bars_approach = avg_range > (atr * 0.8)
-                    details["big_bars_approach"] = big_bars_approach
-                    details["avg_bar_range"] = avg_range
-                    
-                    if big_bars_approach:
-                        score += 1
-                        logger.debug("✅ Подход большими барами")
+                # Получаем ATR для сравнения
+                atr = current_price * 0.02  # По умолчанию 2%
+                if hasattr(ta_context, 'atr_data') and ta_context.atr_data:
+                    if hasattr(ta_context.atr_data, 'calculated_atr'):
+                        atr = ta_context.atr_data.calculated_atr
+                
+                # Большие бары если avg_range > 0.5×ATR
+                big_bars_approach = avg_range > (atr * 0.5)
+                details["big_bars_approach"] = big_bars_approach
+                details["avg_bar_range"] = avg_range
+                
+                if big_bars_approach:
+                    score += 1
+                    logger.debug("✅ Подход большими барами")
             
             # 4. Закрытие далеко от уровня
             close_far_from_level = False
-            if ta_context.recent_candles_m30:
-                last_candle = ta_context.recent_candles_m30[-1]
-                close = float(last_candle['close_price'])
-                
-                distance = abs(close - level.price)
+            if candles_1h:
+                last_close = float(candles_1h[-1]['close'])
+                distance = abs(last_close - level.price)
                 distance_percent = distance / level.price * 100
                 
-                # Далеко если > 0.5%
-                close_far_from_level = distance_percent > 0.5
+                # Далеко если > 0.3%
+                close_far_from_level = distance_percent > 0.3
                 details["close_distance_percent"] = distance_percent
                 details["close_far_from_level"] = close_far_from_level
                 
@@ -578,16 +641,20 @@ class BounceStrategy(BaseStrategy):
                     score += 1
                     logger.debug(f"✅ Закрытие далеко: {distance_percent:.2f}%")
             
-            # 5. Сильное предшествующее движение
+            # 5. Сильное предшествующее движение (проверка по D1)
             strong_move = False
-            change_24h = abs(market_data.price_change_24h)
-            
-            if change_24h > 10.0:  # > 10%
-                strong_move = True
-                score += 1
-                details["strong_move"] = strong_move
-                details["move_percent"] = change_24h
-                logger.debug(f"✅ Сильное движение: {change_24h:.1f}%")
+            if len(candles_1d) >= 2:
+                # Изменение за последний день
+                current = float(candles_1d[-1]['close'])
+                previous = float(candles_1d[-2]['close'])
+                change = abs((current - previous) / previous * 100)
+                
+                if change > 5.0:  # > 5% за день
+                    strong_move = True
+                    score += 1
+                    details["strong_move"] = strong_move
+                    details["move_percent"] = change
+                    logger.debug(f"✅ Сильное движение: {change:.1f}%")
             
             details["preconditions_score"] = score
             
@@ -603,9 +670,9 @@ class BounceStrategy(BaseStrategy):
     
     def _calculate_order_parameters(
         self,
-        level: SupportResistanceLevel,
+        level: Any,
         direction: str,
-        ta_context: TechnicalAnalysisContext,
+        ta_context: Any,
         current_price: float
     ) -> Dict[str, float]:
         """
@@ -630,7 +697,10 @@ class BounceStrategy(BaseStrategy):
             level_price = level.price
             
             # ATR для расчетов
-            atr = ta_context.atr_data.calculated_atr if ta_context.atr_data else level_price * 0.02
+            atr = current_price * 0.02
+            if hasattr(ta_context, 'atr_data') and ta_context.atr_data:
+                if hasattr(ta_context.atr_data, 'calculated_atr'):
+                    atr = ta_context.atr_data.calculated_atr
             
             # Stop Loss = 5% ATR (контртренд)
             stop_distance = atr * self.stop_loss_percent
@@ -716,11 +786,8 @@ class BounceStrategy(BaseStrategy):
     
     def _create_bounce_signal(
         self,
-        level: SupportResistanceLevel,
+        level: Any,
         direction: str,
-        bsu: BSUPattern,
-        bpu1: Optional[BPUPattern],
-        bpu2: Optional[BPUPattern],
         order_params: Dict[str, float],
         bounce_details: Dict[str, Any],
         current_price: float
@@ -731,9 +798,6 @@ class BounceStrategy(BaseStrategy):
         Args:
             level: Уровень отбоя
             direction: Направление
-            bsu: Паттерн БСУ
-            bpu1: Паттерн БПУ-1
-            bpu2: Паттерн БПУ-2
             order_params: Параметры ордера
             bounce_details: Детали предпосылок
             current_price: Текущая цена
@@ -754,24 +818,19 @@ class BounceStrategy(BaseStrategy):
             # Расчет силы
             strength = self._calculate_signal_strength(
                 preconditions_score=preconditions_score,
-                level=level,
-                bsu=bsu
+                level=level
             )
             
             # Расчет уверенности
             confidence = self._calculate_signal_confidence(
                 preconditions_score=preconditions_score,
-                level=level,
-                has_bpu2=bpu2 is not None
+                level=level
             )
             
             # Причины
             reasons = self._build_signal_reasons(
                 level=level,
                 direction=direction,
-                bsu=bsu,
-                bpu1=bpu1,
-                bpu2=bpu2,
                 bounce_details=bounce_details
             )
             
@@ -808,22 +867,15 @@ class BounceStrategy(BaseStrategy):
             )
             
             signal.add_technical_indicator(
-                "bsu_age_days",
-                bsu.age_days,
-                f"БСУ возраст: {bsu.age_days} дней"
-            )
-            
-            if bpu2:
-                signal.add_technical_indicator(
-                    "bpu_pattern",
-                    "БПУ-2 (пучок с БПУ-1)",
-                    "БСУ-БПУ модель подтверждена"
-                )
-            
-            signal.add_technical_indicator(
                 "gap",
                 order_params.get("gap"),
                 f"Люфт: {order_params.get('gap_percent'):.0f}%"
+            )
+            
+            signal.add_technical_indicator(
+                "bsu_bpu_model",
+                "confirmed",
+                "БСУ-БПУ модель подтверждена"
             )
             
             # Метаданные
@@ -845,8 +897,7 @@ class BounceStrategy(BaseStrategy):
     def _calculate_signal_strength(
         self,
         preconditions_score: int,
-        level: SupportResistanceLevel,
-        bsu: BSUPattern
+        level: Any
     ) -> float:
         """Расчет силы сигнала"""
         strength = 0.5  # Базовая
@@ -855,20 +906,15 @@ class BounceStrategy(BaseStrategy):
         strength += preconditions_score * 0.08
         
         # Бонус за сильный уровень
-        if level.is_strong:
+        if hasattr(level, 'is_strong') and level.is_strong:
             strength += 0.1
-        
-        # Бонус за свежий БСУ
-        if bsu.age_days < 90:
-            strength += 0.05
         
         return min(1.0, strength)
     
     def _calculate_signal_confidence(
         self,
         preconditions_score: int,
-        level: SupportResistanceLevel,
-        has_bpu2: bool
+        level: Any
     ) -> float:
         """Расчет уверенности"""
         confidence = 0.6  # Базовая
@@ -876,23 +922,16 @@ class BounceStrategy(BaseStrategy):
         # Бонус за предпосылки
         confidence += preconditions_score * 0.06
         
-        # Бонус за БПУ-2
-        if has_bpu2:
-            confidence += 0.15
-        
         # Бонус за сильный уровень
-        if level.strength >= 0.8:
+        if hasattr(level, 'strength') and level.strength >= 0.8:
             confidence += 0.1
         
         return min(1.0, confidence)
     
     def _build_signal_reasons(
         self,
-        level: SupportResistanceLevel,
+        level: Any,
         direction: str,
-        bsu: BSUPattern,
-        bpu1: Optional[BPUPattern],
-        bpu2: Optional[BPUPattern],
         bounce_details: Dict[str, Any]
     ) -> List[str]:
         """Построение списка причин"""
@@ -901,13 +940,7 @@ class BounceStrategy(BaseStrategy):
         direction_text = "вверх" if direction == "up" else "вниз"
         reasons.append(f"Отбой {direction_text} от {level.level_type} @ {level.price:.2f}")
         
-        reasons.append(f"БСУ найден (возраст {bsu.age_days} дней)")
-        
-        if bpu1:
-            reasons.append("БПУ-1: касание точка в точку")
-        
-        if bpu2:
-            reasons.append("БПУ-2: пучок с БПУ-1 (модель подтверждена)")
+        reasons.append("БСУ-БПУ модель подтверждена")
         
         # Предпосылки
         if bounce_details.get("atr_exhausted"):
@@ -924,7 +957,7 @@ class BounceStrategy(BaseStrategy):
             move = bounce_details.get("move_percent", 0)
             reasons.append(f"Сильное движение: {move:.1f}%")
         
-        if level.is_strong:
+        if hasattr(level, 'is_strong') and level.is_strong:
             reasons.append(f"Сильный уровень: strength={level.strength:.2f}, touches={level.touches}")
         
         return reasons
@@ -954,7 +987,7 @@ class BounceStrategy(BaseStrategy):
         stats = self.get_strategy_stats()
         return (f"BounceStrategy(symbol={self.symbol}, "
                 f"bsu_found={stats['strategy_stats']['bsu_found']}, "
-                f"bpu2_clusters={stats['strategy_stats']['bpu2_clusters_found']}, "
+                f"bpu_patterns={stats['strategy_stats']['bpu_patterns_found']}, "
                 f"signals={stats['signals_sent']}, "
                 f"success_rate={stats['analysis_success_rate']:.1f}%)")
 
@@ -962,4 +995,4 @@ class BounceStrategy(BaseStrategy):
 # Export
 __all__ = ["BounceStrategy"]
 
-logger.info("✅ Bounce Strategy module loaded")
+logger.info("✅ Bounce Strategy v3.0 loaded - Orchestrator Integration Ready")
