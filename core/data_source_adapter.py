@@ -5,7 +5,7 @@ Data Source Adapter
 Преобразует данные из базы данных в формат MarketDataSnapshot для стратегий.
 
 Author: Trading Bot Team  
-Version: 1.0.2
+Version: 1.0.3 - Fixed: Priority to fresh M1 candles
 """
 
 import asyncio
@@ -159,6 +159,8 @@ class DataSourceAdapter:
         """
         Создать MarketDataSnapshot из данных технического анализа
         
+        ✅ ИСПРАВЛЕНО v1.0.3: Приоритет самым свежим данным (M1 → M5 → H1 → D1)
+        
         Args:
             symbol: Торговый символ
             
@@ -169,14 +171,45 @@ class DataSourceAdapter:
             # Получаем контекст технического анализа
             context = await self.ta_context_manager.get_context(symbol)
             
-            # Проверяем наличие данных
-            if not context.recent_candles_h1:
-                logger.warning(f"⚠️ Нет данных H1 для {symbol}")
+            # ✅ НОВАЯ ЛОГИКА: Берем самую свежую свечу (приоритет короткому интервалу)
+            latest_candle = None
+            candle_interval = None
+            
+            # 1️⃣ Пробуем M1 (САМЫЕ СВЕЖИЕ - обновляются каждую минуту!)
+            if context.recent_candles_m1 and len(context.recent_candles_m1) > 0:
+                latest_candle = context.recent_candles_m1[-1]
+                candle_interval = "1m"
+                logger.debug(f"✅ {symbol}: Используем M1 свечу (самые свежие данные)")
+            
+            # 2️⃣ Если нет M1 - пробуем M5
+            elif context.recent_candles_m5 and len(context.recent_candles_m5) > 0:
+                latest_candle = context.recent_candles_m5[-1]
+                candle_interval = "5m"
+                logger.debug(f"⚠️ {symbol}: M1 нет, используем M5 свечу")
+            
+            # 3️⃣ Если нет M5 - пробуем H1
+            elif context.recent_candles_h1 and len(context.recent_candles_h1) > 0:
+                latest_candle = context.recent_candles_h1[-1]
+                candle_interval = "1h"
+                logger.warning(f"⚠️ {symbol}: M1 и M5 нет, используем H1 свечу (СТАРЫЕ ДАННЫЕ!)")
+            
+            # 4️⃣ Если нет H1 - пробуем D1
+            elif context.recent_candles_d1 and len(context.recent_candles_d1) > 0:
+                latest_candle = context.recent_candles_d1[-1]
+                candle_interval = "1d"
+                logger.error(f"❌ {symbol}: Только D1 свечи - ОЧЕНЬ СТАРЫЕ ДАННЫЕ!")
+            
+            # Если вообще нет данных - ошибка
+            if not latest_candle:
+                logger.error(f"❌ {symbol}: Нет свечей для создания snapshot")
                 return None
             
-            # Берем последнюю свечу H1 как основу
-            latest_candle = context.recent_candles_h1[-1]
+            # Извлекаем текущую цену
             current_price = float(latest_candle['close_price'])
+            
+            # Логируем источник данных
+            candle_time = latest_candle.get('open_time', 'unknown')
+            logger.info(f"📊 {symbol}: ${current_price:,.2f} (из {candle_interval} свечи, время: {candle_time})")
             
             # Рассчитываем изменения цены
             price_changes = self._calculate_price_changes(context, current_price)
@@ -198,11 +231,10 @@ class DataSourceAdapter:
                 symbol=symbol,
                 timestamp=datetime.now(),
                 
-                # ✅ ИСПРАВЛЕНО: Правильные имена параметров
-                current_price=current_price,  # было: price
+                # Цена и изменения
+                current_price=current_price,
                 price_change_1m=price_changes.get("1m", 0.0),
                 price_change_5m=price_changes.get("5m", 0.0),
-                # УДАЛЕНО: price_change_1h (такого поля нет)
                 price_change_24h=price_changes.get("24h", 0.0),
                 
                 # Объем и диапазон
@@ -210,17 +242,17 @@ class DataSourceAdapter:
                 high_24h=high_24h,
                 low_24h=low_24h,
                 
-                # ✅ ДОБАВЛЕНО: Обязательные поля (нет данных - ставим 0)
+                # Обязательные поля (нет данных - ставим 0)
                 bid_price=0.0,
                 ask_price=0.0,
                 spread=0.0,
                 open_interest=0.0,
                 
                 # Качество данных
-                data_quality=data_quality_dict,  # ✅ Конвертирован в словарь
+                data_quality=data_quality_dict,
                 
                 # Источник данных
-                data_source=DataSourceType.REST_API,  # ✅ Используем enum
+                data_source=DataSourceType.REST_API,
                 
                 # Флаги данных
                 has_realtime_data=False,
@@ -249,8 +281,12 @@ class DataSourceAdapter:
         changes = {}
         
         try:
-            # 1 минута (из M5 свечей)
-            if len(context.recent_candles_m5) >= 1:
+            # 1 минута (из M1 свечей - если есть)
+            if hasattr(context, 'recent_candles_m1') and len(context.recent_candles_m1) >= 2:
+                price_1m_ago = float(context.recent_candles_m1[-2]['close_price'])
+                changes["1m"] = ((current_price - price_1m_ago) / price_1m_ago * 100)
+            # Fallback на M5
+            elif len(context.recent_candles_m5) >= 1:
                 price_1m_ago = float(context.recent_candles_m5[-1]['open_price'])
                 changes["1m"] = ((current_price - price_1m_ago) / price_1m_ago * 100)
             
@@ -343,6 +379,7 @@ class DataSourceAdapter:
         """
         try:
             # Проверяем наличие данных по таймфреймам
+            has_m1 = hasattr(context, 'recent_candles_m1') and len(context.recent_candles_m1) >= 10
             has_m5 = len(context.recent_candles_m5) >= 10
             has_h1 = len(context.recent_candles_h1) >= 10
             has_d1 = len(context.recent_candles_d1) >= 5
@@ -358,12 +395,13 @@ class DataSourceAdapter:
             
             # Определяем overall качество
             quality_score = 0
+            if has_m1: quality_score += 25  # M1 самые важные!
             if has_m5: quality_score += 20
-            if has_h1: quality_score += 20
-            if has_d1: quality_score += 20
-            if has_levels: quality_score += 20
+            if has_h1: quality_score += 15
+            if has_d1: quality_score += 10
+            if has_levels: quality_score += 15
             if has_atr: quality_score += 10
-            if data_fresh: quality_score += 10
+            if data_fresh: quality_score += 5
             
             if quality_score >= 90:
                 overall = "excellent"
@@ -612,4 +650,4 @@ class DataSourceAdapter:
 # Export
 __all__ = ["DataSourceAdapter"]
 
-logger.info("✅ Data Source Adapter module loaded (v1.0.2)")
+logger.info("✅ Data Source Adapter module loaded (v1.0.3 - Fresh data priority)")
