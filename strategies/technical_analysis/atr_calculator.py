@@ -10,7 +10,7 @@ ATR Calculator - Average True Range Calculator
 4. Расчет размеров Stop Loss (по тренду 10%, контртренд 5%)
 
 Author: Trading Bot Team
-Version: 1.0.0
+Version: 1.0.1 - FIXED: current_range_used теперь доля (0-1), не проценты
 """
 
 import logging
@@ -35,6 +35,9 @@ class ATRCalculator:
     - Проверка исчерпания запаса хода (75-80% правило)
     - Расчет размеров стопов
     
+    ВАЖНО: current_range_used хранится как доля (0-1), не проценты!
+    Например: 0.75 означает 75% ATR использовано
+    
     Usage:
         calculator = ATRCalculator()
         atr_data = calculator.calculate_atr(candles_d1, levels_d1)
@@ -49,7 +52,7 @@ class ATRCalculator:
         lookback_days: int = 5,
         paranormal_upper_threshold: float = 2.0,  # Бар > 2×ATR = паранормальный
         paranormal_lower_threshold: float = 0.5,  # Бар < 0.5×ATR = паранормальный
-        exhaustion_threshold: float = 0.75,       # 75% = исчерпан запас хода
+        exhaustion_threshold: float = 0.75,       # 0.75 = 75% = исчерпан запас хода
         stop_loss_trend_percent: float = 0.10,    # 10% от ATR для стопа по тренду
         stop_loss_counter_percent: float = 0.05   # 5% от ATR для контртренда
     ):
@@ -81,8 +84,8 @@ class ATRCalculator:
         
         logger.info("🔧 ATRCalculator инициализирован")
         logger.info(f"   • Lookback: {self.lookback_days} дней")
-        logger.info(f"   • Паранормальные фильтры: {self.paranormal_lower}×ATR < bar < {self.paranormal_upper}×ATR")  # ✅ ИСПРАВЛЕНО
-        logger.info(f"   • Порог исчерпания: {self.exhaustion_threshold*100}%")  # ✅ ИСПРАВЛЕНО
+        logger.info(f"   • Паранормальные фильтры: {self.paranormal_lower}×ATR < bar < {self.paranormal_upper}×ATR")
+        logger.info(f"   • Порог исчерпания: {self.exhaustion_threshold*100:.0f}%")
     
     # ==================== ОСНОВНОЙ МЕТОД ====================
     
@@ -98,7 +101,7 @@ class ATRCalculator:
         Рассчитывает:
         1. Расчетный ATR (среднее High-Low, исключая паранормальные)
         2. Технический ATR (расстояние между уровнями)
-        3. Процент использования ATR сегодня
+        3. Процент использования ATR сегодня (как ДОЛЯ 0-1)
         4. Флаг исчерпания запаса хода
         
         Args:
@@ -108,6 +111,8 @@ class ATRCalculator:
             
         Returns:
             ATRData с рассчитанными данными
+            - current_range_used: доля от 0 до 1 (не проценты!)
+            - is_exhausted: True если >= exhaustion_threshold
             
         Raises:
             ValueError: Если недостаточно данных
@@ -139,6 +144,7 @@ class ATRCalculator:
             atr_percent = (calculated_atr / price) * 100
             
             # 4. ТЕКУЩЕЕ ИСПОЛЬЗОВАНИЕ ATR (сколько пройдено сегодня)
+            # ✅ ИСПРАВЛЕНО: храним как ДОЛЮ (0-1), не проценты
             current_range_used = 0.0
             is_exhausted = False
             
@@ -147,10 +153,12 @@ class ATRCalculator:
                 today_candle = candles[-1]
                 today_range = abs(float(today_candle['high_price']) - float(today_candle['low_price']))
                 
-                # Процент использования = пройденный диапазон / ATR
+                # ✅ ИСПРАВЛЕНО: Доля использования = пройденный диапазон / ATR (БЕЗ * 100)
                 if calculated_atr > 0:
-                    current_range_used = (today_range / calculated_atr) * 100
-                    is_exhausted = current_range_used >= (self.exhaustion_threshold * 100)
+                    current_range_used = today_range / calculated_atr  # 0-1, не проценты!
+                    
+                    # ✅ ИСПРАВЛЕНО: Сравниваем с порогом напрямую (оба значения - доли)
+                    is_exhausted = current_range_used >= self.exhaustion_threshold
             
             # Обновляем статистику
             self._update_stats(calculated_atr, atr_percent)
@@ -160,7 +168,7 @@ class ATRCalculator:
                 calculated_atr=calculated_atr,
                 technical_atr=technical_atr,
                 atr_percent=atr_percent,
-                current_range_used=current_range_used,
+                current_range_used=current_range_used,  # Доля 0-1
                 is_exhausted=is_exhausted,
                 last_5_ranges=last_5_ranges,
                 updated_at=datetime.now(timezone.utc)
@@ -168,7 +176,7 @@ class ATRCalculator:
             
             logger.debug(f"✅ ATR рассчитан: calculated={calculated_atr:.2f}, "
                         f"technical={technical_atr:.2f}, "
-                        f"used={current_range_used:.1f}%, "
+                        f"used={current_range_used:.3f} ({current_range_used*100:.1f}%), "
                         f"exhausted={is_exhausted}")
             
             return atr_data
@@ -372,7 +380,9 @@ class ATRCalculator:
             threshold: Порог исчерпания (default: 0.75 = 75%)
             
         Returns:
-            Tuple[исчерпан?, процент использования]
+            Tuple[исчерпан?, процент использования (0-100)]
+            
+        Note: Возвращает ПРОЦЕНТЫ (0-100) для удобства вызывающего кода
         """
         try:
             if threshold is None:
@@ -392,17 +402,19 @@ class ATRCalculator:
             today_low = float(today_candle['low_price'])
             today_range = today_high - today_low
             
-            # Процент использования
+            # ✅ ИСПРАВЛЕНО: Сначала вычисляем долю, потом проценты
             if calculated_atr > 0:
-                used_percent = (today_range / calculated_atr) * 100
+                used_ratio = today_range / calculated_atr  # Доля 0-1
+                used_percent = used_ratio * 100  # Проценты для возврата
             else:
+                used_ratio = 0.0
                 used_percent = 0.0
             
-            # Проверка порога
-            is_exhausted = used_percent >= (threshold * 100)
+            # ✅ ИСПРАВЛЕНО: Сравниваем ДОЛИ (не проценты)
+            is_exhausted = used_ratio >= threshold
             
             if is_exhausted:
-                logger.info(f"⚠️ Запас хода исчерпан: {used_percent:.1f}% >= {threshold*100}%")
+                logger.info(f"⚠️ Запас хода исчерпан: {used_percent:.1f}% >= {threshold*100:.0f}%")
             else:
                 logger.debug(f"✅ Запас хода доступен: {used_percent:.1f}%")
             
@@ -456,13 +468,14 @@ class ATRCalculator:
         Получить оставшийся запас хода (в процентах)
         
         Args:
-            atr_data: Данные ATR
+            atr_data: Данные ATR (current_range_used как доля 0-1)
             
         Returns:
             Оставшийся процент (0-100)
         """
-        remaining = max(0.0, 100.0 - atr_data.current_range_used)
-        return remaining
+        # ✅ Конвертируем долю в проценты для удобства
+        remaining_percent = max(0.0, (1.0 - atr_data.current_range_used) * 100)
+        return remaining_percent
     
     def is_suitable_for_trend_trade(self, atr_data: ATRData, min_remaining: float = 25.0) -> bool:
         """
@@ -474,7 +487,7 @@ class ATRCalculator:
         
         Args:
             atr_data: Данные ATR
-            min_remaining: Минимальный остаток в процентах
+            min_remaining: Минимальный остаток в процентах (0-100)
             
         Returns:
             True если можно торговать по тренду
@@ -560,10 +573,10 @@ class ATRCalculator:
                 f"  Average ATR: {stats['average_atr']:.2f} ({stats['average_atr_percent']:.2f}%)\n"
                 f"  Paranormal bars filtered: {stats['paranormal_bars_filtered']}\n"
                 f"  Lookback: {stats['lookback_days']} days\n"
-                f"  Exhaustion threshold: {stats['exhaustion_threshold']*100}%")
+                f"  Exhaustion threshold: {stats['exhaustion_threshold']*100:.0f}%")
 
 
 # Export
 __all__ = ["ATRCalculator"]
 
-logger.info("✅ ATR Calculator module loaded")
+logger.info("✅ ATR Calculator module loaded (v1.0.1 - FIXED: current_range_used as ratio)")
