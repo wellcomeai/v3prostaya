@@ -359,6 +359,23 @@ _⚠️ Торговля криптовалютами связана с высо
         """
         prompt = self._create_comprehensive_analysis_prompt(analysis_data).strip()
         
+        # ✅ ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ
+        logger.info("=" * 80)
+        logger.info("🔍 ДАННЫЕ ДЛЯ OPENAI:")
+        logger.info(f"Symbol: {analysis_data.get('symbol', 'N/A')}")
+        logger.info(f"Current Price: ${analysis_data.get('current_price', 0):,.2f}")
+        logger.info(f"Price Change 24h: {analysis_data.get('price_change_24h', 0):+.2f}%")
+        logger.info(f"Trend: {analysis_data.get('trend', 'N/A')}")
+        logger.info(f"Volatility: {analysis_data.get('volatility', 'N/A')}")
+        logger.info(f"ATR: {analysis_data.get('atr', 0):.2f}")
+        logger.info(f"Key Levels: {len(analysis_data.get('key_levels', []))} levels")
+        logger.info(f"Strategies Opinions: {len(analysis_data.get('strategies_opinions', []))} opinions")
+        logger.info("-" * 80)
+        logger.info(f"PROMPT LENGTH: {len(prompt)} characters")
+        logger.info("PROMPT PREVIEW (first 500 chars):")
+        logger.info(prompt[:500])
+        logger.info("=" * 80)
+        
         logger.info(f"📤 Отправка комплексного анализа для {analysis_data.get('symbol', 'N/A')}...")
         logger.debug(f"Промпт длина: {len(prompt)} символов")
         
