@@ -41,7 +41,7 @@ WEBHOOK_SECRET = "bybit_trading_bot_secret_2025"
 # URL вашего сервера
 BASE_WEBHOOK_URL = "https://bybitmybot.onrender.com"
 
-# ✅ ОБНОВЛЕНО: Глобальные переменные с DataSourceAdapter и MarketAnalyzer
+# ✅ Глобальные переменные с DataSourceAdapter и MarketAnalyzer
 bot_instance = None
 market_data_manager = None
 signal_manager = None
@@ -97,7 +97,7 @@ async def health_check(request):
         # Проверяем БД
         db_health = await get_database_health()
         
-        # ✅ ОБНОВЛЕНО: Проверяем все компоненты включая DataSourceAdapter и MarketAnalyzer
+        # ✅ Проверяем все компоненты включая DataSourceAdapter и MarketAnalyzer
         trading_system_status = {
             "simple_candle_sync": "inactive",
             "simple_futures_sync": "inactive",
@@ -1057,7 +1057,7 @@ async def root_handler(request):
     """Root endpoint с информацией о системе"""
     try:
         system_info = {
-            "message": "Bybit Trading Bot v2.5 - DataSourceAdapter Edition",
+            "message": "Bybit Trading Bot v2.5 - DataSourceAdapter + MarketAnalyzer Edition",
             "features": [
                 "✅ PostgreSQL Database Integration",
                 "✅ Historical Data Storage", 
@@ -1065,7 +1065,7 @@ async def root_handler(request):
                 "✅ SimpleFuturesSync - YFinance REST API Sync (Futures)",
                 "✅ TechnicalAnalysisContextManager - Full TA Integration",
                 "🆕 DataSourceAdapter - Universal Data Provider",
-                "🆕 MarketAnalyzer - Comprehensive Market Analysis",
+                "🆕 MarketAnalyzer - Comprehensive Market Analysis with AI",
                 "✅ Bybit WebSocket (Ticker Only - Optional)",
                 "✅ Strategy Orchestration System (Works WITHOUT WebSocket!)",
                 "✅ Advanced Signal Management",
@@ -1486,16 +1486,11 @@ async def initialize_trading_system():
             openai_analyzer=openai_analyzer
         )
         
-        # Подписываем Telegram бота на сигналы
-        if bot_instance:
-            signal_manager.add_subscriber(bot_instance.broadcast_signal)
-            logger.info("📡 Telegram бот подписан на торговые сигналы")
-        
         # Запускаем менеджер сигналов
         await signal_manager.start()
         logger.info("✅ SignalManager запущен")
         
-        # ШАГ 6: StrategyOrchestrator - ТЕПЕРЬ ВСЕГДА ЗАПУСКАЕТСЯ!
+        # ШАГ 6: StrategyOrchestrator
         logger.info("🎭 Инициализация StrategyOrchestrator...")
         
         # Определяем источник данных
@@ -1530,17 +1525,41 @@ async def initialize_trading_system():
             logger.warning("⚠️ StrategyOrchestrator не запустился")
             strategy_orchestrator = None
         
-        # ШАГ 6.5: Создаем MarketAnalyzer (ПОСЛЕ StrategyOrchestrator)
+        # ШАГ 7: MarketAnalyzer (НОВЫЙ КОМПОНЕНТ)
         logger.info("🔬 Инициализация MarketAnalyzer...")
         
-        market_analyzer = MarketAnalyzer(
-            data_source_adapter=data_source_adapter,
-            ta_context_manager=ta_context_manager,
-            openai_analyzer=openai_analyzer,
-            strategy_orchestrator=strategy_orchestrator
-        )
-        
-        logger.info("✅ MarketAnalyzer создан и готов к работе")
+        # Проверяем что все зависимости готовы
+        if not data_source_adapter:
+            logger.error("❌ DataSourceAdapter не создан - MarketAnalyzer не может быть инициализирован")
+            market_analyzer = None
+        elif not ta_context_manager:
+            logger.error("❌ TechnicalAnalysisContextManager не создан - MarketAnalyzer не может быть инициализирован")
+            market_analyzer = None
+        elif not openai_analyzer:
+            logger.error("❌ OpenAIAnalyzer не создан - MarketAnalyzer не может быть инициализирован")
+            market_analyzer = None
+        elif not strategy_orchestrator:
+            logger.error("❌ StrategyOrchestrator не создан - MarketAnalyzer не может быть инициализирован")
+            market_analyzer = None
+        else:
+            # Все зависимости готовы - создаем MarketAnalyzer
+            try:
+                market_analyzer = MarketAnalyzer(
+                    data_source_adapter=data_source_adapter,
+                    ta_context_manager=ta_context_manager,
+                    openai_analyzer=openai_analyzer,
+                    strategy_orchestrator=strategy_orchestrator
+                )
+                
+                logger.info("✅ MarketAnalyzer создан и готов к работе")
+                logger.info("   • Комплексный анализ рынка")
+                logger.info("   • AI прогнозирование")
+                logger.info("   • Мнения всех стратегий")
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка создания MarketAnalyzer: {e}")
+                logger.error(traceback.format_exc())
+                market_analyzer = None
         
         # ФИНАЛЬНАЯ СТАТИСТИКА
         logger.info("=" * 70)
@@ -1562,22 +1581,25 @@ async def initialize_trading_system():
             logger.info(f"   • Анализаторы: LevelAnalyzer, ATRCalculator, PatternDetector,")
             logger.info(f"                 BreakoutAnalyzer, MarketConditionsAnalyzer")
         
-        logger.info(f"🔌 DataSourceAdapter: ✅ СОЗДАН")
-        logger.info(f"   • Криптовалюты: {len(data_source_adapter.crypto_symbols)}")
-        logger.info(f"   • Фьючерсы: {len(data_source_adapter.futures_symbols)}")
+        logger.info(f"🔌 DataSourceAdapter: {'✅ СОЗДАН' if data_source_adapter else '❌ НЕ СОЗДАН'}")
+        if data_source_adapter:
+            logger.info(f"   • Криптовалюты: {len(data_source_adapter.crypto_symbols)}")
+            logger.info(f"   • Фьючерсы: {len(data_source_adapter.futures_symbols)}")
         
         logger.info(f"🤖 OpenAI Analyzer: ✅ СОЗДАН")
-        
-        logger.info(f"🔬 MarketAnalyzer: ✅ СОЗДАН")
-        logger.info(f"   • Комплексный анализ рынка")
-        logger.info(f"   • AI прогнозирование")
-        logger.info(f"   • Мнения всех стратегий")
-        
         logger.info(f"📊 WebSocket ticker: {'✅ АКТИВЕН' if market_data_manager else '❌ ОТКЛЮЧЕН'}")
         logger.info(f"🎛️ SignalManager: ✅ АКТИВЕН (с AI поддержкой)")
         logger.info(f"🎭 StrategyOrchestrator: {'✅ АКТИВЕН' if strategy_orchestrator else '❌ ОТКЛЮЧЕН'}")
         if strategy_orchestrator:
             logger.info(f"   • Режим: {'WebSocket (real-time)' if market_data_manager else 'REST API (1 min)'}")
+        
+        # MarketAnalyzer статус
+        logger.info(f"🔬 MarketAnalyzer: {'✅ СОЗДАН' if market_analyzer else '❌ НЕ СОЗДАН'}")
+        if market_analyzer:
+            logger.info(f"   • Комплексный анализ рынка")
+            logger.info(f"   • AI прогнозирование через OpenAI")
+            logger.info(f"   • Мнения {len(strategy_orchestrator.strategy_instances) if strategy_orchestrator else 0} стратегий")
+        
         logger.info("=" * 70)
         
         return True
@@ -1594,10 +1616,10 @@ async def create_app():
     
     logger.info("=" * 60)
     logger.info("🚀 ЗАПУСК BYBIT TRADING BOT v2.5")
-    logger.info("   DataSourceAdapter Edition")
+    logger.info("   DataSourceAdapter + MarketAnalyzer Edition")
     logger.info("=" * 60)
     
-    # Шаг 1: Инициализация базы данных
+    # ========== ШАГ 1: Инициализация базы данных ==========
     db_success = await initialize_database_system()
     if not db_success:
         logger.error("💥 Критическая ошибка: не удалось инициализировать БД")
@@ -1606,14 +1628,7 @@ async def create_app():
         else:
             logger.warning("⚠️ Продолжаем без базы данных (только для разработки)")
     
-    # Шаг 2: Создаем экземпляр бота с MarketAnalyzer
-    logger.info("🤖 Инициализация Telegram бота...")
-    bot_instance = TelegramBot(
-        Config.TELEGRAM_BOT_TOKEN,
-        market_analyzer=market_analyzer
-    )
-    
-    # Шаг 3: Инициализируем торговую систему
+    # ========== ШАГ 2: Инициализируем торговую систему (включая MarketAnalyzer) ==========
     trading_system_started = await initialize_trading_system()
     if trading_system_started:
         logger.info("✅ Торговая система активна")
@@ -1623,18 +1638,37 @@ async def create_app():
             logger.info(f"📊 Futures: {', '.join(futures_symbols)}")
         logger.info(f"🧠 Technical Analysis: {'✅ Active' if ta_context_manager else '❌ Inactive'}")
         logger.info(f"🔌 Data Source Adapter: {'✅ Active' if data_source_adapter else '❌ Inactive'}")
-        logger.info(f"🔬 Market Analyzer: {'✅ Active' if market_analyzer else '❌ Inactive'}")
         logger.info(f"🤖 OpenAI Analyzer: ✅ Active")
+        logger.info(f"🔬 MarketAnalyzer: {'✅ Active' if market_analyzer else '❌ Inactive'}")
         logger.info(f"🎭 Strategy Mode: {'WebSocket' if market_data_manager else 'REST API'}")
         logger.info(f"🔧 Режим: {'Testnet' if Config.BYBIT_TESTNET else 'Mainnet'}")
         logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
     else:
         logger.warning("⚠️ Торговая система не активна, только Telegram бот")
     
-    # Шаг 4: Устанавливаем webhook
+    # ========== ШАГ 3: Создаем экземпляр бота (ПОСЛЕ инициализации торговой системы) ==========
+    logger.info("🤖 Инициализация Telegram бота...")
+    
+    # Проверяем что market_analyzer создан
+    if not market_analyzer:
+        logger.warning("⚠️ MarketAnalyzer не создан! Анализ рынка будет недоступен в боте.")
+    
+    bot_instance = TelegramBot(
+        Config.TELEGRAM_BOT_TOKEN,
+        market_analyzer=market_analyzer
+    )
+    
+    logger.info(f"✅ Telegram бот инициализирован (MarketAnalyzer: {'✓' if market_analyzer else '✗'})")
+    
+    # Подписываем бота на сигналы (теперь bot_instance создан)
+    if signal_manager and bot_instance:
+        signal_manager.add_subscriber(bot_instance.broadcast_signal)
+        logger.info("📡 Telegram бот подписан на торговые сигналы")
+    
+    # ========== ШАГ 4: Устанавливаем webhook ==========
     await on_startup(bot_instance.bot)
     
-    # Шаг 5: Создаем веб-приложение
+    # ========== ШАГ 5: Создаем веб-приложение ==========
     app = web.Application()
     
     # Основные endpoints
@@ -1684,7 +1718,7 @@ async def main():
     """Главная функция приложения"""
     
     try:
-        logger.info("🌟 Запуск Bybit Trading Bot v2.5 - DataSourceAdapter Edition")
+        logger.info("🌟 Запуск Bybit Trading Bot v2.5 - DataSourceAdapter + MarketAnalyzer Edition")
         logger.info(f"🔧 Порт: {WEB_SERVER_PORT}")
         logger.info(f"🔧 Webhook URL: {BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
         logger.info(f"🔧 Testnet: {Config.BYBIT_TESTNET}")
@@ -1794,6 +1828,7 @@ async def main():
                         logger.info(f"   • Фьючерсы свечей: {futures_synced}")
                         logger.info(f"   • TA контекстов: {ta_contexts}")
                         logger.info(f"   • Стратегии: {strategies_active}")
+                        logger.info(f"   • MarketAnalyzer: {'✓' if market_analyzer else '✗'}")
                         logger.info(f"   • Режим оркестратора: {'WebSocket' if market_data_manager else 'REST API'}")
                         logger.info(f"   • БД: {db_status}")
                     except Exception as e:
