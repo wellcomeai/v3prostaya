@@ -14,7 +14,7 @@ Architecture:
 - SignalManager -> обработка и рассылка
 
 Author: Trading Bot Team
-Version: 3.0.0
+Version: 3.0.1 - FIXED: Removed MomentumStrategy
 """
 
 import asyncio
@@ -56,7 +56,7 @@ class CycleStats:
     start_time: datetime
     end_time: Optional[datetime] = None
     symbols_analyzed: int = 0
-    signals_generated: int = 0
+    signals_count: int = 0
     errors_count: int = 0
     execution_time: float = 0.0
     
@@ -161,16 +161,15 @@ class StrategyOrchestrator:
         Returns:
             List[BaseStrategy]: Список инициализированных стратегий
         """
+        # ✅ ИСПРАВЛЕНО: Убран MomentumStrategy
         from strategies import (
-            MomentumStrategy,
             BreakoutStrategy,
             BounceStrategy,
             FalseBreakoutStrategy
         )
         
-        # Все доступные стратегии
+        # ✅ ИСПРАВЛЕНО: Только 3 стратегии v3.0
         available_strategies = {
-            "momentum": MomentumStrategy,
             "breakout": BreakoutStrategy,
             "bounce": BounceStrategy,
             "false_breakout": FalseBreakoutStrategy
