@@ -1,5 +1,5 @@
 """
-False Breakout Strategy - Стратегия торговли ложных пробоев
+False Breakout Strategy v3.0 - Стратегия торговли ложных пробоев с analyze_with_data()
 
 Торгует РЕАКЦИЮ на ложный пробой (False Breakout) - когда крупный игрок 
 "ловит стопы" и цена резко разворачивается обратно за уровень.
@@ -17,14 +17,14 @@ False Breakout Strategy - Стратегия торговли ложных пр�
 - Take Profit: 2-3 стопа (противоположный уровень)
 
 Условия входа:
-1. ✅ Обнаружен ложный пробой (BreakoutAnalyzer)
+1. ✅ Обнаружен ложный пробой
 2. ✅ Цена подтвердила разворот (вернулась за уровень)
-3. ✅ Не прошло много времени (< 30 минут)
+3. ✅ Не прошло много времени (< 4 часов)
 4. ✅ Сильный уровень (strength >= 0.5)
 5. ✅ Подходящие рыночные условия
 
 Author: Trading Bot Team
-Version: 1.0.0
+Version: 3.0.0 - Orchestrator Integration
 """
 
 import logging
@@ -32,28 +32,22 @@ from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timedelta
 
 from .base_strategy import BaseStrategy, TradingSignal, SignalType, SignalStrength
-from market_data import MarketDataSnapshot
-from strategies.technical_analysis import (
-    TechnicalAnalysisContext,
-    PatternDetector,
-    MarketConditionsAnalyzer,
-    BreakoutAnalyzer,
-    SupportResistanceLevel,
-    BreakoutType,
-    BreakoutDirection,
-    MarketCondition,
-    VolatilityLevel
-)
 
 logger = logging.getLogger(__name__)
 
 
 class FalseBreakoutStrategy(BaseStrategy):
     """
-    🎣 Стратегия торговли ложных пробоев (ловушек)
+    🎣 Стратегия торговли ложных пробоев (ловушек) v3.0
     
     Ловит развороты после того как крупный игрок "поймал стопы" мелких трейдеров.
     Торгует ПРОТИВ направления ложного пробоя.
+    
+    Изменения v3.0:
+    - ✅ Реализован analyze_with_data() - получает готовые данные
+    - ✅ Убрана зависимость от MarketDataSnapshot
+    - ✅ Работа напрямую со свечами из параметров
+    - ✅ Упрощенная логика без BreakoutAnalyzer (прямые проверки)
     
     Сильные стороны:
     - Высокая точность (уровень проверен ЛП)
@@ -62,7 +56,7 @@ class FalseBreakoutStrategy(BaseStrategy):
     - Быстрые сделки (часто закрываются за 1-4 часа)
     
     Слабые стороны:
-    - Требует быстрой реакции (30 минут после ЛП)
+    - Требует быстрой реакции (4 часа после ЛП)
     - Нужно подтверждение разворота
     - Не работает при высокой волатильности
     - Ложные ЛП (может быть истинным пробоем)
@@ -70,11 +64,16 @@ class FalseBreakoutStrategy(BaseStrategy):
     Usage:
         strategy = FalseBreakoutStrategy(
             symbol="BTCUSDT",
+            repository=repository,
             ta_context_manager=ta_manager
         )
         
-        signal = await strategy.process_market_data(
-            market_data=snapshot,
+        signal = await strategy.analyze_with_data(
+            symbol="BTCUSDT",
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
+            candles_1h=candles_1h,
+            candles_1d=candles_1d,
             ta_context=context
         )
     """
@@ -82,34 +81,33 @@ class FalseBreakoutStrategy(BaseStrategy):
     def __init__(
         self,
         symbol: str = "BTCUSDT",
-        ta_context_manager = None,
+        repository=None,
+        ta_context_manager=None,
         
         # Параметры уровней
-        min_level_strength: float = 0.5,        # Минимальная сила уровня
-        min_level_touches: int = 2,             # Минимум касаний
-        max_distance_to_level_percent: float = 2.0,  # Максимальное расстояние до уровня
+        min_level_strength: float = 0.5,
+        min_level_touches: int = 2,
+        max_distance_to_level_percent: float = 2.0,
         
         # Параметры ложного пробоя
-        min_false_breakout_depth_atr: float = 0.05,  # Мин глубина ЛП (5% ATR)
-        max_false_breakout_depth_atr: float = 0.33,  # Макс глубина ЛП (1/3 ATR)
-        prefer_simple_false_breakouts: bool = True,  # Предпочитать простые ЛП
+        min_false_breakout_depth_percent: float = 0.1,  # Мин глубина ЛП (0.1%)
+        max_false_breakout_depth_percent: float = 1.0,  # Макс глубина ЛП (1%)
+        prefer_simple_false_breakouts: bool = True,     # Предпочитать простые ЛП
         
         # Параметры подтверждения
-        confirmation_required: bool = True,          # Требовать подтверждение
-        confirmation_distance_percent: float = 0.3,  # Расстояние подтверждения от уровня
-        max_time_since_breakout_minutes: int = 30,   # Макс время после ЛП
+        confirmation_required: bool = True,             # Требовать подтверждение
+        confirmation_distance_percent: float = 0.3,     # Расстояние подтверждения от уровня
+        max_time_since_breakout_hours: int = 4,         # Макс время после ЛП (часы)
         
         # Параметры рыночных условий
-        prefer_strong_levels: bool = True,           # Предпочитать сильные уровни
-        avoid_extreme_volatility: bool = True,       # Избегать экстремальной волатильности
-        require_clear_reversal: bool = True,         # Требовать четкий разворот
+        prefer_strong_levels: bool = True,              # Предпочитать сильные уровни
+        avoid_extreme_volatility: bool = True,          # Избегать экстремальной волатильности
         
         # Параметры ордеров
-        entry_type: str = "market",                  # market или limit
-        limit_offset_percent: float = 0.2,           # Отступ для лимит ордера
-        stop_loss_beyond_extreme: float = 1.1,       # SL за экстремум ЛП × 1.1
-        take_profit_ratio: float = 2.5,              # TP:SL = 2.5:1
-        use_opposite_level_for_tp: bool = True,      # Использовать противоположный уровень для TP
+        entry_type: str = "market",                     # market или limit
+        limit_offset_percent: float = 0.2,              # Отступ для лимит ордера
+        stop_loss_beyond_extreme: float = 1.1,          # SL за экстремум ЛП × 1.1
+        take_profit_ratio: float = 2.5,                 # TP:SL = 2.5:1
         
         # Настройки стратегии
         min_signal_strength: float = 0.6,
@@ -121,20 +119,20 @@ class FalseBreakoutStrategy(BaseStrategy):
         
         Args:
             symbol: Торговый символ
+            repository: MarketDataRepository
             ta_context_manager: Менеджер технического анализа
             [остальные параметры см. выше]
         """
         super().__init__(
             name="FalseBreakoutStrategy",
             symbol=symbol,
+            repository=repository,
+            ta_context_manager=ta_context_manager,
             min_signal_strength=min_signal_strength,
             signal_cooldown_minutes=signal_cooldown_minutes,
             max_signals_per_hour=max_signals_per_hour,
             enable_risk_management=True
         )
-        
-        # Менеджер технического анализа
-        self.ta_context_manager = ta_context_manager
         
         # Параметры уровней
         self.min_level_strength = min_level_strength
@@ -142,35 +140,24 @@ class FalseBreakoutStrategy(BaseStrategy):
         self.max_distance_to_level = max_distance_to_level_percent / 100.0
         
         # Параметры ЛП
-        self.min_fb_depth_atr = min_false_breakout_depth_atr
-        self.max_fb_depth_atr = max_false_breakout_depth_atr
+        self.min_fb_depth = min_false_breakout_depth_percent / 100.0
+        self.max_fb_depth = max_false_breakout_depth_percent / 100.0
         self.prefer_simple_fb = prefer_simple_false_breakouts
         
         # Параметры подтверждения
         self.confirmation_required = confirmation_required
         self.confirmation_distance = confirmation_distance_percent / 100.0
-        self.max_time_since_breakout = timedelta(minutes=max_time_since_breakout_minutes)
+        self.max_time_since_breakout = timedelta(hours=max_time_since_breakout_hours)
         
         # Параметры рыночных условий
         self.prefer_strong_levels = prefer_strong_levels
         self.avoid_extreme_volatility = avoid_extreme_volatility
-        self.require_clear_reversal = require_clear_reversal
         
         # Параметры ордеров
         self.entry_type = entry_type
         self.limit_offset = limit_offset_percent / 100.0
         self.stop_beyond_extreme = stop_loss_beyond_extreme
         self.take_profit_ratio = take_profit_ratio
-        self.use_opposite_level_tp = use_opposite_level_for_tp
-        
-        # Инициализируем анализаторы
-        self.breakout_analyzer = BreakoutAnalyzer(
-            false_breakout_max_depth_atr=max_false_breakout_depth_atr,
-            true_breakout_min_depth_atr=min_false_breakout_depth_atr
-        )
-        
-        self.pattern_detector = PatternDetector()
-        self.market_analyzer = MarketConditionsAnalyzer()
         
         # Статистика стратегии
         self.strategy_stats = {
@@ -178,77 +165,86 @@ class FalseBreakoutStrategy(BaseStrategy):
             "false_breakouts_detected": 0,
             "false_breakouts_simple": 0,
             "false_breakouts_strong": 0,
-            "false_breakouts_complex": 0,
             "confirmations_passed": 0,
             "signals_generated": 0,
             "filtered_by_time": 0,
             "filtered_by_confirmation": 0,
-            "filtered_by_volatility": 0,
             "filtered_by_level_strength": 0
         }
         
-        logger.info("🎣 FalseBreakoutStrategy инициализирована")
+        logger.info("🎣 FalseBreakoutStrategy v3.0 инициализирована")
         logger.info(f"   • Symbol: {symbol}")
         logger.info(f"   • Min level strength: {min_level_strength}")
-        logger.info(f"   • FB depth: {min_false_breakout_depth_atr}-{max_false_breakout_depth_atr} ATR")
-        logger.info(f"   • Max time after FB: {max_time_since_breakout_minutes} min")
+        logger.info(f"   • FB depth: {min_false_breakout_depth_percent}-{max_false_breakout_depth_percent}%")
+        logger.info(f"   • Max time after FB: {max_time_since_breakout_hours} hours")
         logger.info(f"   • Entry type: {entry_type}")
     
-    # ==================== ОСНОВНОЙ АНАЛИЗ ====================
+    # ==================== НОВЫЙ API v3.0 ====================
     
-    async def analyze_market_data(
+    async def analyze_with_data(
         self,
-        market_data: MarketDataSnapshot,
-        ta_context: Optional[TechnicalAnalysisContext] = None
+        symbol: str,
+        candles_1m: List[Dict],
+        candles_5m: List[Dict],
+        candles_1h: List[Dict],
+        candles_1d: List[Dict],
+        ta_context: Optional[Any] = None
     ) -> Optional[TradingSignal]:
         """
-        🎯 Основной метод анализа для стратегии ложных пробоев
+        🎯 Анализ с готовыми данными (v3.0)
         
         Алгоритм:
         1. Проверка технического контекста
-        2. Анализ рыночных условий
-        3. Поиск ближайших уровней
-        4. Анализ пробоев через BreakoutAnalyzer
-        5. Проверка что это ложный пробой
-        6. Проверка подтверждения разворота
-        7. Проверка времени после пробоя
-        8. Расчет параметров ордера
-        9. Генерация сигнала ПРОТИВ пробоя
+        2. Поиск ближайших уровней
+        3. Анализ пробоев (ищем ложные)
+        4. Проверка подтверждения разворота
+        5. Проверка времени после пробоя
+        6. Расчет параметров ордера
+        7. Генерация сигнала ПРОТИВ пробоя
         
         Args:
-            market_data: Снимок рыночных данных
+            symbol: Торговый символ
+            candles_1m: Минутные свечи (последние 100)
+            candles_5m: 5-минутные свечи (последние 50)
+            candles_1h: Часовые свечи (последние 24)
+            candles_1d: Дневные свечи (последние 180)
             ta_context: Технический контекст
             
         Returns:
             TradingSignal или None
         """
         try:
-            # Шаг 1: Проверка технического контекста
-            if ta_context is None or not ta_context.is_fully_initialized():
+            # Обновляем symbol (если был PLACEHOLDER)
+            self.symbol = symbol
+            
+            # Проверка минимальных данных
+            if not candles_5m or len(candles_5m) < 10:
                 if self.debug_mode:
-                    logger.debug("⚠️ Технический контекст не инициализирован")
+                    logger.debug(f"⚠️ {symbol}: недостаточно M5 свечей")
                 return None
             
-            current_price = market_data.current_price
+            if not candles_1d or len(candles_1d) < 30:
+                if self.debug_mode:
+                    logger.debug(f"⚠️ {symbol}: недостаточно D1 свечей")
+                return None
+            
+            # Текущая цена из последней M5 свечи
+            current_price = float(candles_5m[-1]['close'])
             current_time = datetime.now()
             
-            # Шаг 2: Анализ рыночных условий
-            market_conditions = self.market_analyzer.analyze_conditions(
-                candles_h1=ta_context.recent_candles_h1,
-                candles_d1=ta_context.recent_candles_d1,
-                atr=ta_context.atr_data.calculated_atr if ta_context.atr_data else None,
-                current_price=current_price
-            )
+            # Шаг 1: Проверка технического контекста
+            if ta_context is None:
+                if self.debug_mode:
+                    logger.debug(f"⚠️ {symbol}: технический контекст недоступен")
+                return None
             
-            # Фильтр: Избегаем экстремальной волатильности
-            if self.avoid_extreme_volatility:
-                if market_conditions.volatility_level == VolatilityLevel.EXTREME:
-                    self.strategy_stats["filtered_by_volatility"] += 1
-                    if self.debug_mode:
-                        logger.debug("⚠️ Экстремальная волатильность")
-                    return None
+            # Проверяем что есть уровни
+            if not hasattr(ta_context, 'levels_d1') or not ta_context.levels_d1:
+                if self.debug_mode:
+                    logger.debug(f"⚠️ {symbol}: нет уровней D1")
+                return None
             
-            # Шаг 3: Поиск ближайших уровней
+            # Шаг 2: Поиск ближайших уровней
             nearest_levels = self._find_nearest_levels(
                 ta_context=ta_context,
                 current_price=current_price
@@ -257,100 +253,92 @@ class FalseBreakoutStrategy(BaseStrategy):
             if not nearest_levels:
                 return None
             
-            # Шаг 4: Анализ каждого уровня на наличие ЛП
+            # Шаг 3: Анализ каждого уровня на наличие ЛП
             for level in nearest_levels:
                 self.strategy_stats["levels_analyzed"] += 1
                 
-                # Анализируем пробой через BreakoutAnalyzer
-                candles_for_analysis = ta_context.recent_candles_m5 or ta_context.recent_candles_m30
-                
-                if not candles_for_analysis or len(candles_for_analysis) < 5:
-                    continue
-                
-                breakout_analysis = self.breakout_analyzer.analyze_breakout(
-                    candles=candles_for_analysis,
+                # Анализируем пробой
+                is_false_breakout, fb_details = self._detect_false_breakout_simple(
                     level=level,
-                    atr=ta_context.atr_data.calculated_atr if ta_context.atr_data else None,
+                    candles_5m=candles_5m,
                     current_price=current_price,
-                    lookback=20
+                    current_time=current_time
                 )
                 
-                # Шаг 5: Проверка что это ложный пробой
-                if not breakout_analysis.is_false_breakout:
+                # Шаг 4: Проверка что это ложный пробой
+                if not is_false_breakout:
                     continue
                 
                 self.strategy_stats["false_breakouts_detected"] += 1
                 
-                # Подсчет статистики по типам
-                if breakout_analysis.breakout_type == BreakoutType.FALSE_BREAKOUT_SIMPLE:
+                # Определяем тип ЛП
+                fb_type = fb_details.get("type", "simple")
+                if fb_type == "simple":
                     self.strategy_stats["false_breakouts_simple"] += 1
-                elif breakout_analysis.breakout_type == BreakoutType.FALSE_BREAKOUT_STRONG:
+                else:
                     self.strategy_stats["false_breakouts_strong"] += 1
-                elif breakout_analysis.breakout_type == BreakoutType.FALSE_BREAKOUT_COMPLEX:
-                    self.strategy_stats["false_breakouts_complex"] += 1
                 
-                logger.info(f"💥 Ложный пробой обнаружен: {breakout_analysis.breakout_type.value} "
-                           f"@ {level.price:.2f}, direction={breakout_analysis.direction.value}")
+                direction = fb_details.get("direction", "unknown")
+                
+                logger.info(f"💥 {symbol}: Ложный пробой обнаружен: {fb_type} "
+                           f"@ {level.price:.2f}, direction={direction}")
                 
                 # Фильтр: Предпочитаем простые ЛП
-                if self.prefer_simple_fb:
-                    if breakout_analysis.breakout_type != BreakoutType.FALSE_BREAKOUT_SIMPLE:
-                        if self.debug_mode:
-                            logger.debug(f"⚠️ Пропускаем {breakout_analysis.breakout_type.value}")
-                        continue
+                if self.prefer_simple_fb and fb_type != "simple":
+                    if self.debug_mode:
+                        logger.debug(f"⚠️ {symbol}: пропускаем {fb_type} ЛП")
+                    continue
                 
-                # Шаг 6: Проверка подтверждения разворота
+                # Шаг 5: Проверка подтверждения разворота
                 if self.confirmation_required:
                     confirmed, confirmation_details = self._check_reversal_confirmation(
                         level=level,
-                        breakout_analysis=breakout_analysis,
-                        current_price=current_price,
-                        ta_context=ta_context
+                        fb_details=fb_details,
+                        current_price=current_price
                     )
                     
                     if not confirmed:
                         self.strategy_stats["filtered_by_confirmation"] += 1
                         if self.debug_mode:
-                            logger.debug("⚠️ Нет подтверждения разворота")
+                            logger.debug(f"⚠️ {symbol}: нет подтверждения разворота")
                         continue
                     
                     self.strategy_stats["confirmations_passed"] += 1
                 
-                # Шаг 7: Проверка времени после пробоя
-                if not self._check_timing(breakout_analysis, current_time):
+                # Шаг 6: Проверка времени после пробоя
+                if not self._check_timing(fb_details, current_time):
                     self.strategy_stats["filtered_by_time"] += 1
                     if self.debug_mode:
-                        logger.debug("⚠️ Слишком много времени прошло после ЛП")
+                        logger.debug(f"⚠️ {symbol}: слишком много времени прошло после ЛП")
                     continue
                 
-                # Шаг 8: Проверка силы уровня
+                # Шаг 7: Проверка силы уровня
                 if self.prefer_strong_levels:
                     if level.strength < self.min_level_strength:
                         self.strategy_stats["filtered_by_level_strength"] += 1
                         if self.debug_mode:
-                            logger.debug(f"⚠️ Слабый уровень: {level.strength:.2f}")
+                            logger.debug(f"⚠️ {symbol}: слабый уровень: {level.strength:.2f}")
                         continue
                 
-                # Шаг 9: Расчет параметров ордера
+                # Шаг 8: Расчет параметров ордера
                 order_params = self._calculate_order_parameters(
                     level=level,
-                    breakout_analysis=breakout_analysis,
+                    fb_details=fb_details,
                     ta_context=ta_context,
                     current_price=current_price
                 )
                 
-                # Шаг 10: Генерация сигнала
+                # Шаг 9: Генерация сигнала
                 signal = self._create_false_breakout_signal(
                     level=level,
-                    breakout_analysis=breakout_analysis,
+                    fb_details=fb_details,
                     order_params=order_params,
-                    market_conditions=market_conditions,
                     current_price=current_price
                 )
                 
                 self.strategy_stats["signals_generated"] += 1
                 
-                logger.info(f"✅ Сигнал ЛП создан: {signal.signal_type.value} @ {current_price:.2f}")
+                logger.info(f"✅ {symbol}: Сигнал ЛП создан: {signal.signal_type.value} @ {current_price:.2f}")
                 
                 return signal
             
@@ -358,7 +346,7 @@ class FalseBreakoutStrategy(BaseStrategy):
             return None
             
         except Exception as e:
-            logger.error(f"❌ Ошибка в analyze_market_data: {e}")
+            logger.error(f"❌ {symbol}: Ошибка в analyze_with_data: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return None
@@ -367,9 +355,9 @@ class FalseBreakoutStrategy(BaseStrategy):
     
     def _find_nearest_levels(
         self,
-        ta_context: TechnicalAnalysisContext,
+        ta_context: Any,
         current_price: float
-    ) -> List[SupportResistanceLevel]:
+    ) -> List[Any]:
         """
         Поиск ближайших уровней для анализа ЛП
         
@@ -418,14 +406,132 @@ class FalseBreakoutStrategy(BaseStrategy):
             logger.error(f"❌ Ошибка поиска уровней: {e}")
             return []
     
+    # ==================== ОБНАРУЖЕНИЕ ЛОЖНОГО ПРОБОЯ ====================
+    
+    def _detect_false_breakout_simple(
+        self,
+        level: Any,
+        candles_5m: List[Dict],
+        current_price: float,
+        current_time: datetime
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Упрощенная проверка ложного пробоя
+        
+        Ложный пробой = цена пробила уровень, но вернулась обратно
+        
+        Типы:
+        1. Простой ЛП - пробил и сразу закрылся назад (1-2 свечи)
+        2. Сильный ЛП - пробил, немного постоял, затем вернулся (3-5 свечей)
+        
+        Args:
+            level: Уровень
+            candles_5m: 5-минутные свечи
+            current_price: Текущая цена
+            current_time: Текущее время
+            
+        Returns:
+            Tuple[найден ли ЛП?, детали]
+        """
+        try:
+            level_price = level.price
+            level_type = level.level_type  # "support" или "resistance"
+            
+            details = {
+                "found": False,
+                "type": "simple",
+                "direction": "unknown",
+                "breakout_time": None,
+                "breakout_high": None,
+                "breakout_low": None,
+                "depth": 0
+            }
+            
+            # Ищем пробой в последних 20 свечах (около 2 часов)
+            lookback = min(20, len(candles_5m))
+            recent_candles = candles_5m[-lookback:]
+            
+            for i in range(len(recent_candles) - 1, 0, -1):  # С конца к началу
+                candle = recent_candles[i]
+                high = float(candle['high'])
+                low = float(candle['low'])
+                close = float(candle['close'])
+                
+                # Проверяем пробой сопротивления (вверх)
+                if level_type == "resistance":
+                    # Пробой = High выше уровня
+                    if high > level_price:
+                        depth = (high - level_price) / level_price
+                        
+                        # Проверяем глубину пробоя
+                        if self.min_fb_depth <= depth <= self.max_fb_depth:
+                            # Проверяем что цена вернулась под уровень
+                            if current_price < level_price * (1 - self.confirmation_distance):
+                                details["found"] = True
+                                details["direction"] = "upward"
+                                details["breakout_high"] = high
+                                details["breakout_low"] = low
+                                details["depth"] = depth * 100
+                                
+                                # Время пробоя
+                                if 'close_time' in candle:
+                                    details["breakout_time"] = candle['close_time']
+                                
+                                # Определяем тип ЛП
+                                bars_since = len(recent_candles) - i - 1
+                                if bars_since <= 2:
+                                    details["type"] = "simple"
+                                else:
+                                    details["type"] = "strong"
+                                
+                                logger.debug(f"✅ ЛП вверх найден: глубина {depth*100:.2f}%, "
+                                           f"тип {details['type']}, {bars_since} баров назад")
+                                return True, details
+                
+                # Проверяем пробой поддержки (вниз)
+                elif level_type == "support":
+                    # Пробой = Low ниже уровня
+                    if low < level_price:
+                        depth = (level_price - low) / level_price
+                        
+                        # Проверяем глубину пробоя
+                        if self.min_fb_depth <= depth <= self.max_fb_depth:
+                            # Проверяем что цена вернулась над уровень
+                            if current_price > level_price * (1 + self.confirmation_distance):
+                                details["found"] = True
+                                details["direction"] = "downward"
+                                details["breakout_high"] = high
+                                details["breakout_low"] = low
+                                details["depth"] = depth * 100
+                                
+                                # Время пробоя
+                                if 'close_time' in candle:
+                                    details["breakout_time"] = candle['close_time']
+                                
+                                # Определяем тип ЛП
+                                bars_since = len(recent_candles) - i - 1
+                                if bars_since <= 2:
+                                    details["type"] = "simple"
+                                else:
+                                    details["type"] = "strong"
+                                
+                                logger.debug(f"✅ ЛП вниз найден: глубина {depth*100:.2f}%, "
+                                           f"тип {details['type']}, {bars_since} баров назад")
+                                return True, details
+            
+            return False, details
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обнаружения ЛП: {e}")
+            return False, {}
+    
     # ==================== ПОДТВЕРЖДЕНИЕ РАЗВОРОТА ====================
     
     def _check_reversal_confirmation(
         self,
-        level: SupportResistanceLevel,
-        breakout_analysis: Any,
-        current_price: float,
-        ta_context: TechnicalAnalysisContext
+        level: Any,
+        fb_details: Dict[str, Any],
+        current_price: float
     ) -> Tuple[bool, Dict[str, Any]]:
         """
         Проверка подтверждения разворота после ЛП
@@ -434,9 +540,8 @@ class FalseBreakoutStrategy(BaseStrategy):
         
         Args:
             level: Уровень
-            breakout_analysis: Результат анализа пробоя
+            fb_details: Детали ЛП
             current_price: Текущая цена
-            ta_context: Технический контекст
             
         Returns:
             Tuple[подтверждено?, детали]
@@ -444,12 +549,13 @@ class FalseBreakoutStrategy(BaseStrategy):
         try:
             details = {}
             
+            level_price = level.price
+            direction = fb_details.get("direction", "unknown")
+            
             # Определяем куда должна вернуться цена
-            if breakout_analysis.direction == BreakoutDirection.UPWARD:
+            if direction == "upward":
                 # ЛП вверх → цена должна быть ниже уровня
-                must_be_below = True
-                target_zone = level.price - (level.price * self.confirmation_distance)
-                
+                target_zone = level_price * (1 - self.confirmation_distance)
                 confirmed = current_price < target_zone
                 
                 details["direction"] = "below"
@@ -462,11 +568,9 @@ class FalseBreakoutStrategy(BaseStrategy):
                 else:
                     logger.debug(f"⚠️ Нет подтверждения: цена {current_price:.2f} >= {target_zone:.2f}")
             
-            elif breakout_analysis.direction == BreakoutDirection.DOWNWARD:
+            elif direction == "downward":
                 # ЛП вниз → цена должна быть выше уровня
-                must_be_above = True
-                target_zone = level.price + (level.price * self.confirmation_distance)
-                
+                target_zone = level_price * (1 + self.confirmation_distance)
                 confirmed = current_price > target_zone
                 
                 details["direction"] = "above"
@@ -482,28 +586,6 @@ class FalseBreakoutStrategy(BaseStrategy):
             else:
                 return False, details
             
-            # Дополнительная проверка - импульс разворота
-            if confirmed and self.require_clear_reversal:
-                if ta_context.recent_candles_m5:
-                    last_candles = ta_context.recent_candles_m5[-3:]
-                    
-                    if len(last_candles) >= 2:
-                        # Проверяем что последние свечи идут в направлении разворота
-                        closes = [float(c.close_price) for c in last_candles]
-                        
-                        if breakout_analysis.direction == BreakoutDirection.UPWARD:
-                            # Должны идти вниз
-                            reversal_confirmed = closes[-1] < closes[0]
-                        else:
-                            # Должны идти вверх
-                            reversal_confirmed = closes[-1] > closes[0]
-                        
-                        details["clear_reversal"] = reversal_confirmed
-                        
-                        if not reversal_confirmed:
-                            logger.debug("⚠️ Нет четкого импульса разворота")
-                            return False, details
-            
             return confirmed, details
             
         except Exception as e:
@@ -514,27 +596,27 @@ class FalseBreakoutStrategy(BaseStrategy):
     
     def _check_timing(
         self,
-        breakout_analysis: Any,
+        fb_details: Dict[str, Any],
         current_time: datetime
     ) -> bool:
         """
         Проверка времени после ложного пробоя
         
-        Не торгуем старые ЛП (> 30 минут)
+        Не торгуем старые ЛП (> 4 часов)
         
         Args:
-            breakout_analysis: Результат анализа пробоя
+            fb_details: Детали ЛП
             current_time: Текущее время
             
         Returns:
             True если время подходит
         """
         try:
-            if not breakout_analysis.breakout_candle:
-                return False
+            breakout_time = fb_details.get("breakout_time")
             
-            # Время свечи пробоя
-            breakout_time = breakout_analysis.breakout_candle.close_time
+            if not breakout_time:
+                # Если нет времени, считаем что недавнее
+                return True
             
             # Прошедшее время
             time_since = current_time - breakout_time
@@ -542,11 +624,11 @@ class FalseBreakoutStrategy(BaseStrategy):
             is_valid = time_since <= self.max_time_since_breakout
             
             if is_valid:
-                minutes_since = time_since.total_seconds() / 60
-                logger.debug(f"✅ Тайминг OK: {minutes_since:.0f} минут после ЛП")
+                hours_since = time_since.total_seconds() / 3600
+                logger.debug(f"✅ Тайминг OK: {hours_since:.1f}h после ЛП")
             else:
-                minutes_since = time_since.total_seconds() / 60
-                logger.debug(f"⚠️ Слишком поздно: {minutes_since:.0f} минут после ЛП")
+                hours_since = time_since.total_seconds() / 3600
+                logger.debug(f"⚠️ Слишком поздно: {hours_since:.1f}h после ЛП")
             
             return is_valid
             
@@ -558,9 +640,9 @@ class FalseBreakoutStrategy(BaseStrategy):
     
     def _calculate_order_parameters(
         self,
-        level: SupportResistanceLevel,
-        breakout_analysis: Any,
-        ta_context: TechnicalAnalysisContext,
+        level: Any,
+        fb_details: Dict[str, Any],
+        ta_context: Any,
         current_price: float
     ) -> Dict[str, float]:
         """
@@ -569,11 +651,11 @@ class FalseBreakoutStrategy(BaseStrategy):
         Механика:
         - Entry: Market или Limit от уровня
         - Stop Loss: за зону ЛП (High/Low пробоя × 1.1)
-        - Take Profit: 2-3 стопа или до противоположного уровня
+        - Take Profit: 2-3 стопа
         
         Args:
             level: Уровень ЛП
-            breakout_analysis: Результат анализа пробоя
+            fb_details: Детали ЛП
             ta_context: Технический контекст
             current_price: Текущая цена
             
@@ -581,19 +663,11 @@ class FalseBreakoutStrategy(BaseStrategy):
             Словарь с параметрами ордера
         """
         try:
-            direction = breakout_analysis.direction
-            
-            # ATR для расчетов
-            atr = ta_context.atr_data.calculated_atr if ta_context.atr_data else current_price * 0.02
+            direction = fb_details.get("direction", "unknown")
             
             # Определяем зону ЛП (High/Low свечи пробоя)
-            if breakout_analysis.breakout_candle:
-                fb_candle = breakout_analysis.breakout_candle
-                fb_high = float(fb_candle.high_price)
-                fb_low = float(fb_candle.low_price)
-            else:
-                fb_high = level.price * 1.01
-                fb_low = level.price * 0.99
+            fb_high = fb_details.get("breakout_high", level.price * 1.01)
+            fb_low = fb_details.get("breakout_low", level.price * 0.99)
             
             # ENTRY PRICE
             if self.entry_type == "market":
@@ -602,7 +676,7 @@ class FalseBreakoutStrategy(BaseStrategy):
                 # Limit ордер от уровня
                 offset = level.price * self.limit_offset
                 
-                if direction == BreakoutDirection.UPWARD:
+                if direction == "upward":
                     # ЛП вверх → входим в SHORT → лимит выше
                     entry_price = level.price + offset
                 else:
@@ -610,7 +684,7 @@ class FalseBreakoutStrategy(BaseStrategy):
                     entry_price = level.price - offset
             
             # STOP LOSS (за зону ЛП)
-            if direction == BreakoutDirection.UPWARD:
+            if direction == "upward":
                 # ЛП вверх → SHORT → стоп выше High ЛП
                 stop_loss = fb_high * self.stop_beyond_extreme
                 stop_distance = abs(entry_price - stop_loss)
@@ -620,38 +694,14 @@ class FalseBreakoutStrategy(BaseStrategy):
                 stop_distance = abs(stop_loss - entry_price)
             
             # TAKE PROFIT
-            # Вариант 1: По соотношению к стопу
             basic_tp_distance = stop_distance * self.take_profit_ratio
             
-            if direction == BreakoutDirection.UPWARD:
+            if direction == "upward":
                 # SHORT
-                basic_tp = entry_price - basic_tp_distance
+                take_profit = entry_price - basic_tp_distance
             else:
                 # LONG
-                basic_tp = entry_price + basic_tp_distance
-            
-            # Вариант 2: До противоположного уровня
-            if self.use_opposite_level_tp:
-                opposite_level = self._find_opposite_level(
-                    ta_context=ta_context,
-                    current_price=current_price,
-                    direction=direction
-                )
-                
-                if opposite_level:
-                    # Используем ближайшее: либо расчетный TP, либо уровень
-                    if direction == BreakoutDirection.UPWARD:
-                        # SHORT → берем максимум из двух (ближайший вниз)
-                        take_profit = max(basic_tp, opposite_level.price)
-                    else:
-                        # LONG → берем минимум из двух (ближайший вверх)
-                        take_profit = min(basic_tp, opposite_level.price)
-                    
-                    logger.debug(f"📊 TP скорректирован до уровня: {take_profit:.2f}")
-                else:
-                    take_profit = basic_tp
-            else:
-                take_profit = basic_tp
+                take_profit = entry_price + basic_tp_distance
             
             # Итоговое соотношение R:R
             actual_tp_distance = abs(take_profit - entry_price)
@@ -667,8 +717,7 @@ class FalseBreakoutStrategy(BaseStrategy):
                 "risk_reward_ratio": actual_rr_ratio,
                 "level_price": level.price,
                 "fb_high": fb_high,
-                "fb_low": fb_low,
-                "atr_used": atr
+                "fb_low": fb_low
             }
             
             logger.debug(f"📊 Параметры ордера ЛП: Entry={entry_price:.2f} ({self.entry_type}), "
@@ -680,41 +729,13 @@ class FalseBreakoutStrategy(BaseStrategy):
             logger.error(f"❌ Ошибка расчета параметров: {e}")
             return {}
     
-    def _find_opposite_level(
-        self,
-        ta_context: TechnicalAnalysisContext,
-        current_price: float,
-        direction: BreakoutDirection
-    ) -> Optional[SupportResistanceLevel]:
-        """
-        Найти противоположный уровень для Take Profit
-        
-        Args:
-            ta_context: Технический контекст
-            current_price: Текущая цена
-            direction: Направление ЛП
-            
-        Returns:
-            Противоположный уровень или None
-        """
-        try:
-            if direction == BreakoutDirection.UPWARD:
-                # ЛП вверх → SHORT → ищем поддержку ниже
-                return ta_context.get_nearest_support(current_price, max_distance_percent=5.0)
-            else:
-                # ЛП вниз → LONG → ищем сопротивление выше
-                return ta_context.get_nearest_resistance(current_price, max_distance_percent=5.0)
-        except:
-            return None
-    
     # ==================== СОЗДАНИЕ СИГНАЛА ====================
     
     def _create_false_breakout_signal(
         self,
-        level: SupportResistanceLevel,
-        breakout_analysis: Any,
+        level: Any,
+        fb_details: Dict[str, Any],
         order_params: Dict[str, float],
-        market_conditions: Any,
         current_price: float
     ) -> TradingSignal:
         """
@@ -726,44 +747,42 @@ class FalseBreakoutStrategy(BaseStrategy):
         
         Args:
             level: Уровень ЛП
-            breakout_analysis: Анализ пробоя
+            fb_details: Детали ЛП
             order_params: Параметры ордера
-            market_conditions: Условия рынка
             current_price: Текущая цена
             
         Returns:
             TradingSignal
         """
         try:
+            direction = fb_details.get("direction", "unknown")
+            
             # Определяем тип сигнала (ПРОТИВ пробоя)
-            if breakout_analysis.direction == BreakoutDirection.UPWARD:
+            if direction == "upward":
                 # ЛП вверх → входим в SHORT
                 signal_type = SignalType.SELL
                 
-                # Если простой ЛП и высокая уверенность → STRONG
-                if (breakout_analysis.breakout_type == BreakoutType.FALSE_BREAKOUT_SIMPLE and
-                    breakout_analysis.confidence >= 0.8):
+                # Если простой ЛП → STRONG
+                if fb_details.get("type") == "simple":
                     signal_type = SignalType.STRONG_SELL
             
             else:
                 # ЛП вниз → входим в LONG
                 signal_type = SignalType.BUY
                 
-                # Если простой ЛП и высокая уверенность → STRONG
-                if (breakout_analysis.breakout_type == BreakoutType.FALSE_BREAKOUT_SIMPLE and
-                    breakout_analysis.confidence >= 0.8):
+                # Если простой ЛП → STRONG
+                if fb_details.get("type") == "simple":
                     signal_type = SignalType.STRONG_BUY
             
             # Расчет силы сигнала
             strength = self._calculate_signal_strength(
-                breakout_analysis=breakout_analysis,
-                level=level,
-                market_conditions=market_conditions
+                fb_details=fb_details,
+                level=level
             )
             
             # Расчет уверенности
             confidence = self._calculate_signal_confidence(
-                breakout_analysis=breakout_analysis,
+                fb_details=fb_details,
                 level=level,
                 order_params=order_params
             )
@@ -771,7 +790,7 @@ class FalseBreakoutStrategy(BaseStrategy):
             # Причины
             reasons = self._build_signal_reasons(
                 level=level,
-                breakout_analysis=breakout_analysis,
+                fb_details=fb_details,
                 order_params=order_params
             )
             
@@ -797,8 +816,8 @@ class FalseBreakoutStrategy(BaseStrategy):
             # Технические индикаторы
             signal.add_technical_indicator(
                 "false_breakout_type",
-                breakout_analysis.breakout_type.value,
-                f"Тип ЛП: {breakout_analysis.breakout_type.value}"
+                fb_details.get("type", "simple"),
+                f"Тип ЛП: {fb_details.get('type', 'simple')}"
             )
             
             signal.add_technical_indicator(
@@ -808,9 +827,9 @@ class FalseBreakoutStrategy(BaseStrategy):
             )
             
             signal.add_technical_indicator(
-                "breakout_depth_atr",
-                breakout_analysis.breakout_depth_atr_ratio,
-                f"Глубина: {breakout_analysis.breakout_depth_atr_ratio:.2f} ATR"
+                "breakout_depth",
+                fb_details.get("depth", 0),
+                f"Глубина: {fb_details.get('depth', 0):.2f}%"
             )
             
             signal.add_technical_indicator(
@@ -826,21 +845,17 @@ class FalseBreakoutStrategy(BaseStrategy):
             )
             
             # Метаданные
-            signal.technical_indicators["breakout_analysis"] = breakout_analysis.to_dict()
+            signal.technical_indicators["fb_details"] = fb_details
             signal.technical_indicators["order_params"] = order_params
-            signal.market_conditions = {
-                "market_condition": market_conditions.market_condition.value,
-                "volatility": market_conditions.volatility_level.value,
-                "trend_direction": market_conditions.trend_direction.value
-            }
             
             return signal
             
         except Exception as e:
             logger.error(f"❌ Ошибка создания сигнала: {e}")
             # Создаем базовый сигнал
+            direction = fb_details.get("direction", "unknown")
             return self.create_signal(
-                signal_type=SignalType.SELL if breakout_analysis.direction == BreakoutDirection.UPWARD else SignalType.BUY,
+                signal_type=SignalType.SELL if direction == "upward" else SignalType.BUY,
                 strength=0.5,
                 confidence=0.5,
                 current_price=current_price,
@@ -849,91 +864,86 @@ class FalseBreakoutStrategy(BaseStrategy):
     
     def _calculate_signal_strength(
         self,
-        breakout_analysis: Any,
-        level: SupportResistanceLevel,
-        market_conditions: Any
+        fb_details: Dict[str, Any],
+        level: Any
     ) -> float:
         """Расчет силы сигнала"""
         strength = 0.5  # Базовая
         
         # Бонус за тип ЛП
-        if breakout_analysis.breakout_type == BreakoutType.FALSE_BREAKOUT_SIMPLE:
+        if fb_details.get("type") == "simple":
             strength += 0.2  # Простой ЛП = самый надежный
-        elif breakout_analysis.breakout_type == BreakoutType.FALSE_BREAKOUT_STRONG:
-            strength += 0.15
-        elif breakout_analysis.breakout_type == BreakoutType.FALSE_BREAKOUT_COMPLEX:
+        else:
             strength += 0.1
-        
-        # Бонус за силу BreakoutAnalysis
-        strength += breakout_analysis.strength * 0.2
         
         # Бонус за сильный уровень
-        if level.is_strong:
+        if hasattr(level, 'is_strong') and level.is_strong:
             strength += 0.1
         
-        # Штраф за высокую волатильность
-        if market_conditions.volatility_level == VolatilityLevel.HIGH:
-            strength -= 0.1
+        # Бонус за небольшую глубину пробоя (меньше = лучше)
+        depth = fb_details.get("depth", 0)
+        if depth < 0.5:  # < 0.5%
+            strength += 0.1
         
-        return min(1.0, max(0.1, strength))
+        return min(1.0, strength)
     
     def _calculate_signal_confidence(
         self,
-        breakout_analysis: Any,
-        level: SupportResistanceLevel,
+        fb_details: Dict[str, Any],
+        level: Any,
         order_params: Dict[str, float]
     ) -> float:
         """Расчет уверенности в сигнале"""
         confidence = 0.6  # Базовая
         
-        # Бонус за уверенность в ЛП
-        confidence += breakout_analysis.confidence * 0.2
-        
         # Бонус за простой ЛП
-        if breakout_analysis.breakout_type == BreakoutType.FALSE_BREAKOUT_SIMPLE:
-            confidence += 0.1
+        if fb_details.get("type") == "simple":
+            confidence += 0.15
         
         # Бонус за сильный уровень
-        if level.strength >= 0.8:
+        if hasattr(level, 'strength') and level.strength >= 0.8:
             confidence += 0.1
         
         # Бонус за хороший R:R
         rr_ratio = order_params.get("risk_reward_ratio", 0)
-        if rr_ratio >= 3.0:
+        if rr_ratio >= 2.5:
             confidence += 0.05
         
         return min(1.0, confidence)
     
     def _build_signal_reasons(
         self,
-        level: SupportResistanceLevel,
-        breakout_analysis: Any,
+        level: Any,
+        fb_details: Dict[str, Any],
         order_params: Dict[str, float]
     ) -> List[str]:
         """Построение списка причин сигнала"""
         reasons = []
         
         # Тип ЛП
+        fb_type = fb_details.get("type", "simple")
         fb_type_names = {
-            BreakoutType.FALSE_BREAKOUT_SIMPLE: "Простой ЛП (1 бар)",
-            BreakoutType.FALSE_BREAKOUT_STRONG: "Сильный ЛП (2 бара)",
-            BreakoutType.FALSE_BREAKOUT_COMPLEX: "Сложный ЛП (3+ бара)"
+            "simple": "Простой ЛП (1-2 бара)",
+            "strong": "Сильный ЛП (3+ бара)"
         }
         
-        fb_name = fb_type_names.get(breakout_analysis.breakout_type, "Ложный пробой")
+        fb_name = fb_type_names.get(fb_type, "Ложный пробой")
         
-        direction_text = "вверх" if breakout_analysis.direction == BreakoutDirection.UPWARD else "вниз"
+        direction = fb_details.get("direction", "unknown")
+        direction_text = "вверх" if direction == "upward" else "вниз"
+        
         reasons.append(f"{fb_name} {direction_text} через {level.level_type} @ {level.price:.2f}")
         
         # Глубина пробоя
-        if breakout_analysis.breakout_depth_atr_ratio > 0:
-            reasons.append(f"Глубина пробоя: {breakout_analysis.breakout_depth_atr_ratio:.2f} ATR")
+        depth = fb_details.get("depth", 0)
+        if depth > 0:
+            reasons.append(f"Глубина пробоя: {depth:.2f}%")
         
         # Подтверждение разворота
         reasons.append("Цена подтвердила разворот за уровень")
         
         # Сила уровня
-        if level.is_strong:
+        if hasattr(level, 'is_strong') and level.is_strong:
             reasons.append(f"Сильный уровень: strength={level.strength:.2f}, touches={level.touches}")
         
         # R:R
@@ -960,10 +970,10 @@ class FalseBreakoutStrategy(BaseStrategy):
             "strategy_stats": self.strategy_stats.copy(),
             "config": {
                 "min_level_strength": self.min_level_strength,
-                "fb_depth_range_atr": f"{self.min_fb_depth_atr}-{self.max_fb_depth_atr}",
+                "fb_depth_range": f"{self.min_fb_depth*100}-{self.max_fb_depth*100}%",
                 "prefer_simple_fb": self.prefer_simple_fb,
                 "confirmation_required": self.confirmation_required,
-                "max_time_after_fb_minutes": self.max_time_since_breakout.total_seconds() / 60,
+                "max_time_after_fb_hours": self.max_time_since_breakout.total_seconds() / 3600,
                 "entry_type": self.entry_type,
                 "take_profit_ratio": self.take_profit_ratio
             }
@@ -981,4 +991,4 @@ class FalseBreakoutStrategy(BaseStrategy):
 # Export
 __all__ = ["FalseBreakoutStrategy"]
 
-logger.info("✅ False Breakout Strategy module loaded")
+logger.info("✅ False Breakout Strategy v3.0 loaded - Orchestrator Integration Ready")
