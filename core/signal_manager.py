@@ -8,7 +8,6 @@ from collections import deque, defaultdict
 import traceback
 from abc import ABC, abstractmethod
 
-# Импорты из других модулей
 from strategies import TradingSignal, SignalType, BaseStrategy
 from .data_models import SignalMetrics, SystemConfig, NotificationSettings
 
@@ -25,13 +24,13 @@ class SignalPriority(Enum):
 
 class SignalStatus(Enum):
     """Статусы сигналов в системе"""
-    PENDING = "pending"           # Ожидает обработки
-    PROCESSING = "processing"     # Обрабатывается
-    APPROVED = "approved"         # Одобрен для отправки
-    REJECTED = "rejected"         # Отклонен фильтрами
-    SENT = "sent"                # Отправлен подписчикам
-    EXPIRED = "expired"           # Истек срок действия
-    ERROR = "error"               # Ошибка при обработке
+    PENDING = "pending"
+    PROCESSING = "processing"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    SENT = "sent"
+    EXPIRED = "expired"
+    ERROR = "error"
 
 
 @dataclass
@@ -106,20 +105,17 @@ class ConflictFilter(SignalFilter):
         try:
             current_time = datetime.now()
             
-            # Удаляем устаревшие сигналы
             cutoff_time = current_time - self.conflict_window
             self.recent_signals = deque(
                 [s for s in self.recent_signals if s.timestamp > cutoff_time],
                 maxlen=50
             )
             
-            # Проверяем конфликты
             for recent_signal in self.recent_signals:
                 if self._signals_conflict(signal, recent_signal):
                     self.stats["rejected"] += 1
                     return False
             
-            # Добавляем текущий сигнал в историю
             self.recent_signals.append(signal)
             self.stats["approved"] += 1
             return True
@@ -131,7 +127,6 @@ class ConflictFilter(SignalFilter):
     
     def _signals_conflict(self, signal1: TradingSignal, signal2: TradingSignal) -> bool:
         """Проверяет, конфликтуют ли два сигнала"""
-        # Противоположные сигналы от разных стратегий в короткий период
         if signal1.strategy_name != signal2.strategy_name:
             if ((signal1.signal_type in [SignalType.BUY, SignalType.STRONG_BUY] and 
                  signal2.signal_type in [SignalType.SELL, SignalType.STRONG_SELL]) or
@@ -157,20 +152,17 @@ class DuplicateFilter(SignalFilter):
         try:
             current_time = datetime.now()
             
-            # Очищаем устаревшие сигналы
             cutoff_time = current_time - self.duplicate_window
             self.recent_signals = deque(
                 [s for s in self.recent_signals if s.timestamp > cutoff_time],
                 maxlen=100
             )
             
-            # Проверяем дубликаты
             for recent_signal in self.recent_signals:
                 if self._is_duplicate(signal, recent_signal):
                     self.stats["rejected"] += 1
                     return False
             
-            # Добавляем сигнал в историю
             self.recent_signals.append(signal)
             self.stats["approved"] += 1
             return True
@@ -184,7 +176,7 @@ class DuplicateFilter(SignalFilter):
         """Проверяет, являются ли сигналы дубликатами"""
         return (signal1.signal_type == signal2.signal_type and 
                 signal1.strategy_name == signal2.strategy_name and
-                abs(signal1.price - signal2.price) / signal1.price < 0.001)  # Менее 0.1% разница в цене
+                abs(signal1.price - signal2.price) / signal1.price < 0.001)
     
     def get_rejection_reason(self) -> str:
         return "Дублирует недавний сигнал той же стратегии"
@@ -201,17 +193,14 @@ class QualityFilter(SignalFilter):
     async def apply_filter(self, signal: TradingSignal, context: Dict[str, Any]) -> bool:
         """Проверяет качество сигнала"""
         try:
-            # Проверяем quality score
             if signal.quality_score < self.min_quality_score:
                 self.stats["rejected"] += 1
                 return False
             
-            # Проверяем количество причин
             if len(signal.reasons) < self.min_reasons:
                 self.stats["rejected"] += 1
                 return False
             
-            # Проверяем валидность сигнала
             if not signal.is_valid or signal.is_expired:
                 self.stats["rejected"] += 1
                 return False
@@ -235,12 +224,10 @@ class SignalProcessor:
         self.filters: List[SignalFilter] = []
         self.enhancement_plugins: List[Callable] = []
         
-        # Добавляем стандартные фильтры
         self.add_filter(ConflictFilter())
         self.add_filter(DuplicateFilter())
         self.add_filter(QualityFilter())
         
-        # Статистика процессора
         self.stats = {
             "total_processed": 0,
             "approved": 0,
@@ -280,10 +267,8 @@ class SignalProcessor:
         start_time = datetime.now()
         self.stats["total_processed"] += 1
         
-        # Определяем приоритет
         priority = self._determine_priority(signal)
         
-        # Создаем ProcessedSignal
         processed_signal = ProcessedSignal(
             original_signal=signal,
             priority=priority,
@@ -292,7 +277,6 @@ class SignalProcessor:
         )
         
         try:
-            # Применяем все активные фильтры
             context = {"signal": signal, "timestamp": start_time}
             
             for filter_instance in self.filters:
@@ -317,12 +301,10 @@ class SignalProcessor:
                     processed_signal.filter_results[filter_instance.name] = False
                     processed_signal.rejection_reasons.append(f"Ошибка фильтра {filter_instance.name}")
             
-            # Если прошел все фильтры
             if processed_signal.status == SignalStatus.PROCESSING:
                 processed_signal.status = SignalStatus.APPROVED
                 self.stats["approved"] += 1
                 
-                # Применяем улучшения
                 await self._apply_enhancements(processed_signal)
             
         except Exception as e:
@@ -331,7 +313,6 @@ class SignalProcessor:
             processed_signal.rejection_reasons.append(f"Ошибка обработки: {str(e)}")
             self.stats["errors"] += 1
         
-        # Финализируем обработку
         end_time = datetime.now()
         processed_signal.processed_at = end_time
         processed_signal.processing_duration = (end_time - start_time).total_seconds()
@@ -341,20 +322,16 @@ class SignalProcessor:
     
     def _determine_priority(self, signal: TradingSignal) -> SignalPriority:
         """Определяет приоритет сигнала"""
-        # CRITICAL: Очень сильные экстремальные сигналы
         if (signal.signal_type in [SignalType.STRONG_BUY, SignalType.STRONG_SELL] and 
             signal.strength >= 0.9 and signal.confidence >= 0.9):
             return SignalPriority.CRITICAL
         
-        # HIGH: Сильные сигналы
         if signal.strength >= 0.8 and signal.confidence >= 0.8:
             return SignalPriority.HIGH
         
-        # MEDIUM: Средние сигналы
         if signal.strength >= 0.6 or signal.confidence >= 0.7:
             return SignalPriority.MEDIUM
         
-        # LOW: Слабые сигналы
         return SignalPriority.LOW
     
     async def _apply_enhancements(self, processed_signal: ProcessedSignal):
@@ -362,11 +339,8 @@ class SignalProcessor:
         try:
             signal = processed_signal.original_signal
             
-            # Форматирование финального сообщения
             processed_signal.final_message = self._format_signal_message(signal)
             processed_signal.enhancement_applied.append("formatted_message")
-            
-            # Дополнительные улучшения можно добавить здесь
             
         except Exception as e:
             logger.error(f"❌ Ошибка применения улучшений: {e}")
@@ -374,7 +348,6 @@ class SignalProcessor:
     def _format_signal_message(self, signal: TradingSignal) -> str:
         """Форматирует сигнал для отправки"""
         try:
-            # Эмодзи для сигналов
             emoji_map = {
                 SignalType.STRONG_BUY: "🟢🔥",
                 SignalType.BUY: "🟢",
@@ -383,7 +356,6 @@ class SignalProcessor:
                 SignalType.NEUTRAL: "🔶"
             }
             
-            # Уровень силы
             if signal.strength >= 0.9:
                 strength_emoji = "🔥🔥🔥"
                 strength_text = "ЭКСТРЕМАЛЬНО СИЛЬНЫЙ"
@@ -418,11 +390,9 @@ class SignalProcessor:
 📝 **Анализ:**
 """
             
-            # Добавляем причины
-            for reason in signal.reasons[:3]:  # Максимум 3 причины
+            for reason in signal.reasons[:3]:
                 message += f"   • {reason}\n"
             
-            # Добавляем risk management если есть
             if signal.stop_loss or signal.take_profit:
                 message += f"\n🛡️ **Управление рисками:**\n"
                 if signal.stop_loss:
@@ -482,42 +452,57 @@ class SignalManager:
     5. Мониторинг и статистика
     """
     
-    def __init__(self, max_queue_size: int = 1000, 
-                 notification_settings: Optional[NotificationSettings] = None):
+    def __init__(self, 
+                 max_queue_size: int = 1000, 
+                 notification_settings: Optional[NotificationSettings] = None,
+                 data_source_adapter = None,
+                 openai_analyzer = None):
         """
         Инициализация SignalManager
         
         Args:
             max_queue_size: Максимальный размер очереди сигналов
             notification_settings: Настройки уведомлений
+            data_source_adapter: Адаптер для получения рыночных данных (опционально)
+            openai_analyzer: Анализатор OpenAI для AI обогащения сигналов (опционально)
         """
-        # Основные компоненты
         self.processor = SignalProcessor()
         self.notification_settings = notification_settings or NotificationSettings()
         
-        # Очередь сигналов
-        self.signal_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
-        self.processed_signals: deque = deque(maxlen=1000)  # История обработанных сигналов
+        self.data_source_adapter = data_source_adapter
+        self.openai_analyzer = openai_analyzer
         
-        # Подписчики на уведомления
+        self.ai_analysis_enabled = bool(data_source_adapter and openai_analyzer)
+        
+        if self.ai_analysis_enabled:
+            logger.info("🤖 AI анализ включен для всех сигналов")
+        else:
+            logger.info("⚠️ AI анализ отключен (отсутствует data_source_adapter или openai_analyzer)")
+        
+        self.signal_queue: asyncio.Queue = asyncio.Queue(maxsize=max_queue_size)
+        self.processed_signals: deque = deque(maxlen=1000)
+        
         self.subscribers: Set[Callable] = set()
         
-        # Управление жизненным циклом
         self.is_running = False
         self.processing_task: Optional[asyncio.Task] = None
         
-        # Статистика менеджера
         self.stats = {
             "signals_received": 0,
             "signals_processed": 0,
             "signals_sent": 0,
-            "signals_dropped": 0,  # Из-за переполнения очереди
+            "signals_dropped": 0,
             "subscribers_count": 0,
             "notifications_sent": 0,
             "notification_errors": 0,
             "start_time": datetime.now(),
             "last_signal_time": None,
-            "processing_errors": 0
+            "processing_errors": 0,
+            "ai_analysis_enabled": self.ai_analysis_enabled,
+            "ai_analysis_attempts": 0,
+            "ai_analysis_success": 0,
+            "ai_analysis_errors": 0,
+            "ai_analysis_skipped": 0
         }
         
         logger.info("🎛️ SignalManager инициализирован")
@@ -536,7 +521,6 @@ class SignalManager:
             self.is_running = True
             self.stats["start_time"] = datetime.now()
             
-            # Запускаем фоновую обработку сигналов
             self.processing_task = asyncio.create_task(self._signal_processing_loop())
             
             logger.info("✅ SignalManager запущен успешно")
@@ -553,7 +537,6 @@ class SignalManager:
             
             self.is_running = False
             
-            # Останавливаем задачу обработки
             if self.processing_task and not self.processing_task.done():
                 self.processing_task.cancel()
                 try:
@@ -561,7 +544,6 @@ class SignalManager:
                 except asyncio.CancelledError:
                     pass
             
-            # Очищаем очередь (обрабатываем оставшиеся сигналы)
             remaining_signals = []
             while not self.signal_queue.empty():
                 try:
@@ -600,7 +582,6 @@ class SignalManager:
             self.stats["signals_received"] += 1
             self.stats["last_signal_time"] = datetime.now()
             
-            # Пытаемся добавить в очередь
             try:
                 self.signal_queue.put_nowait(signal)
                 logger.debug(f"📥 Сигнал добавлен в очередь: {signal.strategy_name}")
@@ -620,24 +601,19 @@ class SignalManager:
         
         while self.is_running:
             try:
-                # Получаем сигнал из очереди с таймаутом
                 try:
                     signal = await asyncio.wait_for(self.signal_queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
-                    continue  # Продолжаем цикл
+                    continue
                 
-                # Обрабатываем сигнал
                 processed_signal = await self.processor.process_signal(signal)
                 self.stats["signals_processed"] += 1
                 
-                # Сохраняем в истории
                 self.processed_signals.append(processed_signal)
                 
-                # Отправляем подписчикам если одобрен
                 if processed_signal.status == SignalStatus.APPROVED:
                     await self._send_to_subscribers(processed_signal)
                 
-                # Отмечаем задачу как выполненную
                 self.signal_queue.task_done()
                 
             except asyncio.CancelledError:
@@ -647,9 +623,109 @@ class SignalManager:
                 logger.error(f"❌ Ошибка в цикле обработки сигналов: {e}")
                 logger.error(f"Stack trace: {traceback.format_exc()}")
                 self.stats["processing_errors"] += 1
-                await asyncio.sleep(1)  # Пауза перед продолжением
+                await asyncio.sleep(1)
         
         logger.info("🛑 Цикл обработки сигналов остановлен")
+    
+    async def _enhance_with_ai_analysis(self, processed_signal: ProcessedSignal) -> str:
+        """
+        Обогащает сигнал AI анализом от OpenAI
+        
+        Берет уже отформатированное сообщение и ДОПОЛНЯЕТ его AI анализом:
+        1. Получает актуальные рыночные данные через data_source_adapter
+        2. Формирует market_data для OpenAI
+        3. Вызывает OpenAI анализ
+        4. Комбинирует исходное сообщение + AI анализ
+        
+        Args:
+            processed_signal: Обработанный сигнал с final_message
+            
+        Returns:
+            Обогащенное сообщение (исходное + AI анализ)
+        """
+        try:
+            self.stats["ai_analysis_attempts"] += 1
+            
+            if not self.ai_analysis_enabled:
+                logger.debug("AI анализ отключен, возвращаю исходное сообщение")
+                self.stats["ai_analysis_skipped"] += 1
+                return processed_signal.final_message
+            
+            original_signal = processed_signal.original_signal
+            
+            logger.info(f"🤖 Запуск AI анализа для {original_signal.strategy_name} сигнала...")
+            
+            try:
+                market_snapshot = await self.data_source_adapter.get_market_snapshot(
+                    symbol=original_signal.symbol
+                )
+                
+                if not market_snapshot:
+                    logger.warning("⚠️ Не удалось получить market_snapshot, пропускаю AI анализ")
+                    self.stats["ai_analysis_skipped"] += 1
+                    return processed_signal.final_message
+                    
+            except Exception as e:
+                logger.error(f"❌ Ошибка получения market_snapshot: {e}")
+                self.stats["ai_analysis_errors"] += 1
+                return processed_signal.final_message
+            
+            market_data_for_ai = {
+                'current_price': market_snapshot.current_price,
+                'price_change_24h': market_snapshot.price_change_24h,
+                'volume_24h': market_snapshot.volume_24h,
+                'high_24h': market_snapshot.high_24h,
+                'low_24h': market_snapshot.low_24h,
+                'open_interest': market_snapshot.open_interest,
+                'price_change_1m': getattr(market_snapshot, 'price_change_1m', 0),
+                'price_change_5m': getattr(market_snapshot, 'price_change_5m', 0),
+                'signal_type': original_signal.signal_type.value,
+                'signal_strength': original_signal.strength,
+                'signal_confidence': original_signal.confidence,
+                'strategy_name': original_signal.strategy_name,
+                'signal_reasons': original_signal.reasons[:3],
+                'hourly_data': market_snapshot.hourly_stats if hasattr(market_snapshot, 'hourly_stats') else {}
+            }
+            
+            logger.debug(f"📊 Market data подготовлены: price=${market_data_for_ai['current_price']:.2f}, "
+                        f"24h_change={market_data_for_ai['price_change_24h']:+.2f}%")
+            
+            try:
+                ai_analysis = await self.openai_analyzer.analyze_market(market_data_for_ai)
+                
+                if not ai_analysis or len(ai_analysis.strip()) < 50:
+                    logger.warning("⚠️ AI анализ пустой или слишком короткий, пропускаю")
+                    self.stats["ai_analysis_skipped"] += 1
+                    return processed_signal.final_message
+                
+                logger.info(f"✅ AI анализ получен ({len(ai_analysis)} символов)")
+                self.stats["ai_analysis_success"] += 1
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка вызова OpenAI: {e}")
+                self.stats["ai_analysis_errors"] += 1
+                return processed_signal.final_message
+            
+            enhanced_message = f"""{processed_signal.final_message}
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+🤖 **AI АНАЛИЗ РЫНКА**
+
+{ai_analysis}
+
+━━━━━━━━━━━━━━━━━━━━━━
+_Анализ сгенерирован OpenAI на основе текущих рыночных данных_
+"""
+            
+            logger.info("✅ Сообщение успешно обогащено AI анализом")
+            return enhanced_message
+            
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка в _enhance_with_ai_analysis: {e}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            self.stats["ai_analysis_errors"] += 1
+            return processed_signal.final_message
     
     async def _send_to_subscribers(self, processed_signal: ProcessedSignal):
         """Отправляет обработанный сигнал всем подписчикам"""
@@ -660,13 +736,28 @@ class SignalManager:
             processed_signal.status = SignalStatus.SENT
             processed_signal.sent_at = datetime.now()
             
+            final_message_to_send = processed_signal.final_message
+            
+            if self.ai_analysis_enabled:
+                try:
+                    logger.info("🤖 Обогащение сигнала AI анализом...")
+                    enhanced_message = await self._enhance_with_ai_analysis(processed_signal)
+                    final_message_to_send = enhanced_message
+                    logger.info("✅ Сигнал успешно обогащен AI")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка AI обогащения: {e}")
+                    final_message_to_send = processed_signal.final_message
+            else:
+                logger.debug("AI анализ отключен, отправляю исходное сообщение")
+            
             success_count = 0
             error_count = 0
             
-            # Отправляем всем подписчикам параллельно
             tasks = []
-            for subscriber in self.subscribers.copy():  # Копируем для безопасности
-                task = asyncio.create_task(self._notify_subscriber(subscriber, processed_signal))
+            for subscriber in self.subscribers.copy():
+                task = asyncio.create_task(
+                    self._notify_subscriber(subscriber, final_message_to_send)
+                )
                 tasks.append(task)
             
             if tasks:
@@ -688,14 +779,13 @@ class SignalManager:
         except Exception as e:
             logger.error(f"❌ Ошибка отправки подписчикам: {e}")
     
-    async def _notify_subscriber(self, subscriber: Callable, processed_signal: ProcessedSignal):
+    async def _notify_subscriber(self, subscriber: Callable, message: str):
         """Уведомляет конкретного подписчика"""
         try:
-            # Вызываем подписчика с финальным сообщением
             if asyncio.iscoroutinefunction(subscriber):
-                await subscriber(processed_signal.final_message)
+                await subscriber(message)
             else:
-                subscriber(processed_signal.final_message)
+                subscriber(message)
                 
         except Exception as e:
             logger.error(f"❌ Ошибка вызова подписчика: {e}")
@@ -722,7 +812,6 @@ class SignalManager:
         """Возвращает полную статистику менеджера"""
         uptime = datetime.now() - self.stats["start_time"]
         
-        # Статистика процессора
         processor_stats = self.processor.get_stats()
         
         return {
@@ -761,9 +850,7 @@ class SignalManager:
         if "enable_filter" in kwargs:
             filter_name, enabled = kwargs["enable_filter"]
             self.processor.enable_filter(filter_name, enabled)
-        
-        # Другие настройки процессора можно добавить здесь
-        
+    
     def __str__(self):
         """Строковое представление менеджера"""
         stats = self.get_stats()
