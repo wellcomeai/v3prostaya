@@ -5,7 +5,7 @@ Data Source Adapter
 Преобразует данные из базы данных в формат MarketDataSnapshot для стратегий.
 
 Author: Trading Bot Team  
-Version: 1.0.1
+Version: 1.0.2
 """
 
 import asyncio
@@ -15,6 +15,7 @@ from typing import Dict, Any, List, Optional, Set, Callable
 from decimal import Decimal
 
 from market_data import MarketDataSnapshot, DataQuality
+from market_data.market_data_manager import DataSourceType
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ class DataSourceAdapter:
                 self.last_snapshots[symbol] = snapshot
                 self.stats["snapshots_created"] += 1
                 
-                logger.debug(f"📸 Snapshot создан для {symbol}: ${snapshot.price:.2f}")
+                logger.debug(f"📸 Snapshot создан для {symbol}: ${snapshot.current_price:.2f}")
             
             return snapshot
             
@@ -183,29 +184,47 @@ class DataSourceAdapter:
             # Рассчитываем объем 24ч из D1 свечей
             volume_24h = self._calculate_volume_24h(context)
             
-            # Определяем качество данных
-            data_quality = self._assess_data_quality(context)
+            # Рассчитываем high/low 24h из D1 свечей
+            high_24h, low_24h = self._calculate_high_low_24h(context, current_price)
             
-            # Создаем snapshot
+            # Определяем качество данных
+            data_quality_obj = self._assess_data_quality(context)
+            
+            # Конвертируем DataQuality в словарь
+            data_quality_dict = self._data_quality_to_dict(data_quality_obj)
+            
+            # Создаем snapshot с правильными параметрами
             snapshot = MarketDataSnapshot(
                 symbol=symbol,
                 timestamp=datetime.now(),
                 
-                # Цена и изменения
-                price=current_price,
+                # ✅ ИСПРАВЛЕНО: Правильные имена параметров
+                current_price=current_price,  # было: price
                 price_change_1m=price_changes.get("1m", 0.0),
                 price_change_5m=price_changes.get("5m", 0.0),
-                price_change_1h=price_changes.get("1h", 0.0),
+                # УДАЛЕНО: price_change_1h (такого поля нет)
                 price_change_24h=price_changes.get("24h", 0.0),
                 
-                # Объем
+                # Объем и диапазон
                 volume_24h=volume_24h,
+                high_24h=high_24h,
+                low_24h=low_24h,
+                
+                # ✅ ДОБАВЛЕНО: Обязательные поля (нет данных - ставим 0)
+                bid_price=0.0,
+                ask_price=0.0,
+                spread=0.0,
+                open_interest=0.0,
                 
                 # Качество данных
-                data_quality=data_quality,
+                data_quality=data_quality_dict,  # ✅ Конвертирован в словарь
                 
                 # Источник данных
-                data_source="database_adapter"
+                data_source=DataSourceType.REST_API,  # ✅ Используем enum
+                
+                # Флаги данных
+                has_realtime_data=False,
+                has_historical_data=True
             )
             
             return snapshot
@@ -239,11 +258,6 @@ class DataSourceAdapter:
             if len(context.recent_candles_m5) >= 2:
                 price_5m_ago = float(context.recent_candles_m5[-2]['open_price'])
                 changes["5m"] = ((current_price - price_5m_ago) / price_5m_ago * 100)
-            
-            # 1 час (из H1 свечей)
-            if len(context.recent_candles_h1) >= 2:
-                price_1h_ago = float(context.recent_candles_h1[-2]['close_price'])
-                changes["1h"] = ((current_price - price_1h_ago) / price_1h_ago * 100)
             
             # 24 часа (из D1 свечей)
             if len(context.recent_candles_d1) >= 2:
@@ -283,6 +297,39 @@ class DataSourceAdapter:
         except Exception as e:
             logger.error(f"❌ Ошибка расчета объема: {e}")
             return 0.0
+    
+    def _calculate_high_low_24h(self, context, current_price: float) -> tuple[float, float]:
+        """
+        Рассчитать максимум и минимум за 24 часа
+        
+        Args:
+            context: TechnicalAnalysisContext
+            current_price: Текущая цена
+            
+        Returns:
+            Tuple[high_24h, low_24h]
+        """
+        try:
+            # Пробуем из последних 24 H1 свечей
+            if len(context.recent_candles_h1) >= 24:
+                recent_24h = context.recent_candles_h1[-24:]
+                high_24h = max(float(candle['high_price']) for candle in recent_24h)
+                low_24h = min(float(candle['low_price']) for candle in recent_24h)
+                return high_24h, low_24h
+            
+            # Если нет 24 H1 свечей - берем из последней D1 свечи
+            if context.recent_candles_d1:
+                last_d1 = context.recent_candles_d1[-1]
+                high_24h = float(last_d1['high_price'])
+                low_24h = float(last_d1['low_price'])
+                return high_24h, low_24h
+            
+            # Если вообще нет данных - возвращаем текущую цену
+            return current_price, current_price
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка расчета high/low: {e}")
+            return current_price, current_price
     
     def _assess_data_quality(self, context) -> DataQuality:
         """
@@ -346,6 +393,25 @@ class DataSourceAdapter:
                 data_completeness=0.0,
                 last_update=datetime.now()
             )
+    
+    def _data_quality_to_dict(self, data_quality: DataQuality) -> Dict[str, Any]:
+        """
+        Конвертировать DataQuality объект в словарь
+        
+        Args:
+            data_quality: DataQuality объект
+            
+        Returns:
+            Словарь с данными о качестве
+        """
+        return {
+            "bybit_rest_api": data_quality.bybit_rest_api,
+            "bybit_websocket": data_quality.bybit_websocket,
+            "yfinance_websocket": data_quality.yfinance_websocket,
+            "overall_quality": data_quality.overall_quality,
+            "data_completeness": data_quality.data_completeness,
+            "last_update": data_quality.last_update.isoformat() if data_quality.last_update else None
+        }
     
     # ==================== ПОДПИСКИ НА ОБНОВЛЕНИЯ ====================
     
@@ -546,4 +612,4 @@ class DataSourceAdapter:
 # Export
 __all__ = ["DataSourceAdapter"]
 
-logger.info("✅ Data Source Adapter module loaded")
+logger.info("✅ Data Source Adapter module loaded (v1.0.2)")
