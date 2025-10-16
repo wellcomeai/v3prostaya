@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Полный тест: данные + реальный ответ от OpenAI
-Запуск: python test_ai_full.py
+Запуск: python test_ai_data.py
 """
 import asyncio
-import json
 from datetime import datetime, timedelta, timezone
 
 async def main():
@@ -14,6 +13,7 @@ async def main():
     from database.repositories import get_market_data_repository
     from strategies.technical_analysis.context_manager import TechnicalAnalysisContextManager
     from strategies import BreakoutStrategy
+    from openai_integration import OpenAIAnalyzer
     from config import Config
     
     symbol = "BTCUSDT"
@@ -58,11 +58,10 @@ async def main():
                 current_price=current_price,
                 reasons=[
                     f"Пробой сопротивления @ ${ta_context.levels_d1[0].price:,.2f}" if ta_context.levels_d1 else "Тестовая причина 1",
-                    f"ATR использован на {ta_context.atr_data.current_range_used*100:.0f}%" if ta_context.atr_data else "Тестовая причина 2",
-                    "Поджатие у уровня обнаружено" if ta_context.has_compression else "Тестовая причина 3"
+                    "Консолидация завершена",
+                    "Тренд восходящий"
                 ]
             )
-            # Добавляем risk management
             signal.stop_loss = current_price * 0.97
             signal.take_profit = current_price * 1.09
         else:
@@ -89,13 +88,11 @@ async def main():
         
         print(f"\n🔸 РИСК-МЕНЕДЖМЕНТ:")
         if signal_dict['stop_loss']:
-            print(f"   Stop Loss: ${signal_dict['stop_loss']:,.2f}")
             risk_percent = abs((signal_dict['stop_loss'] - signal_dict['price']) / signal_dict['price'] * 100)
-            print(f"   Риск: {risk_percent:.2f}%")
+            print(f"   Stop Loss: ${signal_dict['stop_loss']:,.2f} (риск {risk_percent:.2f}%)")
         if signal_dict['take_profit']:
-            print(f"   Take Profit: ${signal_dict['take_profit']:,.2f}")
             reward_percent = abs((signal_dict['take_profit'] - signal_dict['price']) / signal_dict['price'] * 100)
-            print(f"   Профит: {reward_percent:.2f}%")
+            print(f"   Take Profit: ${signal_dict['take_profit']:,.2f} (профит {reward_percent:.2f}%)")
             if signal_dict['stop_loss']:
                 rr_ratio = reward_percent / risk_percent
                 print(f"   R:R соотношение: {rr_ratio:.2f}:1")
@@ -104,84 +101,97 @@ async def main():
         print(f"   Уровней найдено: {len(ta_context.levels_d1)}")
         if ta_context.levels_d1:
             nearest = ta_context.levels_d1[0]
-            print(f"   Ближайший уровень: {nearest.level_type} @ ${nearest.price:,.2f} (сила {nearest.strength:.2f})")
+            print(f"   Ближайший: {nearest.level_type} @ ${nearest.price:,.2f} (сила {nearest.strength:.2f})")
         if ta_context.atr_data:
             print(f"   ATR: {ta_context.atr_data.calculated_atr:.2f}")
-            print(f"   Запас хода: {(1 - ta_context.atr_data.current_range_used)*100:.0f}% остался")
+            print(f"   Запас хода: {(1 - ta_context.atr_data.current_range_used)*100:.0f}%")
         print(f"   Тренд: {ta_context.dominant_trend_h1.value if ta_context.dominant_trend_h1 else 'N/A'}")
         print(f"   Консолидация: {'Да' if ta_context.consolidation_detected else 'Нет'}")
         
-        # ==================== ШАГ 5: ФОРМИРУЕМ ПРОМПТ ====================
+        # ==================== ШАГ 5: ПОДГОТОВКА market_data ДЛЯ OpenAI ====================
+        
+        # Рассчитываем изменения цены
+        price_change_1m = 0
+        price_change_5m = 0
+        price_change_24h = 0
+        
+        if len(candles_1m) >= 2:
+            price_change_1m = (float(candles_1m[-1]['close_price']) - float(candles_1m[-2]['close_price'])) / float(candles_1m[-2]['close_price']) * 100
+        
+        if len(candles_5m) >= 2:
+            price_change_5m = (float(candles_5m[-1]['close_price']) - float(candles_5m[-2]['close_price'])) / float(candles_5m[-2]['close_price']) * 100
+        
+        if len(candles_1d) >= 2:
+            price_change_24h = (float(candles_1d[-1]['close_price']) - float(candles_1d[-2]['close_price'])) / float(candles_1d[-2]['close_price']) * 100
+        
+        # Формируем market_data словарь (как требует analyze_market)
+        market_data = {
+            # Основные показатели
+            'current_price': signal_dict['price'],
+            'price_change_1m': price_change_1m,
+            'price_change_5m': price_change_5m,
+            'price_change_24h': price_change_24h,
+            'volume_24h': float(candles_1d[-1]['volume']) if candles_1d else 0,
+            'high_24h': float(candles_1d[-1]['high_price']) if candles_1d else current_price,
+            'low_24h': float(candles_1d[-1]['low_price']) if candles_1d else current_price,
+            'open_interest': 0,
+            
+            # Контекст сигнала
+            'signal_type': signal_dict['signal_type'],
+            'signal_strength': signal_dict['strength'],
+            'signal_confidence': signal_dict['confidence'],
+            'strategy_name': signal_dict['strategy_name'],
+            'signal_reasons': signal_dict['reasons'],
+            
+            # Почасовая статистика
+            'hourly_data': {
+                'price_trend': ta_context.dominant_trend_h1.value if ta_context.dominant_trend_h1 else 'unknown',
+                'avg_price_24h': current_price,
+                'price_volatility': (float(candles_1d[-1]['high_price']) - float(candles_1d[-1]['low_price'])) / float(candles_1d[-1]['low_price']) * 100 if candles_1d else 0,
+                'avg_hourly_volume': float(candles_1d[-1]['volume']) / 24 if candles_1d else 0
+            }
+        }
+        
         print("\n" + "="*80)
-        print("💬 ПРОМПТ ДЛЯ OpenAI")
+        print("📤 СТРУКТУРА market_data ДЛЯ OpenAI")
         print("="*80)
-        
-        # Формируем детальный промпт
-        prompt = f"""Проанализируй торговый сигнал для {signal_dict['symbol']}:
-
-СИГНАЛ:
-- Тип: {signal_dict['signal_type']}
-- Цена входа: ${signal_dict['price']:,.2f}
-- Сила сигнала: {signal_dict['strength']:.2f}/1.0 ({signal_dict['strength_level']})
-- Уверенность: {signal_dict['confidence']:.2f}/1.0 ({signal_dict['confidence_level']})
-- Стратегия: {signal_dict['strategy_name']}
-
-ПРИЧИНЫ СИГНАЛА:
-{chr(10).join('• ' + r for r in signal_dict['reasons'])}
-
-ТЕХНИЧЕСКИЙ АНАЛИЗ:
-- Тренд: {ta_context.dominant_trend_h1.value if ta_context.dominant_trend_h1 else 'неопределен'}
-- ATR использован: {ta_context.atr_data.current_range_used*100:.0f}% (остаток {(1-ta_context.atr_data.current_range_used)*100:.0f}%)
-- Консолидация: {'обнаружена' if ta_context.consolidation_detected else 'отсутствует'}
-- Поджатие: {'есть' if ta_context.has_compression else 'нет'}
-- Ближайших уровней: {len([l for l in ta_context.levels_d1 if abs(l.price - signal_dict['price'])/signal_dict['price'] < 0.02])}
-
-РИСК-МЕНЕДЖМЕНТ:
-- Stop Loss: ${signal_dict['stop_loss']:,.2f} ({abs((signal_dict['stop_loss']-signal_dict['price'])/signal_dict['price']*100):.2f}%)
-- Take Profit: ${signal_dict['take_profit']:,.2f} ({abs((signal_dict['take_profit']-signal_dict['price'])/signal_dict['price']*100):.2f}%)
-- R:R соотношение: {abs((signal_dict['take_profit']-signal_dict['price'])/signal_dict['price']) / abs((signal_dict['stop_loss']-signal_dict['price'])/signal_dict['price']):.2f}:1
-
-Дай анализ в формате:
-1. КАЧЕСТВО СИГНАЛА (1-2 предложения)
-2. КЛЮЧЕВЫЕ РИСКИ (1-2 предложения)
-3. РЕКОМЕНДАЦИЯ (входить/ждать/пропустить + почему)
-"""
-        
-        print(prompt)
+        print(f"\n💰 Цена: ${market_data['current_price']:,.2f}")
+        print(f"📊 Изменения: 1m={price_change_1m:+.2f}%, 5m={price_change_5m:+.2f}%, 24h={price_change_24h:+.2f}%")
+        print(f"📈 Объем 24h: {market_data['volume_24h']:,.0f}")
+        print(f"🔸 Сигнал: {market_data['signal_type']} (сила={market_data['signal_strength']:.2f})")
+        print(f"🧠 Стратегия: {market_data['strategy_name']}")
+        print(f"📝 Причин: {len(market_data['signal_reasons'])}")
         
         # ==================== ШАГ 6: ЗАПРОС К OpenAI ====================
         print("\n" + "="*80)
         print("🤖 ОТПРАВКА ЗАПРОСА В OpenAI...")
         print("="*80)
         
-        # Проверяем API ключ
         if not Config.OPENAI_API_KEY or Config.OPENAI_API_KEY == "YOUR_OPENAI_API_KEY":
             print("\n❌ OpenAI API ключ не настроен!")
-            print("   Установите OPENAI_API_KEY в переменных окружения\n")
+            print("   Установите OPENAI_API_KEY в переменных окружения")
+            print("   Будет использован резервный анализ (fallback)\n")
         else:
-            print(f"\n⏳ Отправка запроса (модель: {Config.OPENAI_MODEL})...")
-            
-            try:
-                # Используем OpenAI напрямую
-                from openai_integration import OpenAIAnalyzer
-                
-                analyzer = OpenAIAnalyzer()
-                ai_response = await analyzer.analyze_signal(signal)
-                
-                print("\n✅ ОТВЕТ ПОЛУЧЕН!\n")
-                
-                print("="*80)
-                print("🎯 АНАЛИЗ ОТ OpenAI")
-                print("="*80)
-                print(f"\n{ai_response}\n")
-                print("="*80)
-                
-            except Exception as e:
-                print(f"\n❌ Ошибка запроса к OpenAI: {e}")
-                import traceback
-                traceback.print_exc()
+            print(f"\n⏳ Отправка в OpenAI (модель: {Config.OPENAI_MODEL})...\n")
         
-        print("\n✅ ПОЛНЫЙ ТЕСТ ЗАВЕРШЕН")
+        try:
+            analyzer = OpenAIAnalyzer()
+            
+            # ✅ ПРАВИЛЬНЫЙ ВЫЗОВ: analyze_market(market_data)
+            ai_response = await analyzer.analyze_market(market_data)
+            
+            print("="*80)
+            print("✅ АНАЛИЗ ОТ OpenAI (или fallback)")
+            print("="*80)
+            print(f"\n{ai_response}\n")
+            print("="*80)
+            
+        except Exception as e:
+            print(f"\n❌ Ошибка запроса к OpenAI: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print("\n✅ ПОЛНЫЙ ТЕСТ ЗАВЕРШЕН\n")
         
     except Exception as e:
         print(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
