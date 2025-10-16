@@ -1,3 +1,20 @@
+"""
+Simplified Base Strategy
+
+Упрощенная версия базовой стратегии без MarketDataSnapshot.
+Стратегии работают напрямую с Repository для получения свечей.
+
+Ключевые изменения v2.0:
+- ❌ Убрана зависимость от MarketDataSnapshot
+- ✅ Прямая работа с Repository (получение свечей)
+- ✅ Опциональный TechnicalAnalysisContextManager
+- ✅ Упрощенный метод analyze() вместо process_market_data()
+- ✅ Сохранены все фильтры (cooldown, rate limiting, strength)
+
+Author: Trading Bot Team
+Version: 2.0.0 - Simplified Architecture
+"""
+
 import logging
 import asyncio
 from abc import ABC, abstractmethod
@@ -7,11 +24,10 @@ from enum import Enum
 from dataclasses import dataclass, field
 import traceback
 
-# Импортируем типы из market_data модуля
-from market_data import MarketDataSnapshot
-
 logger = logging.getLogger(__name__)
 
+
+# ==================== ENUMS ====================
 
 class SignalType(Enum):
     """Типы торговых сигналов"""
@@ -38,9 +54,19 @@ class ConfidenceLevel(Enum):
     HIGH = "high"         # 0.7-1.0
 
 
+# ==================== TRADING SIGNAL ====================
+
 @dataclass
 class TradingSignal:
-    """Структура торгового сигнала"""
+    """
+    Структура торгового сигнала
+    
+    Содержит всю информацию о сигнале:
+    - Тип и сила сигнала
+    - Цена и время
+    - Обоснование (reasons)
+    - Управление рисками (SL/TP)
+    """
     
     # Основные поля
     signal_type: SignalType
@@ -169,36 +195,77 @@ class TradingSignal:
                 f"by {self.strategy_name}")
 
 
+# ==================== BASE STRATEGY ====================
+
 class BaseStrategy(ABC):
     """
-    Абстрактный базовый класс для всех торговых стратегий
+    🚀 Упрощенная базовая стратегия v2.0
     
-    Предоставляет общую функциональность:
-    - Анализ рыночных данных
-    - Генерация торговых сигналов
-    - Управление cooldown периодами
-    - Валидация данных
-    - Статистика и мониторинг
+    Ключевые изменения:
+    - ❌ Нет зависимости от MarketDataSnapshot
+    - ✅ Прямая работа с Repository (получение свечей из БД)
+    - ✅ Опциональный TechnicalAnalysisContextManager
+    - ✅ Простой метод analyze() - стратегия сама получает нужные данные
+    
+    Что осталось:
+    - ✅ Фильтрация сигналов (strength, cooldown, rate limiting)
+    - ✅ Управление рисками (SL/TP)
+    - ✅ Статистика и мониторинг
+    
+    Example:
+        ```python
+        class MyStrategy(BaseStrategy):
+            async def analyze(self) -> Optional[TradingSignal]:
+                # Получаем свечи из БД
+                candles_1m = await self.repository.get_recent_candles(
+                    symbol=self.symbol,
+                    interval="1m",
+                    limit=100
+                )
+                
+                # Анализируем
+                if some_condition:
+                    return self.create_signal(
+                        signal_type=SignalType.BUY,
+                        strength=0.8,
+                        confidence=0.7,
+                        current_price=candles_1m[-1]['close_price'],
+                        reasons=["Reason 1", "Reason 2"]
+                    )
+                
+                return None
+        ```
     """
     
-    def __init__(self, name: str, symbol: str = "BTCUSDT", 
-                 min_signal_strength: float = 0.5, 
-                 signal_cooldown_minutes: int = 5,
-                 max_signals_per_hour: int = 12,
-                 enable_risk_management: bool = True):
+    def __init__(
+        self,
+        name: str,
+        symbol: str,
+        repository,  # MarketDataRepository
+        ta_context_manager=None,  # TechnicalAnalysisContextManager (опционально)
+        min_signal_strength: float = 0.5,
+        signal_cooldown_minutes: int = 5,
+        max_signals_per_hour: int = 12,
+        enable_risk_management: bool = True
+    ):
         """
         Инициализация базовой стратегии
         
         Args:
             name: Имя стратегии
-            symbol: Торговый символ
+            symbol: Торговый символ (BTCUSDT, ETHUSDT, etc)
+            repository: MarketDataRepository для получения свечей
+            ta_context_manager: TechnicalAnalysisContextManager (опционально)
             min_signal_strength: Минимальная сила сигнала для отправки
             signal_cooldown_minutes: Минуты между сигналами одного типа
             max_signals_per_hour: Максимум сигналов в час
             enable_risk_management: Включить управление рисками
         """
         self.name = name
-        self.symbol = symbol
+        self.symbol = symbol.upper()
+        self.repository = repository  # ✅ Прямой доступ к БД
+        self.ta_context_manager = ta_context_manager  # ✅ Опциональный TA
+        
         self.min_signal_strength = min_signal_strength
         self.signal_cooldown = timedelta(minutes=signal_cooldown_minutes)
         self.max_signals_per_hour = max_signals_per_hour
@@ -229,40 +296,68 @@ class BaseStrategy(ABC):
         self.debug_mode = False
         
         logger.info(f"🧠 Стратегия '{self.name}' инициализирована для {self.symbol}")
+        logger.info(f"   • Repository: {'✓' if repository else '✗'}")
+        logger.info(f"   • TechnicalAnalysis: {'✓' if ta_context_manager else '✗'}")
         logger.info(f"   • Мин. сила сигнала: {self.min_signal_strength}")
         logger.info(f"   • Cooldown: {signal_cooldown_minutes} мин")
         logger.info(f"   • Макс. сигналов/час: {max_signals_per_hour}")
     
     @abstractmethod
-    async def analyze_market_data(self, market_data: MarketDataSnapshot) -> Optional[TradingSignal]:
+    async def analyze(self) -> Optional[TradingSignal]:
         """
-        Абстрактный метод анализа рыночных данных
+        🔥 ГЛАВНЫЙ МЕТОД - Анализ рынка и генерация сигнала
         
-        Должен быть реализован в каждой конкретной стратегии.
+        Стратегия сама получает нужные данные из БД через self.repository
+        и возвращает сигнал или None.
         
-        Args:
-            market_data: Снимок рыночных данных
-            
         Returns:
-            Торговый сигнал или None если сигнала нет
+            TradingSignal если есть сигнал, иначе None
+            
+        Example:
+            ```python
+            async def analyze(self) -> Optional[TradingSignal]:
+                # Получаем свечи
+                candles_1m = await self.repository.get_recent_candles(
+                    symbol=self.symbol,
+                    interval="1m",
+                    limit=100
+                )
+                
+                if not candles_1m:
+                    return None
+                
+                # Анализируем
+                current_price = candles_1m[-1]['close_price']
+                price_change = self._calculate_price_change(candles_1m)
+                
+                # Генерируем сигнал
+                if price_change > 2.0:
+                    return self.create_signal(
+                        signal_type=SignalType.BUY,
+                        strength=0.8,
+                        confidence=0.7,
+                        current_price=current_price,
+                        reasons=[f"Рост {price_change:.2f}% за минуту"]
+                    )
+                
+                return None
+            ```
         """
         pass
     
-    async def process_market_data(self, market_data: MarketDataSnapshot) -> Optional[TradingSignal]:
+    async def run_analysis(self) -> Optional[TradingSignal]:
         """
-        Основной метод обработки рыночных данных
+        🎯 Публичный метод запуска анализа (вызывается оркестратором)
         
         Выполняет полный цикл:
-        1. Валидация входных данных
-        2. Вызов анализа стратегии
-        3. Фильтрация сигналов
-        4. Обновление статистики
+        1. Проверяет что анализ включен
+        2. Вызывает analyze() конкретной стратегии
+        3. Фильтрует сигнал (strength, cooldown, rate limiting)
+        4. Применяет risk management
+        5. Обновляет статистику
         
-        Args:
-            market_data: Снимок рыночных данных
-            
         Returns:
-            Готовый к отправке торговый сигнал или None
+            Готовый к отправке TradingSignal или None
         """
         try:
             self.stats["analysis_calls"] += 1
@@ -271,17 +366,11 @@ class BaseStrategy(ABC):
             # Проверяем, включен ли анализ
             if not self.analysis_enabled:
                 if self.debug_mode:
-                    logger.debug(f"📵 Анализ отключен для стратегии {self.name}")
-                return None
-            
-            # Валидируем входные данные
-            if not self._validate_market_data(market_data):
-                if self.debug_mode:
-                    logger.warning(f"⚠️ Невалидные рыночные данные для {self.name}")
+                    logger.debug(f"📵 Анализ отключен для {self.name}")
                 return None
             
             # Вызываем анализ конкретной стратегии
-            raw_signal = await self.analyze_market_data(market_data)
+            raw_signal = await self.analyze()
             
             if raw_signal is None:
                 return None
@@ -289,12 +378,12 @@ class BaseStrategy(ABC):
             self.stats["signals_generated"] += 1
             
             # Фильтруем сигнал по всем критериям
-            if not await self._should_send_signal(raw_signal):
+            if not self._should_send_signal(raw_signal):
                 return None
             
             # Применяем управление рисками если включено
             if self.enable_risk_management:
-                self._apply_risk_management(raw_signal, market_data)
+                self._apply_risk_management(raw_signal)
             
             # Добавляем в историю и обновляем статистику
             self._add_signal_to_history(raw_signal)
@@ -309,74 +398,11 @@ class BaseStrategy(ABC):
             
         except Exception as e:
             self.stats["analysis_errors"] += 1
-            logger.error(f"❌ Ошибка в process_market_data для {self.name}: {e}")
+            logger.error(f"❌ Ошибка в run_analysis для {self.name}: {e}")
             logger.error(f"Stack trace: {traceback.format_exc()}")
             return None
     
-    @abstractmethod
-    async def analyze_market_opinion(
-        self,
-        market_snapshot,
-        ta_context
-    ) -> Dict[str, Any]:
-        """
-        Анализирует рынок и возвращает мнение стратегии БЕЗ генерации сигнала
-        
-        Используется для получения аналитического мнения стратегии
-        о текущем состоянии рынка.
-        
-        Args:
-            market_snapshot: MarketDataSnapshot с рыночными данными
-            ta_context: TechnicalAnalysisContext с техническим анализом
-            
-        Returns:
-            Dict с полями:
-                - opinion: str ("BULLISH", "BEARISH", "NEUTRAL")
-                - confidence: float (0.0 - 1.0)
-                - reasoning: str (краткое обоснование)
-                - signal_strength: float (0.0 - 1.0)
-                - key_points: List[str] (ключевые моменты)
-        
-        Example:
-            {
-                "opinion": "BULLISH",
-                "confidence": 0.75,
-                "reasoning": "Сильный импульс роста с увеличением объемов",
-                "signal_strength": 0.8,
-                "key_points": [
-                    "Рост +2.5% за 5 минут",
-                    "Объем на 30% выше среднего",
-                    "Пробой ключевого уровня $50,000"
-                ]
-            }
-        """
-        pass
-    
-    def _validate_market_data(self, market_data: MarketDataSnapshot) -> bool:
-        """Валидация рыночных данных"""
-        try:
-            # Проверяем основные поля
-            if not market_data or market_data.symbol != self.symbol:
-                return False
-            
-            # Проверяем что цена валидна
-            if market_data.current_price <= 0:
-                return False
-            
-            # Проверяем свежесть данных (не старше 5 минут)
-            age = datetime.now() - market_data.timestamp
-            if age > timedelta(minutes=5):
-                if self.debug_mode:
-                    logger.warning(f"⚠️ Устаревшие данные: {age.total_seconds():.1f} сек")
-                return False
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка валидации данных: {e}")
-            return False
-    
-    async def _should_send_signal(self, signal: TradingSignal) -> bool:
+    def _should_send_signal(self, signal: TradingSignal) -> bool:
         """
         Проверяет, должен ли быть отправлен сигнал
         
@@ -443,37 +469,46 @@ class BaseStrategy(ABC):
         
         return len(recent_signals) < self.max_signals_per_hour
     
-    def _apply_risk_management(self, signal: TradingSignal, market_data: MarketDataSnapshot):
-        """Применяет правила управления рисками"""
+    def _apply_risk_management(self, signal: TradingSignal):
+        """
+        Применяет правила управления рисками
+        
+        Устанавливает:
+        - Stop Loss (3% от цены)
+        - Take Profit (5% от цены)
+        - Рекомендуемый размер позиции
+        """
         try:
             current_price = signal.price
             
-            # Рекомендации по позиции (базовые правила)
+            # Рекомендации по позиции
             if signal.signal_type in [SignalType.BUY, SignalType.STRONG_BUY]:
-                # Stop loss на 2-3% ниже цены входа
-                signal.stop_loss = current_price * 0.97  # 3% стоп
-                # Take profit на 4-6% выше
-                signal.take_profit = current_price * 1.05  # 5% профит
+                # Stop loss на 3% ниже цены входа
+                signal.stop_loss = current_price * 0.97
+                # Take profit на 5% выше
+                signal.take_profit = current_price * 1.05
                 
             elif signal.signal_type in [SignalType.SELL, SignalType.STRONG_SELL]:
-                # Для коротких позиций (если поддерживается)
-                signal.stop_loss = current_price * 1.03  # 3% стоп
-                signal.take_profit = current_price * 0.95  # 5% профит
+                # Для коротких позиций
+                signal.stop_loss = current_price * 1.03
+                signal.take_profit = current_price * 0.95
             
-            # Размер позиции на основе силы сигнала и волатильности
-            base_position_size = 0.02  # 2% от капитала базово
-            volatility_factor = abs(market_data.price_change_24h) / 100
+            # Размер позиции на основе силы сигнала и уверенности
+            base_position_size = 0.02  # 2% базово
             confidence_factor = signal.confidence
+            strength_factor = signal.strength
             
-            # Корректируем размер позиции
             signal.position_size_recommendation = (
                 base_position_size * 
                 confidence_factor * 
-                min(1.5, 1 + volatility_factor)  # Увеличиваем до 1.5x при высокой волатильности
+                strength_factor
             )
             
             # Ограничиваем максимальным размером
-            signal.position_size_recommendation = min(signal.position_size_recommendation, 0.05)  # Макс 5%
+            signal.position_size_recommendation = min(
+                signal.position_size_recommendation, 
+                0.05  # Макс 5%
+            )
             
         except Exception as e:
             logger.error(f"❌ Ошибка применения risk management: {e}")
@@ -497,19 +532,27 @@ class BaseStrategy(ABC):
             self.stats["average_signal_strength"] = sum(s.strength for s in recent_signals) / len(recent_signals)
             self.stats["average_signal_confidence"] = sum(s.confidence for s in recent_signals) / len(recent_signals)
     
-    def create_signal(self, signal_type: SignalType, strength: float, confidence: float, 
-                     current_price: float, reasons: List[str] = None, 
-                     technical_indicators: Dict[str, Any] = None) -> TradingSignal:
+    def create_signal(
+        self,
+        signal_type: SignalType,
+        strength: float,
+        confidence: float,
+        current_price: float,
+        reasons: List[str] = None,
+        technical_indicators: Dict[str, Any] = None,
+        market_conditions: Dict[str, Any] = None
+    ) -> TradingSignal:
         """
         Помощник для создания торговых сигналов
         
         Args:
-            signal_type: Тип сигнала
+            signal_type: Тип сигнала (BUY, SELL, etc)
             strength: Сила сигнала (0-1)
             confidence: Уверенность (0-1)
             current_price: Текущая цена
             reasons: Список причин
             technical_indicators: Технические индикаторы
+            market_conditions: Условия рынка
             
         Returns:
             Новый торговый сигнал
@@ -523,8 +566,107 @@ class BaseStrategy(ABC):
             strategy_name=self.name,
             symbol=self.symbol,
             reasons=reasons or [],
-            technical_indicators=technical_indicators or {}
+            technical_indicators=technical_indicators or {},
+            market_conditions=market_conditions or {}
         )
+    
+    # ==================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ====================
+    
+    async def get_recent_candles(
+        self,
+        interval: str,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Получить последние свечи из БД
+        
+        Args:
+            interval: Интервал (1m, 5m, 15m, 1h, 4h, 1d)
+            limit: Количество свечей
+            
+        Returns:
+            Список свечей (dict)
+        """
+        try:
+            candles = await self.repository.get_recent_candles(
+                symbol=self.symbol,
+                interval=interval,
+                limit=limit
+            )
+            return candles if candles else []
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения свечей {interval}: {e}")
+            return []
+    
+    async def get_technical_analysis_context(self):
+        """
+        Получить контекст технического анализа (если доступен)
+        
+        Returns:
+            TechnicalAnalysisContext или None
+        """
+        if not self.ta_context_manager:
+            return None
+        
+        try:
+            context = await self.ta_context_manager.get_context(self.symbol)
+            return context
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения TA контекста: {e}")
+            return None
+    
+    def calculate_price_change(self, candles: List[Dict], periods: int = 1) -> float:
+        """
+        Рассчитать изменение цены за N периодов
+        
+        Args:
+            candles: Список свечей
+            periods: Количество периодов назад
+            
+        Returns:
+            Изменение в процентах
+        """
+        if len(candles) < periods + 1:
+            return 0.0
+        
+        try:
+            current_price = float(candles[-1]['close_price'])
+            old_price = float(candles[-(periods + 1)]['close_price'])
+            
+            return ((current_price - old_price) / old_price) * 100
+        except Exception as e:
+            logger.error(f"❌ Ошибка расчета изменения цены: {e}")
+            return 0.0
+    
+    def calculate_volume_change(self, candles: List[Dict], periods: int = 10) -> float:
+        """
+        Рассчитать изменение объема относительно среднего
+        
+        Args:
+            candles: Список свечей
+            periods: Количество периодов для расчета среднего
+            
+        Returns:
+            Изменение в процентах от среднего
+        """
+        if len(candles) < periods + 1:
+            return 0.0
+        
+        try:
+            recent_candles = candles[-periods:]
+            avg_volume = sum(float(c['volume']) for c in recent_candles) / len(recent_candles)
+            
+            current_volume = float(candles[-1]['volume'])
+            
+            if avg_volume == 0:
+                return 0.0
+            
+            return ((current_volume - avg_volume) / avg_volume) * 100
+        except Exception as e:
+            logger.error(f"❌ Ошибка расчета изменения объема: {e}")
+            return 0.0
+    
+    # ==================== СТАТИСТИКА И УПРАВЛЕНИЕ ====================
     
     def get_stats(self) -> Dict[str, Any]:
         """Возвращает статистику стратегии"""
@@ -602,3 +744,16 @@ class BaseStrategy(ABC):
         return (f"{self.__class__.__name__}(name='{self.name}', symbol='{self.symbol}', "
                 f"min_strength={self.min_signal_strength}, cooldown={self.signal_cooldown}, "
                 f"enabled={self.analysis_enabled}, debug={self.debug_mode})")
+
+
+# ==================== EXPORTS ====================
+
+__all__ = [
+    "BaseStrategy",
+    "TradingSignal",
+    "SignalType",
+    "SignalStrength",
+    "ConfidenceLevel"
+]
+
+logger.info("✅ Simplified BaseStrategy v2.0 loaded - Direct Repository Access")
