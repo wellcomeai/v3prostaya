@@ -1,6 +1,7 @@
 import logging
 import asyncio
 from typing import Set, Optional, Dict, Any, List
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -12,20 +13,22 @@ from openai_integration import OpenAIAnalyzer
 logger = logging.getLogger(__name__)
 
 class TelegramBot:
-    """Telegram бот для анализа рынка на aiogram (webhook режим) - v2.5"""
+    """Telegram бот для анализа рынка на aiogram (webhook режим) - v3.0"""
     
-    def __init__(self, token: str, market_analyzer=None):
+    def __init__(self, token: str, repository=None, ta_context_manager=None):
         """
         Args:
             token: Telegram bot token
-            market_analyzer: MarketAnalyzer для комплексного анализа (опционально)
+            repository: MarketDataRepository для доступа к данным
+            ta_context_manager: TechnicalAnalysisContextManager для технического анализа
         """
         self.bot = Bot(token=token)
         self.dp = Dispatcher()
         self.router = Router()
         
         self.openai_analyzer = OpenAIAnalyzer()
-        self.market_analyzer = market_analyzer
+        self.repository = repository
+        self.ta_context_manager = ta_context_manager
         
         self.signal_subscribers: Set[int] = set()
         
@@ -35,7 +38,10 @@ class TelegramBot:
         
         self.dp.include_router(self.router)
         
-        logger.info("🤖 TelegramBot инициализирован (с MarketAnalyzer)")
+        logger.info("🤖 TelegramBot v3.0 инициализирован")
+        logger.info(f"   • Repository: {'✅' if repository else '❌'}")
+        logger.info(f"   • TA Context Manager: {'✅' if ta_context_manager else '❌'}")
+        logger.info(f"   • OpenAI Analyzer: {'✅' if self.openai_analyzer else '❌'}")
     
     def _register_handlers(self):
         """Регистрация всех обработчиков"""
@@ -105,7 +111,7 @@ class TelegramBot:
             
             keyboard = self._create_main_menu()
             
-            welcome_text = f"""🤖 *Bybit Trading Bot v2.5* 
+            welcome_text = f"""🤖 *Bybit Trading Bot v3.0* 
 
 Привет, {user_name}! 
 
@@ -115,14 +121,15 @@ class TelegramBot:
 - Синхронизация данных криптовалют (Bybit)
 - 🆕 Синхронизация фьючерсов CME (YFinance)
 - Сохранение исторических данных в PostgreSQL
-- 🤖 AI анализ каждого сигнала (OpenAI GPT-4)
+- 🤖 AI анализ рынка через OpenAI GPT-4
 - 🚨 Отправка торговых сигналов в реальном времени
 - Модульная архитектура для надежности
 
-🔥 *Активные компоненты v2.5:*
+🔥 *Активные компоненты v3.0:*
 - SimpleCandleSync - синхронизация криптовалют
 - SimpleFuturesSync - синхронизация фьючерсов
-- DataSourceAdapter - универсальный провайдер данных
+- Repository - прямой доступ к БД
+- TechnicalAnalysisContextManager - технический анализ
 - SignalManager - обработка с AI обогащением
 - StrategyOrchestrator - управление стратегиями
 
@@ -160,16 +167,17 @@ _(Можете отписаться в меню "Торговые сигналы
 - 📈 Мониторинг криптовалют (15 пар)
 - 🆕 Мониторинг фьючерсов CME (4 контракта)
 - 💾 Сохранение в PostgreSQL
-- 🤖 AI анализ каждого сигнала через OpenAI GPT-4
+- 🤖 AI анализ через OpenAI GPT-4
 - 🚨 Торговые сигналы в реальном времени
 
-🆕 *Архитектура v2.5:*
+🆕 *Архитектура v3.0:*
 - SimpleCandleSync - REST API синхронизация (крипта)
 - SimpleFuturesSync - YFinance синхронизация (фьючерсы)
-- DataSourceAdapter - универсальный провайдер данных
+- Repository - прямой доступ к базе данных
+- TechnicalAnalysisContextManager - технический анализ
 - SignalManager - фильтрация + AI обогащение
 - StrategyOrchestrator - управление стратегиями
-- OpenAI GPT-4 - AI анализ каждого сигнала
+- OpenAI GPT-4 - AI анализ рынка
 
 🚨 *Торговые сигналы:*
 - Мониторинг в реальном времени
@@ -211,10 +219,10 @@ _(Можете отписаться в меню "Торговые сигналы
             
             logger.info(f"📊 {user_name} ({user_id}) запросил анализ рынка")
             
-            if not self.market_analyzer:
+            if not self.repository or not self.openai_analyzer:
                 await callback.message.edit_text(
                     "❌ **Анализ рынка временно недоступен**\n\n"
-                    "MarketAnalyzer не инициализирован.\n"
+                    "Система анализа не инициализирована.\n"
                     "Обратитесь к администратору.",
                     reply_markup=self._create_back_button(),
                     parse_mode=ParseMode.MARKDOWN
@@ -230,7 +238,7 @@ _(Можете отписаться в меню "Торговые сигналы
 **🪙 Криптовалюты** - Bybit spot pairs
 - BTC, ETH, BNB, SOL, XRP, DOGE, ADA и др.
 - Анализ текущей ситуации
-- Мнение 4+ торговых стратегий
+- Технический анализ
 - AI прогноз на 1-3 дня
 
 **📊 Фьючерсы** - CME micro futures
@@ -347,7 +355,7 @@ _(Можете отписаться в меню "Торговые сигналы
 📊 **Что будет проанализировано:**
 - Текущая цена и изменения
 - Технический анализ (уровни, ATR, тренд)
-- Мнения всех торговых стратегий
+- Данные из базы за последние 24 часа
 - 🤖 AI прогноз от OpenAI GPT-4
 
 ⏱️ Анализ займет 5-10 секунд.
@@ -367,7 +375,7 @@ _(Можете отписаться в меню "Торговые сигналы
             await callback.answer("❌ Произошла ошибка")
     
     async def handle_request_analysis(self, callback: CallbackQuery):
-        """Обработка запроса анализа - выполняем анализ"""
+        """Обработка запроса анализа - выполняем анализ через Repository + OpenAI"""
         try:
             await callback.answer()
             
@@ -396,10 +404,9 @@ _(Можете отписаться в меню "Торговые сигналы
             emoji = "🪙" if asset_type == "crypto" else "📊"
             await callback.message.edit_text(
                 f"{emoji} **АНАЛИЗ {symbol}**\n\n"
-                f"⏳ Собираю данные...\n"
-                f"📊 Выполняю технический анализ...\n"
-                f"🤖 Запрашиваю мнения стратегий...\n"
-                f"🧠 Генерирую AI анализ...\n\n"
+                f"⏳ Собираю данные из БД...\n"
+                f"📊 Получаю технический анализ...\n"
+                f"🤖 Запрашиваю AI анализ...\n\n"
                 f"_Пожалуйста, подождите 5-10 секунд..._",
                 parse_mode=ParseMode.MARKDOWN
             )
@@ -407,22 +414,170 @@ _(Можете отписаться в меню "Торговые сигналы
             logger.info(f"🔬 {user_name} ({user_id}) запустил анализ {symbol}")
             
             try:
-                report = await self.market_analyzer.analyze_symbol(symbol)
+                # ========== ШАГ 1: Получаем последние свечи из БД ==========
+                end_time = datetime.now()
+                start_time_24h = end_time - timedelta(hours=24)
+                start_time_1h = end_time - timedelta(hours=1)
                 
-                if not report:
+                # Получаем часовые свечи за 24ч
+                candles_1h = await self.repository.get_candles(
+                    symbol=symbol.upper(),
+                    interval="1h",
+                    start_time=start_time_24h,
+                    end_time=end_time,
+                    limit=24
+                )
+                
+                # Получаем минутные свечи за последний час
+                candles_1m = await self.repository.get_candles(
+                    symbol=symbol.upper(),
+                    interval="1m",
+                    start_time=start_time_1h,
+                    end_time=end_time,
+                    limit=60
+                )
+                
+                if not candles_1h or len(candles_1h) < 5:
                     await callback.message.edit_text(
-                        f"❌ **Не удалось выполнить анализ {symbol}**\n\n"
-                        f"Возможные причины:\n"
-                        f"• Нет данных по символу\n"
-                        f"• Ошибка получения данных\n"
-                        f"• Временная недоступность сервиса\n\n"
+                        f"❌ **Недостаточно данных для анализа {symbol}**\n\n"
+                        f"В базе данных найдено {len(candles_1h) if candles_1h else 0} свечей.\n"
+                        f"Для анализа требуется минимум 5 часовых свечей.\n\n"
                         f"Попробуйте позже или выберите другой символ.",
                         reply_markup=self._create_back_button(),
                         parse_mode=ParseMode.MARKDOWN
                     )
                     return
                 
-                message_text = report.to_telegram_message()
+                # ========== ШАГ 2: Рассчитываем базовые показатели ==========
+                latest_candle = candles_1h[-1]
+                first_candle_24h = candles_1h[0]
+                
+                current_price = float(latest_candle['close'])
+                price_24h_ago = float(first_candle_24h['open'])
+                price_change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100
+                
+                high_24h = max(float(c['high']) for c in candles_1h)
+                low_24h = min(float(c['low']) for c in candles_1h)
+                volume_24h = sum(float(c['volume']) for c in candles_1h)
+                
+                # Краткосрочные изменения (если есть минутные данные)
+                price_change_1m = 0
+                price_change_5m = 0
+                
+                if candles_1m and len(candles_1m) >= 5:
+                    latest_1m = candles_1m[-1]
+                    candle_5m_ago = candles_1m[-6] if len(candles_1m) >= 6 else candles_1m[0]
+                    candle_1m_ago = candles_1m[-2] if len(candles_1m) >= 2 else candles_1m[0]
+                    
+                    price_now = float(latest_1m['close'])
+                    price_1m = float(candle_1m_ago['close'])
+                    price_5m = float(candle_5m_ago['close'])
+                    
+                    if price_1m > 0:
+                        price_change_1m = ((price_now - price_1m) / price_1m) * 100
+                    if price_5m > 0:
+                        price_change_5m = ((price_now - price_5m) / price_5m) * 100
+                
+                # ========== ШАГ 3: Получаем технический анализ (опционально) ==========
+                trend = "NEUTRAL"
+                volatility = "MEDIUM"
+                atr = 0.0
+                key_levels = []
+                
+                if self.ta_context_manager:
+                    try:
+                        context = await self.ta_context_manager.get_context(
+                            symbol=symbol.upper(),
+                            interval="1h"
+                        )
+                        
+                        if context:
+                            trend = context.trend or "NEUTRAL"
+                            volatility = context.volatility or "MEDIUM"
+                            atr = context.atr or 0.0
+                            
+                            # Извлекаем ключевые уровни
+                            if hasattr(context, 'support_levels') and context.support_levels:
+                                for level in context.support_levels[:3]:
+                                    key_levels.append({
+                                        'type': 'support',
+                                        'price': level
+                                    })
+                            
+                            if hasattr(context, 'resistance_levels') and context.resistance_levels:
+                                for level in context.resistance_levels[:3]:
+                                    key_levels.append({
+                                        'type': 'resistance',
+                                        'price': level
+                                    })
+                            
+                            logger.info(f"✅ Получен технический анализ: trend={trend}, volatility={volatility}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Не удалось получить технический анализ: {e}")
+                else:
+                    logger.info("ℹ️ TechnicalAnalysisContextManager не доступен")
+                
+                # ========== ШАГ 4: Формируем данные для OpenAI ==========
+                analysis_data = {
+                    'symbol': symbol,
+                    'current_price': current_price,
+                    'price_change_24h': price_change_24h,
+                    'price_change_1m': price_change_1m,
+                    'price_change_5m': price_change_5m,
+                    'volume_24h': volume_24h,
+                    'high_24h': high_24h,
+                    'low_24h': low_24h,
+                    'trend': trend,
+                    'volatility': volatility,
+                    'atr': atr,
+                    'key_levels': key_levels,
+                    'strategies_opinions': []  # Можно добавить если есть
+                }
+                
+                logger.info(f"📊 Данные для анализа подготовлены:")
+                logger.info(f"   • Цена: ${current_price:,.2f}")
+                logger.info(f"   • Изменение 24ч: {price_change_24h:+.2f}%")
+                logger.info(f"   • Свечей 1h: {len(candles_1h)}")
+                logger.info(f"   • Свечей 1m: {len(candles_1m)}")
+                logger.info(f"   • Тренд: {trend}")
+                logger.info(f"   • Ключевых уровней: {len(key_levels)}")
+                
+                # ========== ШАГ 5: Получаем AI анализ ==========
+                logger.info("🤖 Запрос AI анализа к OpenAI...")
+                ai_analysis = await self.openai_analyzer.comprehensive_market_analysis(analysis_data)
+                
+                if not ai_analysis or len(ai_analysis) < 50:
+                    logger.warning("⚠️ AI анализ пустой или слишком короткий, используем fallback")
+                    ai_analysis = "❌ Не удалось получить детальный AI анализ. Попробуйте позже."
+                else:
+                    logger.info(f"✅ AI анализ получен ({len(ai_analysis)} символов)")
+                
+                # ========== ШАГ 6: Формируем сообщение ==========
+                message_text = f"""{emoji} **АНАЛИЗ {symbol}**
+
+💰 **Текущая цена:** ${current_price:,.2f}
+
+📊 **Изменения:**
+- 1 минута: {price_change_1m:+.2f}%
+- 5 минут: {price_change_5m:+.2f}%
+- 24 часа: {price_change_24h:+.2f}%
+
+📈 **Диапазон 24ч:**
+- Максимум: ${high_24h:,.2f}
+- Минимум: ${low_24h:,.2f}
+- Объем: {volume_24h:,.0f}
+
+🔧 **Технический анализ:**
+- Тренд: {trend}
+- Волатильность: {volatility}
+- ATR: {atr:.2f}
+
+🤖 **AI АНАЛИЗ:**
+
+{ai_analysis}
+
+_Анализ основан на {len(candles_1h)} часовых свечах из базы данных_
+"""
                 
                 keyboard = self._create_analysis_result_menu()
                 
@@ -444,6 +599,7 @@ _(Можете отписаться в меню "Торговые сигналы
                 
                 await callback.message.edit_text(
                     f"❌ **Произошла ошибка при анализе {symbol}**\n\n"
+                    f"Детали: {str(e)[:100]}\n\n"
                     f"Попробуйте еще раз или выберите другой символ.",
                     reply_markup=self._create_back_button(),
                     parse_mode=ParseMode.MARKDOWN
@@ -475,10 +631,10 @@ _(Можете отписаться в меню "Торговые сигналы
             
             about_text = """ℹ️ *О боте*
 
-🤖 *Bybit Trading Bot v2.5*
-DataSourceAdapter + AI Edition
+🤖 *Bybit Trading Bot v3.0*
+Direct Repository + AI Edition
 
-*🏗️ Модульная архитектура:*
+*🏗️ Упрощенная архитектура:*
 - 🔄 SimpleCandleSync - REST API синхронизация криптовалют
   - 15 торговых пар Bybit
   - 6 временных интервалов
@@ -491,11 +647,15 @@ DataSourceAdapter + AI Edition
   - Учет ограничений YFinance API
   - Параллельная работа с SimpleCandleSync
 
-- 🔌 DataSourceAdapter - универсальный провайдер данных
-  - Единый интерфейс для всех источников
-  - Доступ к крипте и фьючерсам
-  - Интеграция с TechnicalAnalysis
-  - Оптимизированные запросы
+- 📊 Repository - прямой доступ к данным
+  - Быстрые запросы к PostgreSQL
+  - Оптимизированные индексы
+  - Поддержка агрегации данных
+
+- 🧠 TechnicalAnalysisContextManager - технический анализ
+  - Автоматический расчет индикаторов
+  - Определение трендов и уровней
+  - Кэширование результатов
 
 - 📊 MarketDataManager (опционально)
   - WebSocket ticker для real-time цен
@@ -526,7 +686,7 @@ DataSourceAdapter + AI Edition
 - 4 микро-фьючерса CME (MCL, MGC, MES, MNQ)
 - 6 интервалов (1m, 5m, 15m, 1h, 4h, 1d)
 - Автоматическая синхронизация 24/7
-- 🤖 AI анализ каждого торгового сигнала
+- 🤖 AI анализ рынка через OpenAI
 
 *Надежность:*
 - ✅ Отсутствие deadlock благодаря REST API
@@ -535,10 +695,10 @@ DataSourceAdapter + AI Edition
 - ✅ Health monitoring
 - ✅ Graceful shutdown
 
-*Особенности v2.5:*
-- ✅ Автоподписка на сигналы при /start
-- ✅ AI обогащение всех сигналов
-- ✅ DataSourceAdapter для унификации
+*Особенности v3.0:*
+- ✅ Прямой доступ к данным через Repository
+- ✅ Упрощенная архитектура без лишних слоев
+- ✅ AI анализ через OpenAI GPT-4
 - ✅ Поддержка крипты + фьючерсов
 
 *Режим работы:*
@@ -573,22 +733,23 @@ DataSourceAdapter + AI Edition
             status_text = "✅ Активна" if is_subscribed else "❌ Неактивна"
             subscribers_count = len(self.signal_subscribers)
             
-            menu_text = f"""🚨 *Торговые сигналы v2.5*
+            menu_text = f"""🚨 *Торговые сигналы v3.0*
 
 📊 *Статус подписки:* {status_text}
 👥 *Подписчиков:* {subscribers_count}
 
-🏗️ *Модульная архитектура сигналов:*
+🏗️ *Архитектура сигналов:*
 - SimpleCandleSync - актуальные данные криптовалют
 - SimpleFuturesSync - актуальные данные фьючерсов
-- DataSourceAdapter - универсальный провайдер
+- Repository - прямой доступ к БД
+- TechnicalAnalysisContextManager - технический анализ
 - MarketDataManager - real-time WebSocket ticker
 - StrategyOrchestrator - управление стратегиями
 - SignalManager - умная фильтрация
 - 🤖 OpenAI GPT-4 - AI анализ каждого сигнала
 - MomentumStrategy - импульсная торговля
 
-🔥 *Особенности v2.5:*
+🔥 *Особенности v3.0:*
 - ✅ Автоподписка при /start
 - REST API синхронизация без deadlock
 - Параллельная обработка крипты и фьючерсов
@@ -599,7 +760,7 @@ DataSourceAdapter + AI Edition
 - Управление частотой сигналов (кулдаун 5 минут)
 
 ⏱️ *Интервалы и фильтры:*
-- Анализ каждые 30 секунд
+- Анализ каждые 60 секунд
 - Мгновенные экстремальные сигналы (>2%)
 - Кулдаун между сигналами: 5 минут
 - Минимальная сила сигнала: 0.5
@@ -645,11 +806,12 @@ DataSourceAdapter + AI Edition
             
             await callback.message.edit_text(
                 "✅ *Подписка активирована!*\n\n"
-                "Теперь вы будете получать торговые сигналы от модульной системы v2.5.\n\n"
+                "Теперь вы будете получать торговые сигналы от системы v3.0.\n\n"
                 "🏗️ *Сигналы генерируются через:*\n"
                 "• SimpleCandleSync - синхронизация криптовалют\n"
                 "• SimpleFuturesSync - синхронизация фьючерсов\n"
-                "• DataSourceAdapter - универсальный провайдер\n"
+                "• Repository - прямой доступ к БД\n"
+                "• TechnicalAnalysisContextManager - технический анализ\n"
                 "• MarketDataManager - real-time данные\n"
                 "• StrategyOrchestrator - координация стратегий\n"
                 "• SignalManager - фильтрация и обработка\n"
@@ -675,7 +837,7 @@ DataSourceAdapter + AI Edition
                 parse_mode=ParseMode.MARKDOWN
             )
             
-            logger.info(f"📡 Пользователь {user_name} ({user_id}) подписался на сигналы v2.5")
+            logger.info(f"📡 Пользователь {user_name} ({user_id}) подписался на сигналы v3.0")
             
         except Exception as e:
             logger.error(f"❌ Ошибка подписки на сигналы: {e}")
@@ -760,7 +922,7 @@ DataSourceAdapter + AI Edition
             
             keyboard = self._create_main_menu()
             
-            welcome_text = """🤖 *Bybit Trading Bot v2.5*
+            welcome_text = """🤖 *Bybit Trading Bot v3.0*
 
 Главное меню. Выберите действие:"""
             
@@ -795,13 +957,13 @@ DataSourceAdapter + AI Edition
             elif any(word in user_text for word in ['анализ', 'рынок', 'btc', 'биткоин', 'цена']):
                 builder = InlineKeyboardBuilder()
                 builder.add(InlineKeyboardButton(
-                    text="📊 Информация об анализе",
+                    text="📊 Анализ рынка с AI",
                     callback_data="market_analysis"
                 ))
                 
                 await message.answer(
-                    "📊 Анализ рынка находится в разработке.\n"
-                    "_SimpleCandleSync + SimpleFuturesSync + AI собирают данные_",
+                    "📊 Хотите получить AI анализ рынка?\n"
+                    "_Данные берутся из БД + OpenAI GPT-4_",
                     reply_markup=builder.as_markup(),
                     parse_mode=ParseMode.MARKDOWN
                 )
@@ -814,7 +976,7 @@ DataSourceAdapter + AI Edition
                 
                 await message.answer(
                     "🚨 Хотите настроить торговые сигналы?\n"
-                    "_Сигналы генерируются через StrategyOrchestrator v2.5 с AI_",
+                    "_Сигналы генерируются через StrategyOrchestrator v3.0 с AI_",
                     reply_markup=builder.as_markup(),
                     parse_mode=ParseMode.MARKDOWN
                 )
@@ -823,7 +985,7 @@ DataSourceAdapter + AI Edition
             else:
                 response_text = """🤖 Я анализирую рынок криптовалют и фьючерсов, отправляю торговые сигналы с AI!
 
-🆕 *Версия 2.5 - DataSourceAdapter + AI Edition*
+🆕 *Версия 3.0 - Direct Repository + AI Edition*
 
 При /start вы автоматически подписываетесь на сигналы!
 
@@ -832,6 +994,7 @@ DataSourceAdapter + AI Edition
 /help - справка
 
 Или просто напишите:
+- "анализ" для AI анализа рынка
 - "сигналы" для настройки уведомлений
 - "помощь" для подробной информации"""
                 
