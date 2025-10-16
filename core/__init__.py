@@ -1,40 +1,40 @@
-# ==================================================
-# ОБНОВЛЕННЫЙ core/__init__.py
-# ==================================================
+"""
+Core Trading System Module
 
-from .signal_manager import SignalManager, SignalProcessor, SignalFilter
-from .data_models import (
-    SystemConfig, 
-    StrategyConfig, 
-    SignalMetrics,
-    MarketCondition,
-    RiskParameters,
-    NotificationSettings
-)
+Provides core components for the trading system:
+- Signal Management with AI enrichment
+- Strategy Orchestration (simplified v2.0)
+- System configuration and data models
+"""
+
+import logging
+from typing import List, Type
+
+from .signal_manager import SignalManager
 from .strategy_orchestrator import StrategyOrchestrator
-from .data_source_adapter import DataSourceAdapter
-from .market_analyzer import MarketAnalyzer, MarketAnalysisReport, StrategyOpinion  # ✅ ДОБАВЛЕНО
+from .data_models import (
+    SystemConfig,
+    StrategyConfig,
+    create_default_system_config,
+    TradingSignal,
+    SignalType,
+    SignalConfidence
+)
+
+# ❌ УДАЛЕНА СТРОКА: from .data_source_adapter import DataSourceAdapter
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
-    # Signal Management
     "SignalManager",
-    "SignalProcessor", 
-    "SignalFilter",
-    
-    # Data Models
-    "SystemConfig",
-    "StrategyConfig",
-    "SignalMetrics", 
-    "MarketCondition",
-    "RiskParameters",
-    "NotificationSettings",
-    
-    # Strategy Management
     "StrategyOrchestrator",
-    "DataSourceAdapter",
-    
-    # Market Analysis  # ✅ ДОБАВЛЕНО
-    "MarketAnalyzer",
-    "MarketAnalysisReport",
-    "StrategyOpinion"
+    "SystemConfig",
+    "StrategyConfig", 
+    "create_default_system_config",
+    "TradingSignal",
+    "SignalType",
+    "SignalConfidence",
+    # ❌ УДАЛЕНО: "DataSourceAdapter"
 ]
+
+logger.info("✅ Core module loaded successfully (Simplified v2.0)")
