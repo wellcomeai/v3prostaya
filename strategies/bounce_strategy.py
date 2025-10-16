@@ -24,7 +24,7 @@ Bounce Strategy v3.0 - Стратегия торговли отбоя (БСУ-Б
 - Было сильное движение (>10-15%)
 
 Author: Trading Bot Team
-Version: 3.0.0 - Orchestrator Integration
+Version: 3.0.1 - FIXED: KeyError 'close' -> 'close_price'
 """
 
 import logging
@@ -43,11 +43,11 @@ class BounceStrategy(BaseStrategy):
     Ловит отскок цены от сильного уровня поддержки/сопротивления.
     Использует модель БСУ-БПУ для подтверждения валидности уровня.
     
-    Изменения v3.0:
-    - ✅ Реализован analyze_with_data() - получает готовые данные
-    - ✅ Убрана зависимость от MarketDataSnapshot
-    - ✅ Работа напрямую со свечами из параметров
-    - ✅ Упрощенная логика без PatternDetector (прямые проверки)
+    Изменения v3.0.1:
+    - ✅ ИСПРАВЛЕНО: KeyError 'close' -> используем 'close_price'
+    - ✅ ИСПРАВЛЕНО: KeyError 'high' -> используем 'high_price'
+    - ✅ ИСПРАВЛЕНО: KeyError 'low' -> используем 'low_price'
+    - ✅ ИСПРАВЛЕНО: KeyError 'open' -> используем 'open_price'
     
     Сильные стороны:
     - Высокая точность (уровень подтвержден касаниями)
@@ -178,7 +178,7 @@ class BounceStrategy(BaseStrategy):
             "atr_exhausted_entries": 0
         }
         
-        logger.info("🎯 BounceStrategy v3.0 инициализирована")
+        logger.info("🎯 BounceStrategy v3.0.1 инициализирована (FIXED)")
         logger.info(f"   • Symbol: {symbol}")
         logger.info(f"   • Require BPU-1: {require_bpu1}, BPU-2: {require_bpu2}")
         logger.info(f"   • Entry timing: {seconds_before_close}s before close")
@@ -234,8 +234,8 @@ class BounceStrategy(BaseStrategy):
                     logger.debug(f"⚠️ {symbol}: недостаточно D1 свечей")
                 return None
             
-            # Текущая цена из последней H1 свечи
-            current_price = float(candles_1h[-1]['close'])
+            # ✅ ИСПРАВЛЕНО: используем 'close_price' вместо 'close'
+            current_price = float(candles_1h[-1]['close_price'])
             current_time = datetime.now()
             
             # Шаг 1: Проверка технического контекста
@@ -492,9 +492,10 @@ class BounceStrategy(BaseStrategy):
             touches = []
             
             for i, candle in enumerate(candles_1h[-50:]):
-                high = float(candle['high'])
-                low = float(candle['low'])
-                close = float(candle['close'])
+                # ✅ ИСПРАВЛЕНО: используем 'high_price', 'low_price', 'close_price'
+                high = float(candle['high_price'])
+                low = float(candle['low_price'])
+                close = float(candle['close_price'])
                 
                 # Проверяем касание уровня (допуск self.bpu_touch_tolerance)
                 distance_high = abs(high - level_price) / level_price
@@ -606,8 +607,8 @@ class BounceStrategy(BaseStrategy):
             if len(candles_1h) >= 5:
                 recent = candles_1h[-5:]
                 
-                # Средний размер бара
-                ranges = [float(c['high']) - float(c['low']) for c in recent]
+                # ✅ ИСПРАВЛЕНО: используем 'high_price' и 'low_price'
+                ranges = [float(c['high_price']) - float(c['low_price']) for c in recent]
                 avg_range = sum(ranges) / len(ranges)
                 
                 # Получаем ATR для сравнения
@@ -628,7 +629,8 @@ class BounceStrategy(BaseStrategy):
             # 4. Закрытие далеко от уровня
             close_far_from_level = False
             if candles_1h:
-                last_close = float(candles_1h[-1]['close'])
+                # ✅ ИСПРАВЛЕНО: используем 'close_price'
+                last_close = float(candles_1h[-1]['close_price'])
                 distance = abs(last_close - level.price)
                 distance_percent = distance / level.price * 100
                 
@@ -644,9 +646,9 @@ class BounceStrategy(BaseStrategy):
             # 5. Сильное предшествующее движение (проверка по D1)
             strong_move = False
             if len(candles_1d) >= 2:
-                # Изменение за последний день
-                current = float(candles_1d[-1]['close'])
-                previous = float(candles_1d[-2]['close'])
+                # ✅ ИСПРАВЛЕНО: используем 'close_price'
+                current = float(candles_1d[-1]['close_price'])
+                previous = float(candles_1d[-2]['close_price'])
                 change = abs((current - previous) / previous * 100)
                 
                 if change > 5.0:  # > 5% за день
@@ -995,4 +997,4 @@ class BounceStrategy(BaseStrategy):
 # Export
 __all__ = ["BounceStrategy"]
 
-logger.info("✅ Bounce Strategy v3.0 loaded - Orchestrator Integration Ready")
+logger.info("✅ Bounce Strategy v3.0.1 loaded (FIXED: KeyError resolved)")
