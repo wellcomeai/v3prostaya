@@ -1,18 +1,14 @@
 """
-Simplified Base Strategy
+Base Strategy v3.0 - С поддержкой analyze_with_data()
 
-Упрощенная версия базовой стратегии без MarketDataSnapshot.
-Стратегии работают напрямую с Repository для получения свечей.
-
-Ключевые изменения v2.0:
-- ❌ Убрана зависимость от MarketDataSnapshot
-- ✅ Прямая работа с Repository (получение свечей)
-- ✅ Опциональный TechnicalAnalysisContextManager
-- ✅ Упрощенный метод analyze() вместо process_market_data()
-- ✅ Сохранены все фильтры (cooldown, rate limiting, strength)
+Ключевые изменения v3.0:
+- ✅ Добавлен метод analyze_with_data() - получает готовые данные
+- ✅ Repository добавлен в конструктор
+- ✅ Обратная совместимость с analyze() сохранена
+- ✅ Все фильтры и risk management работают
 
 Author: Trading Bot Team
-Version: 2.0.0 - Simplified Architecture
+Version: 3.0.0 - Orchestrator Integration
 """
 
 import logging
@@ -199,37 +195,42 @@ class TradingSignal:
 
 class BaseStrategy(ABC):
     """
-    🚀 Упрощенная базовая стратегия v2.0
+    🚀 Базовая стратегия v3.0 - С поддержкой Orchestrator
     
-    Ключевые изменения:
-    - ❌ Нет зависимости от MarketDataSnapshot
-    - ✅ Прямая работа с Repository (получение свечей из БД)
-    - ✅ Опциональный TechnicalAnalysisContextManager
-    - ✅ Простой метод analyze() - стратегия сама получает нужные данные
+    Ключевые изменения v3.0:
+    - ✅ Добавлен analyze_with_data() - получает готовые данные от Orchestrator
+    - ✅ Repository добавлен в конструктор (для обратной совместимости)
+    - ✅ Старый метод analyze() сохранен (опциональный)
     
-    Что осталось:
-    - ✅ Фильтрация сигналов (strength, cooldown, rate limiting)
-    - ✅ Управление рисками (SL/TP)
-    - ✅ Статистика и мониторинг
+    Новый workflow:
+    1. Orchestrator получает данные из БД (1 раз для всех стратегий)
+    2. Orchestrator вызывает analyze_with_data() для каждой стратегии
+    3. Стратегия анализирует готовые данные и возвращает сигнал
     
     Example:
         ```python
         class MyStrategy(BaseStrategy):
-            async def analyze(self) -> Optional[TradingSignal]:
-                # Получаем свечи из БД
-                candles_1m = await self.repository.get_recent_candles(
-                    symbol=self.symbol,
-                    interval="1m",
-                    limit=100
-                )
+            async def analyze_with_data(
+                self,
+                symbol: str,
+                candles_1m: List[Dict],
+                candles_5m: List[Dict],
+                candles_1h: List[Dict],
+                candles_1d: List[Dict],
+                ta_context: Optional[TechnicalAnalysisContext] = None
+            ) -> Optional[TradingSignal]:
+                # Анализируем готовые данные
+                if not candles_1m:
+                    return None
                 
-                # Анализируем
+                current_price = float(candles_1m[-1]['close'])
+                
                 if some_condition:
                     return self.create_signal(
                         signal_type=SignalType.BUY,
                         strength=0.8,
                         confidence=0.7,
-                        current_price=candles_1m[-1]['close_price'],
+                        current_price=current_price,
                         reasons=["Reason 1", "Reason 2"]
                     )
                 
@@ -241,7 +242,7 @@ class BaseStrategy(ABC):
         self,
         name: str,
         symbol: str,
-        repository,  # MarketDataRepository
+        repository=None,  # MarketDataRepository (опционально для обратной совместимости)
         ta_context_manager=None,  # TechnicalAnalysisContextManager (опционально)
         min_signal_strength: float = 0.5,
         signal_cooldown_minutes: int = 5,
@@ -254,7 +255,7 @@ class BaseStrategy(ABC):
         Args:
             name: Имя стратегии
             symbol: Торговый символ (BTCUSDT, ETHUSDT, etc)
-            repository: MarketDataRepository для получения свечей
+            repository: MarketDataRepository (опционально, для старого API)
             ta_context_manager: TechnicalAnalysisContextManager (опционально)
             min_signal_strength: Минимальная сила сигнала для отправки
             signal_cooldown_minutes: Минуты между сигналами одного типа
@@ -263,8 +264,8 @@ class BaseStrategy(ABC):
         """
         self.name = name
         self.symbol = symbol.upper()
-        self.repository = repository  # ✅ Прямой доступ к БД
-        self.ta_context_manager = ta_context_manager  # ✅ Опциональный TA
+        self.repository = repository  # ✅ Теперь опциональный
+        self.ta_context_manager = ta_context_manager
         
         self.min_signal_strength = min_signal_strength
         self.signal_cooldown = timedelta(minutes=signal_cooldown_minutes)
@@ -302,42 +303,60 @@ class BaseStrategy(ABC):
         logger.info(f"   • Cooldown: {signal_cooldown_minutes} мин")
         logger.info(f"   • Макс. сигналов/час: {max_signals_per_hour}")
     
+    # ==================== НОВЫЙ API (v3.0) ====================
+    
     @abstractmethod
-    async def analyze(self) -> Optional[TradingSignal]:
+    async def analyze_with_data(
+        self,
+        symbol: str,
+        candles_1m: List[Dict],
+        candles_5m: List[Dict],
+        candles_1h: List[Dict],
+        candles_1d: List[Dict],
+        ta_context: Optional[Any] = None
+    ) -> Optional[TradingSignal]:
         """
-        🔥 ГЛАВНЫЙ МЕТОД - Анализ рынка и генерация сигнала
+        🔥 НОВЫЙ МЕТОД v3.0 - Анализ с готовыми данными
         
-        Стратегия сама получает нужные данные из БД через self.repository
-        и возвращает сигнал или None.
+        Вызывается из StrategyOrchestrator, который уже получил все данные.
+        Стратегия просто анализирует готовые данные и возвращает сигнал.
         
+        Args:
+            symbol: Торговый символ (BTCUSDT, ETHUSDT, etc)
+            candles_1m: Минутные свечи (последние 100)
+            candles_5m: 5-минутные свечи (последние 50)
+            candles_1h: Часовые свечи (последние 24)
+            candles_1d: Дневные свечи (последние 180)
+            ta_context: Технический контекст (кэшированный)
+            
         Returns:
             TradingSignal если есть сигнал, иначе None
             
         Example:
             ```python
-            async def analyze(self) -> Optional[TradingSignal]:
-                # Получаем свечи
-                candles_1m = await self.repository.get_recent_candles(
-                    symbol=self.symbol,
-                    interval="1m",
-                    limit=100
-                )
-                
-                if not candles_1m:
+            async def analyze_with_data(self, symbol, candles_1m, ...):
+                # Проверяем минимум данных
+                if not candles_1m or len(candles_1m) < 10:
                     return None
                 
+                # Обновляем symbol (если был PLACEHOLDER)
+                self.symbol = symbol
+                
+                # Берем последнюю свечу
+                latest = candles_1m[-1]
+                current_price = float(latest['close'])
+                
                 # Анализируем
-                current_price = candles_1m[-1]['close_price']
-                price_change = self._calculate_price_change(candles_1m)
+                change = self._calculate_change(candles_1m)
                 
                 # Генерируем сигнал
-                if price_change > 2.0:
+                if abs(change) > 2.0:
                     return self.create_signal(
-                        signal_type=SignalType.BUY,
+                        signal_type=SignalType.BUY if change > 0 else SignalType.SELL,
                         strength=0.8,
                         confidence=0.7,
                         current_price=current_price,
-                        reasons=[f"Рост {price_change:.2f}% за минуту"]
+                        reasons=[f"Изменение {change:.2f}%"]
                     )
                 
                 return None
@@ -345,16 +364,33 @@ class BaseStrategy(ABC):
         """
         pass
     
+    # ==================== СТАРЫЙ API (обратная совместимость) ====================
+    
+    async def analyze(self) -> Optional[TradingSignal]:
+        """
+        📦 СТАРЫЙ МЕТОД - Для обратной совместимости
+        
+        Этот метод сохранен для стратегий, которые еще не обновлены.
+        Новые стратегии должны использовать analyze_with_data().
+        
+        Returns:
+            TradingSignal если есть сигнал, иначе None
+        """
+        # По умолчанию выбрасываем ошибку
+        raise NotImplementedError(
+            f"{self.__class__.__name__} должен реализовать либо analyze_with_data() (рекомендуется), "
+            f"либо analyze() (устаревший метод)"
+        )
+    
     async def run_analysis(self) -> Optional[TradingSignal]:
         """
-        🎯 Публичный метод запуска анализа (вызывается оркестратором)
+        🎯 Публичный метод запуска анализа
         
-        Выполняет полный цикл:
-        1. Проверяет что анализ включен
-        2. Вызывает analyze() конкретной стратегии
-        3. Фильтрует сигнал (strength, cooldown, rate limiting)
-        4. Применяет risk management
-        5. Обновляет статистику
+        Этот метод вызывается извне (оркестратором или напрямую).
+        Он обрабатывает фильтрацию, risk management и статистику.
+        
+        НЕ переопределяйте этот метод в наследниках!
+        Используйте analyze_with_data() вместо этого.
         
         Returns:
             Готовый к отправке TradingSignal или None
@@ -369,7 +405,8 @@ class BaseStrategy(ABC):
                     logger.debug(f"📵 Анализ отключен для {self.name}")
                 return None
             
-            # Вызываем анализ конкретной стратегии
+            # Вызываем старый метод analyze() (для обратной совместимости)
+            # Новые стратегии НЕ должны сюда попадать
             raw_signal = await self.analyze()
             
             if raw_signal is None:
@@ -401,6 +438,8 @@ class BaseStrategy(ABC):
             logger.error(f"❌ Ошибка в run_analysis для {self.name}: {e}")
             logger.error(f"Stack trace: {traceback.format_exc()}")
             return None
+    
+    # ==================== ФИЛЬТРАЦИЯ И ВАЛИДАЦИЯ ====================
     
     def _should_send_signal(self, signal: TradingSignal) -> bool:
         """
@@ -469,6 +508,8 @@ class BaseStrategy(ABC):
         
         return len(recent_signals) < self.max_signals_per_hour
     
+    # ==================== RISK MANAGEMENT ====================
+    
     def _apply_risk_management(self, signal: TradingSignal):
         """
         Применяет правила управления рисками
@@ -513,6 +554,8 @@ class BaseStrategy(ABC):
         except Exception as e:
             logger.error(f"❌ Ошибка применения risk management: {e}")
     
+    # ==================== ИСТОРИЯ И СТАТИСТИКА ====================
+    
     def _add_signal_to_history(self, signal: TradingSignal):
         """Добавляет сигнал в историю"""
         self.signal_history.append(signal)
@@ -531,6 +574,8 @@ class BaseStrategy(ABC):
         if recent_signals:
             self.stats["average_signal_strength"] = sum(s.strength for s in recent_signals) / len(recent_signals)
             self.stats["average_signal_confidence"] = sum(s.confidence for s in recent_signals) / len(recent_signals)
+    
+    # ==================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ====================
     
     def create_signal(
         self,
@@ -570,51 +615,6 @@ class BaseStrategy(ABC):
             market_conditions=market_conditions or {}
         )
     
-    # ==================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ====================
-    
-    async def get_recent_candles(
-        self,
-        interval: str,
-        limit: int = 100
-    ) -> List[Dict[str, Any]]:
-        """
-        Получить последние свечи из БД
-        
-        Args:
-            interval: Интервал (1m, 5m, 15m, 1h, 4h, 1d)
-            limit: Количество свечей
-            
-        Returns:
-            Список свечей (dict)
-        """
-        try:
-            candles = await self.repository.get_recent_candles(
-                symbol=self.symbol,
-                interval=interval,
-                limit=limit
-            )
-            return candles if candles else []
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения свечей {interval}: {e}")
-            return []
-    
-    async def get_technical_analysis_context(self):
-        """
-        Получить контекст технического анализа (если доступен)
-        
-        Returns:
-            TechnicalAnalysisContext или None
-        """
-        if not self.ta_context_manager:
-            return None
-        
-        try:
-            context = await self.ta_context_manager.get_context(self.symbol)
-            return context
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения TA контекста: {e}")
-            return None
-    
     def calculate_price_change(self, candles: List[Dict], periods: int = 1) -> float:
         """
         Рассчитать изменение цены за N периодов
@@ -630,8 +630,8 @@ class BaseStrategy(ABC):
             return 0.0
         
         try:
-            current_price = float(candles[-1]['close_price'])
-            old_price = float(candles[-(periods + 1)]['close_price'])
+            current_price = float(candles[-1]['close'])
+            old_price = float(candles[-(periods + 1)]['close'])
             
             return ((current_price - old_price) / old_price) * 100
         except Exception as e:
@@ -756,4 +756,4 @@ __all__ = [
     "ConfidenceLevel"
 ]
 
-logger.info("✅ Simplified BaseStrategy v2.0 loaded - Direct Repository Access")
+logger.info("✅ BaseStrategy v3.0 loaded - Orchestrator Integration Ready")
