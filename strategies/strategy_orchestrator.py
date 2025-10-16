@@ -14,7 +14,7 @@ Architecture:
 - SignalManager -> обработка и рассылка
 
 Author: Trading Bot Team
-Version: 3.0.1 - FIXED: Removed MomentumStrategy
+Version: 3.0.2 - FIXED: Removed interval parameter from get_context()
 """
 
 import asyncio
@@ -417,9 +417,9 @@ class StrategyOrchestrator:
             logger.debug(f"📊 Анализ {symbol}...")
             
             # ШАГ 1: Получаем технический контекст (кэшированный)
+            # ✅ ИСПРАВЛЕНО: Убран параметр interval
             ta_context = await self.ta_context_manager.get_context(
-                symbol=symbol,
-                interval="1h"  # Основной интервал для контекста
+                symbol=symbol
             )
             
             if not ta_context:
