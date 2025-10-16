@@ -24,7 +24,7 @@ False Breakout Strategy v3.0 - Стратегия торговли ложных 
 5. ✅ Подходящие рыночные условия
 
 Author: Trading Bot Team
-Version: 3.0.0 - Orchestrator Integration
+Version: 3.0.1 - FIXED: KeyError 'close' -> 'close_price'
 """
 
 import logging
@@ -43,11 +43,10 @@ class FalseBreakoutStrategy(BaseStrategy):
     Ловит развороты после того как крупный игрок "поймал стопы" мелких трейдеров.
     Торгует ПРОТИВ направления ложного пробоя.
     
-    Изменения v3.0:
-    - ✅ Реализован analyze_with_data() - получает готовые данные
-    - ✅ Убрана зависимость от MarketDataSnapshot
-    - ✅ Работа напрямую со свечами из параметров
-    - ✅ Упрощенная логика без BreakoutAnalyzer (прямые проверки)
+    Изменения v3.0.1:
+    - ✅ ИСПРАВЛЕНО: KeyError 'close' -> используем 'close_price'
+    - ✅ ИСПРАВЛЕНО: KeyError 'high' -> используем 'high_price'
+    - ✅ ИСПРАВЛЕНО: KeyError 'low' -> используем 'low_price'
     
     Сильные стороны:
     - Высокая точность (уровень проверен ЛП)
@@ -172,7 +171,7 @@ class FalseBreakoutStrategy(BaseStrategy):
             "filtered_by_level_strength": 0
         }
         
-        logger.info("🎣 FalseBreakoutStrategy v3.0 инициализирована")
+        logger.info("🎣 FalseBreakoutStrategy v3.0.1 инициализирована (FIXED)")
         logger.info(f"   • Symbol: {symbol}")
         logger.info(f"   • Min level strength: {min_level_strength}")
         logger.info(f"   • FB depth: {min_false_breakout_depth_percent}-{max_false_breakout_depth_percent}%")
@@ -228,8 +227,8 @@ class FalseBreakoutStrategy(BaseStrategy):
                     logger.debug(f"⚠️ {symbol}: недостаточно D1 свечей")
                 return None
             
-            # Текущая цена из последней M5 свечи
-            current_price = float(candles_5m[-1]['close'])
+            # ✅ ИСПРАВЛЕНО: используем 'close_price' вместо 'close'
+            current_price = float(candles_5m[-1]['close_price'])
             current_time = datetime.now()
             
             # Шаг 1: Проверка технического контекста
@@ -453,9 +452,11 @@ class FalseBreakoutStrategy(BaseStrategy):
             
             for i in range(len(recent_candles) - 1, 0, -1):  # С конца к началу
                 candle = recent_candles[i]
-                high = float(candle['high'])
-                low = float(candle['low'])
-                close = float(candle['close'])
+                
+                # ✅ ИСПРАВЛЕНО: используем 'high_price', 'low_price', 'close_price'
+                high = float(candle['high_price'])
+                low = float(candle['low_price'])
+                close = float(candle['close_price'])
                 
                 # Проверяем пробой сопротивления (вверх)
                 if level_type == "resistance":
@@ -991,4 +992,4 @@ class FalseBreakoutStrategy(BaseStrategy):
 # Export
 __all__ = ["FalseBreakoutStrategy"]
 
-logger.info("✅ False Breakout Strategy v3.0 loaded - Orchestrator Integration Ready")
+logger.info("✅ False Breakout Strategy v3.0.1 loaded (FIXED: KeyError resolved)")
