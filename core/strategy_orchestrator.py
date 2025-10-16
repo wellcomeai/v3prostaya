@@ -1,32 +1,44 @@
+"""
+Simplified Strategy Orchestrator v2.0
+
+Упрощенный оркестратор стратегий без MarketDataSnapshot и DataSourceAdapter.
+Стратегии работают напрямую с Repository и сами получают нужные данные.
+
+Ключевые изменения:
+- ❌ Убрана зависимость от MarketDataSnapshot
+- ❌ Убрана зависимость от DataSourceAdapter
+- ❌ Убрана зависимость от MarketDataManager
+- ✅ Прямая работа с Repository
+- ✅ Простой цикл анализа (каждые 60 секунд)
+- ✅ Стратегии сами получают данные
+- ✅ Сохранены все фильтры и мониторинг
+
+Author: Trading Bot Team
+Version: 2.0.0 - Simplified Architecture
+"""
+
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Set, Callable, Union
+from typing import Dict, Any, List, Optional, Set, Callable
 from enum import Enum
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
 import traceback
-import weakref
-
-# ✅ ИЗМЕНЕНИЕ 1: Импорты - сделаны опциональными для избежания циклических зависимостей
-from market_data import MarketDataSnapshot
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from market_data import MarketDataManager
-    from .data_source_adapter import DataSourceAdapter
 
 from strategies import BaseStrategy, TradingSignal, MomentumStrategy, get_available_strategies, create_strategy
 from .signal_manager import SignalManager
-from .data_models import SystemConfig, StrategyConfig, SignalMetrics, MarketCondition
+from .data_models import SystemConfig, StrategyConfig
 
 logger = logging.getLogger(__name__)
 
 
+# ==================== ENUMS ====================
+
 class OrchestratorStatus(Enum):
     """Статусы оркестратора"""
     STOPPED = "stopped"
-    STARTING = "starting"  
+    STARTING = "starting"
     RUNNING = "running"
     STOPPING = "stopping"
     ERROR = "error"
@@ -43,9 +55,15 @@ class StrategyStatus(Enum):
     STOPPED = "stopped"
 
 
+# ==================== STRATEGY INSTANCE ====================
+
 @dataclass
 class StrategyInstance:
-    """Экземпляр стратегии с метаданными"""
+    """
+    Экземпляр стратегии с метаданными
+    
+    Содержит саму стратегию и всю статистику её работы
+    """
     strategy: BaseStrategy
     config: StrategyConfig
     status: StrategyStatus = StrategyStatus.INACTIVE
@@ -125,57 +143,66 @@ class StrategyInstance:
         }
 
 
+# ==================== STRATEGY ORCHESTRATOR ====================
+
 class StrategyOrchestrator:
     """
-    Оркестратор торговых стратегий
+    🚀 Упрощенный оркестратор торговых стратегий v2.0
     
-    Основные функции:
-    1. Управление жизненным циклом стратегий
-    2. Координация получения и анализа рыночных данных
-    3. Передача сигналов в SignalManager
-    4. Мониторинг производительности
-    5. Балансировка нагрузки
-    6. Error recovery и health monitoring
+    Ключевые изменения:
+    - ❌ Нет MarketDataSnapshot
+    - ❌ Нет DataSourceAdapter
+    - ❌ Нет MarketDataManager
+    - ✅ Простой цикл: каждые 60 секунд вызываем analyze() у стратегий
+    - ✅ Стратегии сами получают данные из БД через repository
+    
+    Что осталось:
+    - ✅ Управление жизненным циклом стратегий
+    - ✅ Передача сигналов в SignalManager
+    - ✅ Мониторинг производительности
+    - ✅ Error recovery
+    - ✅ Health monitoring
+    
+    Usage:
+        ```python
+        orchestrator = StrategyOrchestrator(
+            signal_manager=signal_manager,
+            repository=repository,
+            ta_context_manager=ta_context_manager,  # Опционально
+            system_config=system_config,
+            analysis_interval=60.0  # Каждую минуту
+        )
+        
+        await orchestrator.start()
+        ```
     """
     
-    # ✅ ИЗМЕНЕНИЕ 2: Конструктор - market_data_manager теперь опционален, добавлены новые параметры
-    def __init__(self, 
-                 signal_manager: SignalManager,
-                 market_data_manager: Optional['MarketDataManager'] = None,
-                 data_source_adapter: Optional['DataSourceAdapter'] = None,
-                 ta_context_manager = None,
-                 system_config: Optional[SystemConfig] = None,
-                 analysis_interval: float = 30.0,  # секунд между анализами
-                 max_concurrent_analyses: int = 5,
-                 enable_performance_monitoring: bool = True):
+    def __init__(
+        self,
+        signal_manager: SignalManager,
+        repository,  # MarketDataRepository
+        ta_context_manager=None,  # TechnicalAnalysisContextManager (опционально)
+        system_config: Optional[SystemConfig] = None,
+        analysis_interval: float = 60.0,  # Секунд между анализами
+        max_concurrent_analyses: int = 5,
+        enable_performance_monitoring: bool = True
+    ):
         """
         Инициализация оркестратора
         
         Args:
             signal_manager: Менеджер сигналов
-            market_data_manager: Менеджер рыночных данных (WebSocket, опционально)
-            data_source_adapter: Адаптер источника данных (REST API, опционально)
+            repository: MarketDataRepository для доступа к БД
             ta_context_manager: Менеджер технического анализа (опционально)
             system_config: Конфигурация системы
-            analysis_interval: Интервал между анализами в секундах
+            analysis_interval: Интервал между анализами в секундах (по умолчанию 60с)
             max_concurrent_analyses: Максимум одновременных анализов
             enable_performance_monitoring: Включить мониторинг производительности
         """
-        # ✅ ИЗМЕНЕНИЕ 3: НОВАЯ ЛОГИКА - Поддержка обоих источников данных
-        self.market_data_manager = market_data_manager
-        self.data_source_adapter = data_source_adapter
-        self.ta_context_manager = ta_context_manager
         self.signal_manager = signal_manager
+        self.repository = repository
+        self.ta_context_manager = ta_context_manager
         self.system_config = system_config
-        
-        # Определяем активный источник данных
-        if not market_data_manager and not data_source_adapter:
-            raise ValueError("Необходим либо market_data_manager либо data_source_adapter!")
-        
-        self.data_source = market_data_manager if market_data_manager else data_source_adapter
-        self.using_adapter = data_source_adapter is not None and market_data_manager is None
-        
-        logger.info(f"📊 Источник данных: {'DataSourceAdapter (REST API)' if self.using_adapter else 'MarketDataManager (WebSocket)'}")
         
         # Настройки работы
         self.analysis_interval = analysis_interval
@@ -194,9 +221,8 @@ class StrategyOrchestrator:
         self.background_tasks: List[asyncio.Task] = []
         self.analysis_task: Optional[asyncio.Task] = None
         
-        # Очередь анализов и семафор для ограничения параллелизма
+        # Семафор для ограничения параллелизма
         self.analysis_semaphore = asyncio.Semaphore(max_concurrent_analyses)
-        self.analysis_queue: asyncio.Queue = asyncio.Queue()
         
         # Метрики и статистика
         self.stats = {
@@ -211,8 +237,7 @@ class StrategyOrchestrator:
             "strategies_active": 0,
             "strategies_failed": 0,
             "analysis_cycles": 0,
-            "average_cycle_time": 0.0,
-            "data_updates_received": 0
+            "average_cycle_time": 0.0
         }
         
         # История производительности (последние 100 циклов)
@@ -221,10 +246,13 @@ class StrategyOrchestrator:
         # Callback'и для событий
         self.event_callbacks: Dict[str, List[Callable]] = defaultdict(list)
         
-        logger.info(f"🎭 StrategyOrchestrator инициализирован")
+        logger.info(f"🎭 StrategyOrchestrator v2.0 инициализирован")
         logger.info(f"   • Интервал анализа: {analysis_interval}с")
         logger.info(f"   • Макс. параллельных анализов: {max_concurrent_analyses}")
-        logger.info(f"   • Мониторинг производительности: {enable_performance_monitoring}")
+        logger.info(f"   • Repository: {'✓' if repository else '✗'}")
+        logger.info(f"   • TechnicalAnalysis: {'✓' if ta_context_manager else '✗'}")
+    
+    # ==================== LIFECYCLE MANAGEMENT ====================
     
     async def start(self) -> bool:
         """
@@ -235,24 +263,13 @@ class StrategyOrchestrator:
         """
         try:
             if self.status != OrchestratorStatus.STOPPED:
-                logger.warning(f"⚠️ Оркестратор уже запущен или запускается (статус: {self.status.value})")
+                logger.warning(f"⚠️ Оркестратор уже запущен (статус: {self.status.value})")
                 return False
             
-            logger.info("🚀 Запуск StrategyOrchestrator...")
+            logger.info("🚀 Запуск StrategyOrchestrator v2.0...")
             self.status = OrchestratorStatus.STARTING
             self.is_running = True
             self.stats["start_time"] = datetime.now()
-            
-            # ✅ ИЗМЕНЕНИЕ 4: Подписываемся на правильный источник данных
-            if self.using_adapter:
-                # Используем адаптер - запускаем его обновления
-                self.data_source_adapter.add_data_subscriber(self._on_market_data_update)
-                await self.data_source_adapter.start_updates(update_interval=60.0)
-                logger.info("✅ Подписались на обновления через DataSourceAdapter")
-            else:
-                # Используем WebSocket
-                self.market_data_manager.add_data_subscriber(self._on_market_data_update)
-                logger.info("✅ Подписались на обновления через MarketDataManager")
             
             # Загружаем стратегии из конфигурации
             await self._load_strategies()
@@ -306,25 +323,9 @@ class StrategyOrchestrator:
                 await asyncio.gather(*self.background_tasks, return_exceptions=True)
                 logger.info("✅ Фоновые задачи остановлены")
             
-            # ✅ ИЗМЕНЕНИЕ 5: Правильно отписываемся от источника данных
-            if self.using_adapter:
-                await self.data_source_adapter.stop_updates()
-                self.data_source_adapter.remove_data_subscriber(self._on_market_data_update)
-                logger.info("✅ Отписались от DataSourceAdapter")
-            else:
-                self.market_data_manager.remove_data_subscriber(self._on_market_data_update)
-                logger.info("✅ Отписались от MarketDataManager")
-            
             # Деактивируем все стратегии
             for strategy_instance in self.strategy_instances.values():
                 strategy_instance.status = StrategyStatus.STOPPED
-            
-            # Очищаем очередь анализов
-            while not self.analysis_queue.empty():
-                try:
-                    self.analysis_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
             
             # Финальная статистика
             await self._log_final_statistics()
@@ -338,6 +339,8 @@ class StrategyOrchestrator:
         except Exception as e:
             logger.error(f"❌ Ошибка при остановке StrategyOrchestrator: {e}")
             self.status = OrchestratorStatus.ERROR
+    
+    # ==================== STRATEGY MANAGEMENT ====================
     
     async def _load_strategies(self):
         """Загружает и инициализирует стратегии из конфигурации"""
@@ -398,8 +401,7 @@ class StrategyOrchestrator:
                     "impulse_1m_threshold": 1.5,
                     "impulse_5m_threshold": 2.0,
                     "high_volume_threshold": 20000,
-                    "enable_volume_analysis": True,
-                    "enable_orderbook_analysis": True
+                    "enable_volume_analysis": True
                 }
             )
             
@@ -429,10 +431,13 @@ class StrategyOrchestrator:
             # Определяем тип стратегии
             strategy_type = config.name.lower().replace("strategy", "")
             
-            # Создаем стратегию
+            # Создаем стратегию (теперь с repository и ta_context_manager)
             if strategy_type == "momentum":
                 strategy = MomentumStrategy(
+                    name=config.name,
                     symbol=config.symbol,
+                    repository=self.repository,  # ✅ Передаем repository
+                    ta_context_manager=self.ta_context_manager,  # ✅ Опционально
                     min_signal_strength=config.min_signal_strength,
                     signal_cooldown_minutes=config.signal_cooldown_minutes,
                     max_signals_per_hour=config.max_signals_per_hour,
@@ -441,7 +446,12 @@ class StrategyOrchestrator:
             else:
                 # Пытаемся создать через фабрику стратегий
                 try:
-                    strategy = create_strategy(strategy_type, **config.strategy_params)
+                    strategy = create_strategy(
+                        strategy_type,
+                        repository=self.repository,
+                        ta_context_manager=self.ta_context_manager,
+                        **config.strategy_params
+                    )
                 except Exception as e:
                     logger.error(f"❌ Неизвестный тип стратегии: {strategy_type}, ошибка: {e}")
                     return None
@@ -462,67 +472,31 @@ class StrategyOrchestrator:
             
         except Exception as e:
             logger.error(f"❌ Ошибка создания стратегии {config.name}: {e}")
+            logger.error(traceback.format_exc())
             return None
     
-    async def _start_background_tasks(self):
-        """Запускает фоновые задачи"""
-        try:
-            # Задача мониторинга производительности
-            if self.enable_performance_monitoring:
-                performance_task = asyncio.create_task(self._performance_monitoring_task())
-                self.background_tasks.append(performance_task)
-                logger.info("📊 Запущен мониторинг производительности")
-            
-            # Задача проверки здоровья стратегий
-            health_task = asyncio.create_task(self._health_monitoring_task())
-            self.background_tasks.append(health_task)
-            logger.info("🏥 Запущен мониторинг здоровья стратегий")
-            
-            # Задача периодической статистики
-            stats_task = asyncio.create_task(self._statistics_task())
-            self.background_tasks.append(stats_task)
-            logger.info("📈 Запущена задача статистики")
-            
-            logger.info(f"🔄 Запущено {len(self.background_tasks)} фоновых задач")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка запуска фоновых задач: {e}")
-    
-    def _on_market_data_update(self, market_data: MarketDataSnapshot):
-        """Callback для обновлений рыночных данных"""
-        try:
-            self.stats["data_updates_received"] += 1
-            
-            # Добавляем данные в очередь для анализа (неблокирующий)
-            try:
-                self.analysis_queue.put_nowait(market_data)
-            except asyncio.QueueFull:
-                logger.warning("⚠️ Очередь анализа переполнена, пропускаем обновление")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки обновления данных: {e}")
+    # ==================== ANALYSIS LOOP ====================
     
     async def _analysis_loop(self):
-        """Основной цикл анализа рыночных данных"""
-        logger.info("🔄 Запущен основной цикл анализа")
+        """
+        🔄 Основной цикл анализа (упрощенный)
+        
+        Простая логика:
+        1. Каждые N секунд (analysis_interval)
+        2. Запускаем analyze() у всех активных стратегий
+        3. Стратегии сами получают данные из БД
+        4. Отправляем сигналы в SignalManager
+        """
+        logger.info("🔄 Запущен основной цикл анализа (упрощенный v2.0)")
+        logger.info(f"   • Интервал: {self.analysis_interval}с")
+        logger.info(f"   • Стратегии сами получают данные из БД")
         
         while self.is_running and not self.shutdown_event.is_set():
             try:
                 cycle_start_time = datetime.now()
                 
-                # ✅ ИЗМЕНЕНИЕ 6: Получаем данные из правильного источника
-                if self.using_adapter:
-                    # Используем адаптер (REST API based)
-                    market_data = await self.data_source.get_market_snapshot()
-                else:
-                    # Используем WebSocket
-                    market_data = await self.data_source.get_market_snapshot()
-                
-                if market_data:
-                    # Запускаем анализ всех активных стратегий параллельно
-                    await self._analyze_all_strategies(market_data)
-                else:
-                    logger.warning("⚠️ Не удалось получить рыночные данные")
+                # Запускаем анализ всех активных стратегий
+                await self._analyze_all_strategies()
                 
                 # Обновляем статистику цикла
                 cycle_end_time = datetime.now()
@@ -544,8 +518,7 @@ class StrategyOrchestrator:
                     self.performance_history.append({
                         "timestamp": cycle_end_time,
                         "cycle_duration": cycle_duration,
-                        "strategies_analyzed": self._count_active_strategies(),
-                        "data_quality": market_data.data_quality if market_data else {}
+                        "strategies_analyzed": self._count_active_strategies()
                     })
                 
                 # Ждем до следующего цикла
@@ -564,8 +537,12 @@ class StrategyOrchestrator:
         
         logger.info("🛑 Основной цикл анализа остановлен")
     
-    async def _analyze_all_strategies(self, market_data: MarketDataSnapshot):
-        """Запускает анализ всех активных стратегий параллельно"""
+    async def _analyze_all_strategies(self):
+        """
+        Запускает анализ всех активных стратегий параллельно
+        
+        Каждая стратегия сама вызывает repository.get_recent_candles()
+        """
         try:
             active_strategies = [
                 instance for instance in self.strategy_instances.values()
@@ -577,7 +554,7 @@ class StrategyOrchestrator:
             
             # Создаем задачи для параллельного анализа
             analysis_tasks = [
-                asyncio.create_task(self._analyze_single_strategy(instance, market_data))
+                asyncio.create_task(self._analyze_single_strategy(instance))
                 for instance in active_strategies
             ]
             
@@ -616,14 +593,12 @@ class StrategyOrchestrator:
             logger.error(f"💥 Критическая ошибка в _analyze_all_strategies: {e}")
             self.stats["failed_analyses"] += 1
     
-    async def _analyze_single_strategy(self, strategy_instance: StrategyInstance, 
-                                     market_data: MarketDataSnapshot) -> Optional[TradingSignal]:
+    async def _analyze_single_strategy(self, strategy_instance: StrategyInstance) -> Optional[TradingSignal]:
         """
         Анализирует рынок одной стратегией
         
         Args:
             strategy_instance: Экземпляр стратегии
-            market_data: Рыночные данные
             
         Returns:
             TradingSignal если сгенерирован, None если нет
@@ -633,8 +608,8 @@ class StrategyOrchestrator:
         try:
             # Используем семафор для ограничения параллелизма
             async with self.analysis_semaphore:
-                # Вызываем анализ стратегии
-                signal = await strategy_instance.strategy.process_market_data(market_data)
+                # Вызываем run_analysis() - стратегия сама получит данные
+                signal = await strategy_instance.strategy.run_analysis()
                 
                 # Вычисляем время анализа
                 analysis_duration = (datetime.now() - analysis_start_time).total_seconds()
@@ -650,6 +625,32 @@ class StrategyOrchestrator:
             strategy_instance.record_error(str(e))
             logger.error(f"❌ Ошибка анализа стратегии {strategy_instance.strategy_name}: {e}")
             raise
+    
+    # ==================== BACKGROUND TASKS ====================
+    
+    async def _start_background_tasks(self):
+        """Запускает фоновые задачи"""
+        try:
+            # Задача мониторинга производительности
+            if self.enable_performance_monitoring:
+                performance_task = asyncio.create_task(self._performance_monitoring_task())
+                self.background_tasks.append(performance_task)
+                logger.info("📊 Запущен мониторинг производительности")
+            
+            # Задача проверки здоровья стратегий
+            health_task = asyncio.create_task(self._health_monitoring_task())
+            self.background_tasks.append(health_task)
+            logger.info("🏥 Запущен мониторинг здоровья стратегий")
+            
+            # Задача периодической статистики
+            stats_task = asyncio.create_task(self._statistics_task())
+            self.background_tasks.append(stats_task)
+            logger.info("📈 Запущена задача статистики")
+            
+            logger.info(f"🔄 Запущено {len(self.background_tasks)} фоновых задач")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка запуска фоновых задач: {e}")
     
     async def _performance_monitoring_task(self):
         """Задача мониторинга производительности"""
@@ -731,6 +732,8 @@ class StrategyOrchestrator:
                 logger.error(f"❌ Ошибка в задаче статистики: {e}")
                 await asyncio.sleep(300)
     
+    # ==================== HELPER METHODS ====================
+    
     def _analyze_performance(self) -> Optional[Dict[str, Any]]:
         """Анализирует производительность системы"""
         try:
@@ -738,7 +741,7 @@ class StrategyOrchestrator:
                 return None
             
             # Анализируем последние записи (за час)
-            recent_records = list(self.performance_history)[-20:]  # Последние 20 записей
+            recent_records = list(self.performance_history)[-20:]
             
             if len(recent_records) < 5:
                 return None
@@ -879,14 +882,13 @@ class StrategyOrchestrator:
             logger.info(f"   • Успешных анализов: {stats['successful_analyses']}")
             logger.info(f"   • Неудачных анализов: {stats['failed_analyses']}")
             logger.info(f"   • Сигналов сгенерировано: {stats['signals_generated']}")
-            logger.info(f"   • Обновлений данных получено: {stats['data_updates_received']}")
             logger.info(f"   • Стратегий загружено: {stats['strategies_loaded']}")
             logger.info(f"   • Успешность: {stats['success_rate']:.2f}%")
             
         except Exception as e:
             logger.error(f"❌ Ошибка логирования финальной статистики: {e}")
     
-    # Публичные методы управления
+    # ==================== PUBLIC API ====================
     
     def add_event_callback(self, event_name: str, callback: Callable):
         """Добавляет callback для события"""
@@ -903,15 +905,7 @@ class StrategyOrchestrator:
                 logger.warning(f"⚠️ Callback для события {event_name} не найден")
     
     async def add_strategy(self, config: StrategyConfig) -> bool:
-        """
-        Добавляет новую стратегию во время работы
-        
-        Args:
-            config: Конфигурация стратегии
-            
-        Returns:
-            True если стратегия добавлена успешно
-        """
+        """Добавляет новую стратегию во время работы"""
         try:
             if config.name in self.strategy_instances:
                 logger.warning(f"⚠️ Стратегия {config.name} уже существует")
@@ -936,15 +930,7 @@ class StrategyOrchestrator:
             return False
     
     async def remove_strategy(self, strategy_name: str) -> bool:
-        """
-        Удаляет стратегию
-        
-        Args:
-            strategy_name: Имя стратегии
-            
-        Returns:
-            True если стратегия удалена успешно
-        """
+        """Удаляет стратегию"""
         try:
             if strategy_name not in self.strategy_instances:
                 logger.warning(f"⚠️ Стратегия {strategy_name} не найдена")
@@ -1037,7 +1023,6 @@ class StrategyOrchestrator:
                 **base_stats,
                 "strategy_stats": strategy_stats,
                 "performance_stats": performance_stats,
-                "queue_size": self.analysis_queue.qsize(),
                 "background_tasks": len([t for t in self.background_tasks if not t.done()])
             }
             
@@ -1102,3 +1087,15 @@ class StrategyOrchestrator:
                 f"interval={self.analysis_interval}s, "
                 f"max_concurrent={self.max_concurrent_analyses}, "
                 f"monitoring={self.enable_performance_monitoring})")
+
+
+# ==================== EXPORTS ====================
+
+__all__ = [
+    "StrategyOrchestrator",
+    "StrategyInstance",
+    "OrchestratorStatus",
+    "StrategyStatus"
+]
+
+logger.info("✅ Simplified StrategyOrchestrator v2.0 loaded - Direct Repository Access")
