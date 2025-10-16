@@ -11,9 +11,8 @@ from config import Config
 
 # Модульная архитектура
 from market_data import MarketDataManager
-from core import SignalManager, StrategyOrchestrator, DataSourceAdapter
+from core import SignalManager, StrategyOrchestrator
 from core.data_models import SystemConfig, StrategyConfig, create_default_system_config
-from core.market_analyzer import MarketAnalyzer
 from strategies import MomentumStrategy
 
 # ✅ SimpleCandleSync для криптовалют (Bybit)
@@ -41,16 +40,15 @@ WEBHOOK_SECRET = "bybit_trading_bot_secret_2025"
 # URL вашего сервера
 BASE_WEBHOOK_URL = "https://bybitmybot.onrender.com"
 
-# ✅ Глобальные переменные с DataSourceAdapter и MarketAnalyzer
+# ✅ Глобальные переменные (упрощенная версия)
 bot_instance = None
-market_data_manager = None
+market_data_manager = None  # Опционально (WebSocket ticker)
 signal_manager = None
 strategy_orchestrator = None
 simple_candle_sync = None
 simple_futures_sync = None
 ta_context_manager = None
-data_source_adapter = None
-market_analyzer = None
+repository = None  # ✅ ДОБАВИТЬ
 system_config = None
 database_initialized = False
 
@@ -97,13 +95,12 @@ async def health_check(request):
         # Проверяем БД
         db_health = await get_database_health()
         
-        # ✅ Проверяем все компоненты включая DataSourceAdapter и MarketAnalyzer
+        # ✅ Проверяем все компоненты
         trading_system_status = {
             "simple_candle_sync": "inactive",
             "simple_futures_sync": "inactive",
             "ta_context_manager": "inactive",
-            "data_source_adapter": "inactive",
-            "market_analyzer": "inactive",
+            "repository": "inactive",  # ✅
             "market_data_manager": "inactive",
             "signal_manager": "inactive", 
             "strategy_orchestrator": "inactive",
@@ -134,21 +131,13 @@ async def health_check(request):
                 logger.warning(f"TechnicalAnalysisContextManager health check failed: {e}")
                 trading_system_status["ta_context_manager"] = "error"
         
-        # DataSourceAdapter статус
-        if data_source_adapter:
+        # ✅ Repository статус
+        if repository:
             try:
-                trading_system_status["data_source_adapter"] = "active"
+                trading_system_status["repository"] = "active"
             except Exception as e:
-                logger.warning(f"DataSourceAdapter health check failed: {e}")
-                trading_system_status["data_source_adapter"] = "error"
-        
-        # MarketAnalyzer статус
-        if market_analyzer:
-            try:
-                trading_system_status["market_analyzer"] = "active"
-            except Exception as e:
-                logger.warning(f"MarketAnalyzer health check failed: {e}")
-                trading_system_status["market_analyzer"] = "error"
+                logger.warning(f"Repository health check failed: {e}")
+                trading_system_status["repository"] = "error"
         
         if market_data_manager:
             try:
@@ -516,25 +505,16 @@ async def trading_system_status_handler(request):
                 logger.warning(f"Failed to get ta_context_manager stats: {e}")
                 response_data["ta_context_manager"] = {"error": str(e)}
         
-        # DataSourceAdapter статус
-        if data_source_adapter:
+        # ✅ Repository статус
+        if repository:
             try:
-                response_data["data_source_adapter"] = {
-                    "crypto_symbols": len(data_source_adapter.crypto_symbols),
-                    "futures_symbols": len(data_source_adapter.futures_symbols),
-                    "status": "active"
+                response_data["repository"] = {
+                    "status": "active",
+                    "type": "MarketDataRepository"
                 }
             except Exception as e:
-                logger.warning(f"Failed to get data_source_adapter stats: {e}")
-                response_data["data_source_adapter"] = {"error": str(e)}
-        
-        # MarketAnalyzer статус
-        if market_analyzer:
-            try:
-                response_data["market_analyzer"] = market_analyzer.get_stats()
-            except Exception as e:
-                logger.warning(f"Failed to get market_analyzer stats: {e}")
-                response_data["market_analyzer"] = {"error": str(e)}
+                logger.warning(f"Failed to get repository status: {e}")
+                response_data["repository"] = {"error": str(e)}
         
         # MarketDataManager статус
         if market_data_manager:
@@ -566,8 +546,7 @@ async def trading_system_status_handler(request):
                 "simple_candle_sync": simple_candle_sync.get_health_status() if simple_candle_sync else None,
                 "simple_futures_sync": simple_futures_sync.get_health_status() if simple_futures_sync else None,
                 "ta_context_manager": ta_context_manager.get_health_status() if ta_context_manager else None,
-                "data_source_adapter": "active" if data_source_adapter else None,
-                "market_analyzer": "active" if market_analyzer else None,
+                "repository": "active" if repository else None,
                 "market_data": market_data_manager.get_health_status() if market_data_manager else None,
                 "strategies": strategy_orchestrator.get_health_status() if strategy_orchestrator else None
             }
@@ -1057,25 +1036,20 @@ async def root_handler(request):
     """Root endpoint с информацией о системе"""
     try:
         system_info = {
-            "message": "Bybit Trading Bot v2.5 - DataSourceAdapter + MarketAnalyzer Edition",
+            "message": "Bybit Trading Bot v2.5 - Simplified Architecture v2.0",
             "features": [
                 "✅ PostgreSQL Database Integration",
                 "✅ Historical Data Storage", 
-                "✅ SimpleCandleSync - REST API Based Sync (Crypto)",
-                "✅ SimpleFuturesSync - YFinance REST API Sync (Futures)",
-                "✅ TechnicalAnalysisContextManager - Full TA Integration",
-                "🆕 DataSourceAdapter - Universal Data Provider",
-                "🆕 MarketAnalyzer - Comprehensive Market Analysis with AI",
-                "✅ Bybit WebSocket (Ticker Only - Optional)",
-                "✅ Strategy Orchestration System (Works WITHOUT WebSocket!)",
+                "✅ SimpleCandleSync - REST API Crypto Sync",
+                "✅ SimpleFuturesSync - YFinance Futures Sync",
+                "✅ TechnicalAnalysisContextManager",
+                "✅ Repository - Direct DB Access",
+                "✅ Strategy Orchestration (Simplified v2.0)",
                 "✅ Advanced Signal Management",
                 "✅ OpenAI Integration",
                 "✅ Telegram Notifications",
-                "✅ Historical Data Loading via API",
-                "✅ Backtesting Engine with Interactive Dashboard",
-                "✅ Dynamic Strategy Loading",
-                "✅ Smart Candle Aggregation",
-                "🚀 Production Ready - Maximum Reliability"
+                "✅ Backtesting Engine",
+                "🚀 Production Ready"
             ],
             "status": "active",
             "timestamp": datetime.now().isoformat(),
@@ -1083,8 +1057,8 @@ async def root_handler(request):
             "simple_candle_sync_active": bool(simple_candle_sync and simple_candle_sync.is_running),
             "simple_futures_sync_active": bool(simple_futures_sync and simple_futures_sync.is_running),
             "ta_context_manager_active": bool(ta_context_manager and ta_context_manager.is_running),
-            "data_source_adapter_active": bool(data_source_adapter),
-            "market_analyzer_active": bool(market_analyzer),
+            "repository_active": bool(repository),
+            "orchestrator_mode": "REST API (60s)",
             "environment": Config.ENVIRONMENT,
             "webhook_path": WEBHOOK_PATH,
             "api_endpoints": {
@@ -1130,23 +1104,6 @@ async def root_handler(request):
             except Exception as e:
                 logger.warning(f"Failed to get TechnicalAnalysisContextManager status: {e}")
         
-        if data_source_adapter:
-            try:
-                system_info["data_source_adapter_info"] = {
-                    "crypto_symbols": len(data_source_adapter.crypto_symbols),
-                    "futures_symbols": len(data_source_adapter.futures_symbols)
-                }
-            except Exception as e:
-                logger.warning(f"Failed to get DataSourceAdapter info: {e}")
-        
-        if market_analyzer:
-            try:
-                system_info["market_analyzer_info"] = {
-                    "status": "active"
-                }
-            except Exception as e:
-                logger.warning(f"Failed to get MarketAnalyzer info: {e}")
-        
         if market_data_manager:
             try:
                 system_info["market_data_status"] = market_data_manager.get_health_status().get("overall_status", "unknown")
@@ -1157,7 +1114,6 @@ async def root_handler(request):
         if strategy_orchestrator:
             try:
                 system_info["active_strategies"] = strategy_orchestrator._count_active_strategies()
-                system_info["orchestrator_mode"] = "WebSocket (real-time)" if market_data_manager else "REST API (1 min)"
             except Exception as e:
                 logger.warning(f"Failed to get active strategies count: {e}")
                 system_info["active_strategies"] = 0
@@ -1233,10 +1189,10 @@ async def on_shutdown(bot) -> None:
 
 
 async def cleanup_resources():
-    """Освобождение всех ресурсов включая DataSourceAdapter и MarketAnalyzer"""
+    """Освобождение всех ресурсов"""
     global bot_instance, market_data_manager, signal_manager, strategy_orchestrator
-    global simple_candle_sync, simple_futures_sync, ta_context_manager, data_source_adapter
-    global market_analyzer, database_initialized
+    global simple_candle_sync, simple_futures_sync, ta_context_manager, repository
+    global database_initialized
     
     try:
         # Останавливаем TechnicalAnalysisContextManager
@@ -1291,15 +1247,10 @@ async def cleanup_resources():
             except Exception as e:
                 logger.error(f"❌ Ошибка остановки MarketDataManager: {e}")
         
-        # DataSourceAdapter не требует явной остановки (нет фоновых задач)
-        if data_source_adapter:
-            logger.info("✅ DataSourceAdapter очищен")
-            data_source_adapter = None
-        
-        # MarketAnalyzer не требует явной остановки (нет фоновых задач)
-        if market_analyzer:
-            logger.info("✅ MarketAnalyzer очищен")
-            market_analyzer = None
+        # ✅ Repository очистка
+        if repository:
+            logger.info("✅ Repository очищен")
+            repository = None
         
         # Закрываем Telegram бот
         if bot_instance:
@@ -1361,13 +1312,13 @@ async def initialize_database_system():
 
 
 async def initialize_trading_system():
-    """Инициализация торговой системы с DataSourceAdapter + MarketAnalyzer"""
-    global market_data_manager, signal_manager, strategy_orchestrator
-    global simple_candle_sync, simple_futures_sync, ta_context_manager, data_source_adapter
-    global market_analyzer, system_config
+    """Инициализация торговой системы (упрощенная v2.0)"""
+    global signal_manager, strategy_orchestrator
+    global simple_candle_sync, simple_futures_sync, ta_context_manager
+    global repository, system_config
     
     try:
-        logger.info("🚀 Инициализация торговой системы с DataSourceAdapter + MarketAnalyzer...")
+        logger.info("🚀 Инициализация торговой системы (упрощенная v2.0)...")
         
         # Создаем конфигурацию системы
         system_config = create_default_system_config()
@@ -1375,15 +1326,19 @@ async def initialize_trading_system():
         system_config.bybit_testnet = Config.BYBIT_TESTNET
         system_config.default_symbol = Config.SYMBOL
         
-        # ШАГ 1: SimpleCandleSync для крипты (Bybit)
-        logger.info("🔄 Инициализация SimpleCandleSync для криптовалют...")
+        # ==================== ШАГ 1: Repository ====================
+        logger.info("📊 Инициализация Repository...")
         from database.repositories import get_market_data_repository
-        from bybit_client import BybitClient
         
         repository = await get_market_data_repository()
+        logger.info("✅ Repository инициализирован")
+        
+        # ==================== ШАГ 2: SimpleCandleSync ====================
+        logger.info("🔄 Инициализация SimpleCandleSync...")
+        from bybit_client import BybitClient
+        
         bybit_client = BybitClient()
         
-        # Создаем SimpleCandleSync
         simple_candle_sync = SimpleCandleSync(
             symbols=Config.get_bybit_symbols(),
             bybit_client=bybit_client,
@@ -1391,18 +1346,14 @@ async def initialize_trading_system():
             check_gaps_on_start=True
         )
         
-        # Запускаем синхронизацию
         await simple_candle_sync.start()
-        logger.info("✅ SimpleCandleSync запущен и работает")
-        logger.info(f"   • Символы: {', '.join(Config.get_bybit_symbols())}")
-        logger.info(f"   • Интервалы: 1m, 5m, 15m, 1h, 4h, 1d")
+        logger.info("✅ SimpleCandleSync запущен")
         
-        # ШАГ 2: SimpleFuturesSync для фьючерсов (YFinance)
-        logger.info("🔄 Инициализация SimpleFuturesSync для фьючерсов...")
-        
+        # ==================== ШАГ 3: SimpleFuturesSync ====================
         futures_symbols = Config.get_yfinance_symbols() if hasattr(Config, 'get_yfinance_symbols') else []
         
         if futures_symbols:
+            logger.info("🔄 Инициализация SimpleFuturesSync...")
             simple_futures_sync = SimpleFuturesSync(
                 symbols=futures_symbols,
                 repository=repository,
@@ -1410,14 +1361,12 @@ async def initialize_trading_system():
             )
             
             await simple_futures_sync.start()
-            logger.info("✅ SimpleFuturesSync запущен и работает")
-            logger.info(f"   • Символы: {', '.join(futures_symbols)}")
-            logger.info(f"   • Интервалы: 1m, 5m, 15m, 1h, 4h, 1d")
+            logger.info("✅ SimpleFuturesSync запущен")
         else:
-            logger.info("⏭️ SimpleFuturesSync пропущен (нет фьючерсных символов в Config)")
+            logger.info("⏭️ SimpleFuturesSync пропущен")
             simple_futures_sync = None
         
-        # ШАГ 3: TechnicalAnalysisContextManager (КРИТИЧНО ДЛЯ СТРАТЕГИЙ!)
+        # ==================== ШАГ 4: TechnicalAnalysis ====================
         logger.info("🧠 Инициализация TechnicalAnalysisContextManager...")
         from strategies.technical_analysis import TechnicalAnalysisContextManager
         
@@ -1426,98 +1375,44 @@ async def initialize_trading_system():
             auto_start_background_updates=True
         )
         
-        # Запускаем фоновые обновления
         await ta_context_manager.start_background_updates()
-        
         logger.info("✅ TechnicalAnalysisContextManager запущен")
-        logger.info("   • Уровни D1: обновление каждые 24 часа")
-        logger.info("   • ATR: обновление каждый час")
-        logger.info("   • Свечи: обновление каждую минуту")
-        logger.info("   • Рыночные условия: обновление каждые 15 минут")
-        logger.info("   • Анализаторы: 5 (Levels, ATR, Patterns, Breakouts, Market)")
         
-        # ШАГ 4: MarketDataManager (ОПЦИОНАЛЬНО - только для WebSocket ticker)
-        if Config.BYBIT_WEBSOCKET_ENABLED:
-            logger.info("📊 Инициализация MarketDataManager (только WebSocket ticker)...")
-            market_data_manager = MarketDataManager(
-                symbols_crypto=Config.get_bybit_symbols(),
-                symbols_futures=[],
-                testnet=Config.BYBIT_TESTNET,
-                enable_bybit_websocket=True,
-                enable_yfinance_websocket=False,
-                enable_rest_api=False,
-                enable_candle_sync=False,
-                rest_cache_minutes=Config.REST_API_CACHE_MINUTES,
-                websocket_reconnect=Config.WEBSOCKET_RECONNECT_ENABLED
-            )
-            
-            market_data_started = await market_data_manager.start()
-            if market_data_started:
-                logger.info("✅ MarketDataManager (ticker only) активен")
-            else:
-                logger.warning("⚠️ MarketDataManager не запустился, продолжаем без WebSocket")
-                market_data_manager = None
-        else:
-            logger.info("⏭️ WebSocket отключен в конфиге, используем только SimpleCandleSync")
-            market_data_manager = None
+        # ==================== ШАГ 5: SignalManager ====================
+        logger.info("🎛️ Инициализация SignalManager...")
         
-        # ШАГ 4.5: DataSourceAdapter - СОЗДАЕМ ДО SignalManager
-        logger.info("🔌 Создание DataSourceAdapter...")
-        data_source_adapter = DataSourceAdapter(
-            ta_context_manager=ta_context_manager,
-            simple_candle_sync=simple_candle_sync,
-            simple_futures_sync=simple_futures_sync,
-            default_symbols=Config.get_bybit_symbols() + (Config.get_yfinance_symbols() if hasattr(Config, 'get_yfinance_symbols') else [])
-        )
-        logger.info("✅ DataSourceAdapter создан")
-        
-        # ШАГ 5: SignalManager с AI анализом
-        logger.info("🎛️ Инициализация SignalManager с OpenAI интеграцией...")
-        
-        # Создаем OpenAI анализатор
-        from openai_integration import OpenAIAnalyzer
-        openai_analyzer = OpenAIAnalyzer()
-        logger.info("🤖 OpenAI анализатор создан")
+        # OpenAI анализатор (опционально)
+        openai_analyzer = None
+        try:
+            from openai_integration import OpenAIAnalyzer
+            openai_analyzer = OpenAIAnalyzer()
+            logger.info("🤖 OpenAI анализатор создан")
+        except Exception as e:
+            logger.warning(f"⚠️ OpenAI недоступен: {e}")
         
         signal_manager = SignalManager(
             max_queue_size=1000,
             notification_settings=system_config.notification_settings,
-            data_source_adapter=data_source_adapter,
+            data_source_adapter=None,  # ❌ НЕ ИСПОЛЬЗУЕМ
             openai_analyzer=openai_analyzer
         )
         
-        # Запускаем менеджер сигналов
         await signal_manager.start()
         logger.info("✅ SignalManager запущен")
         
-        # ШАГ 6: StrategyOrchestrator
-        logger.info("🎭 Инициализация StrategyOrchestrator...")
+        # ==================== ШАГ 6: StrategyOrchestrator ====================
+        logger.info("🎭 Инициализация StrategyOrchestrator (v2.0)...")
         
-        # Определяем источник данных
-        if market_data_manager:
-            logger.info("   • Источник данных: MarketDataManager (WebSocket)")
-            strategy_orchestrator = StrategyOrchestrator(
-                signal_manager=signal_manager,
-                market_data_manager=market_data_manager,
-                ta_context_manager=ta_context_manager,
-                system_config=system_config,
-                analysis_interval=30.0,
-                max_concurrent_analyses=3,
-                enable_performance_monitoring=True
-            )
-        else:
-            logger.info("   • Источник данных: DataSourceAdapter (REST API)")
-            strategy_orchestrator = StrategyOrchestrator(
-                signal_manager=signal_manager,
-                data_source_adapter=data_source_adapter,
-                ta_context_manager=ta_context_manager,
-                system_config=system_config,
-                analysis_interval=60.0,
-                max_concurrent_analyses=3,
-                enable_performance_monitoring=True
-            )
+        strategy_orchestrator = StrategyOrchestrator(
+            signal_manager=signal_manager,
+            repository=repository,  # ✅ Прямой доступ к БД
+            ta_context_manager=ta_context_manager,  # ✅ Опционально
+            system_config=system_config,
+            analysis_interval=60.0,  # ✅ Каждую минуту
+            max_concurrent_analyses=3,
+            enable_performance_monitoring=True
+        )
         
-        # Запускаем оркестратор
         orchestrator_started = await strategy_orchestrator.start()
         if orchestrator_started:
             logger.info("✅ StrategyOrchestrator активен")
@@ -1525,98 +1420,35 @@ async def initialize_trading_system():
             logger.warning("⚠️ StrategyOrchestrator не запустился")
             strategy_orchestrator = None
         
-        # ШАГ 7: MarketAnalyzer (НОВЫЙ КОМПОНЕНТ)
-        logger.info("🔬 Инициализация MarketAnalyzer...")
-        
-        # Проверяем что все зависимости готовы
-        if not data_source_adapter:
-            logger.error("❌ DataSourceAdapter не создан - MarketAnalyzer не может быть инициализирован")
-            market_analyzer = None
-        elif not ta_context_manager:
-            logger.error("❌ TechnicalAnalysisContextManager не создан - MarketAnalyzer не может быть инициализирован")
-            market_analyzer = None
-        elif not openai_analyzer:
-            logger.error("❌ OpenAIAnalyzer не создан - MarketAnalyzer не может быть инициализирован")
-            market_analyzer = None
-        elif not strategy_orchestrator:
-            logger.error("❌ StrategyOrchestrator не создан - MarketAnalyzer не может быть инициализирован")
-            market_analyzer = None
-        else:
-            # Все зависимости готовы - создаем MarketAnalyzer
-            try:
-                market_analyzer = MarketAnalyzer(
-                    data_source_adapter=data_source_adapter,
-                    ta_context_manager=ta_context_manager,
-                    openai_analyzer=openai_analyzer,
-                    strategy_orchestrator=strategy_orchestrator
-                )
-                
-                logger.info("✅ MarketAnalyzer создан и готов к работе")
-                logger.info("   • Комплексный анализ рынка")
-                logger.info("   • AI прогнозирование")
-                logger.info("   • Мнения всех стратегий")
-                
-            except Exception as e:
-                logger.error(f"❌ Ошибка создания MarketAnalyzer: {e}")
-                logger.error(traceback.format_exc())
-                market_analyzer = None
-        
-        # ФИНАЛЬНАЯ СТАТИСТИКА
+        # ==================== ФИНАЛЬНАЯ СТАТИСТИКА ====================
         logger.info("=" * 70)
-        logger.info("✅ ТОРГОВАЯ СИСТЕМА ЗАПУЩЕНА УСПЕШНО!")
+        logger.info("✅ ТОРГОВАЯ СИСТЕМА ЗАПУЩЕНА (УПРОЩЕННАЯ v2.0)")
         logger.info("=" * 70)
-        logger.info(f"🔄 SimpleCandleSync (Crypto): ✅ АКТИВЕН")
-        logger.info(f"   • Символы: {len(Config.get_bybit_symbols())}")
-        logger.info(f"   • Интервалы: 6 (1m, 5m, 15m, 1h, 4h, 1d)")
-        
-        if simple_futures_sync:
-            logger.info(f"🔄 SimpleFuturesSync (Futures): ✅ АКТИВЕН")
-            logger.info(f"   • Символы: {len(futures_symbols)}")
-            logger.info(f"   • Интервалы: 6 (1m, 5m, 15m, 1h, 4h, 1d)")
-        else:
-            logger.info(f"🔄 SimpleFuturesSync: ❌ ОТКЛЮЧЕН")
-        
-        logger.info(f"🧠 TechnicalAnalysis: {'✅ АКТИВЕН' if ta_context_manager else '❌ ОТКЛЮЧЕН'}")
-        if ta_context_manager:
-            logger.info(f"   • Анализаторы: LevelAnalyzer, ATRCalculator, PatternDetector,")
-            logger.info(f"                 BreakoutAnalyzer, MarketConditionsAnalyzer")
-        
-        logger.info(f"🔌 DataSourceAdapter: {'✅ СОЗДАН' if data_source_adapter else '❌ НЕ СОЗДАН'}")
-        if data_source_adapter:
-            logger.info(f"   • Криптовалюты: {len(data_source_adapter.crypto_symbols)}")
-            logger.info(f"   • Фьючерсы: {len(data_source_adapter.futures_symbols)}")
-        
-        logger.info(f"🤖 OpenAI Analyzer: ✅ СОЗДАН")
-        logger.info(f"📊 WebSocket ticker: {'✅ АКТИВЕН' if market_data_manager else '❌ ОТКЛЮЧЕН'}")
-        logger.info(f"🎛️ SignalManager: ✅ АКТИВЕН (с AI поддержкой)")
+        logger.info(f"📊 Repository: ✅ АКТИВЕН")
+        logger.info(f"🔄 SimpleCandleSync: ✅ АКТИВЕН ({len(Config.get_bybit_symbols())} символов)")
+        logger.info(f"🔄 SimpleFuturesSync: {'✅ АКТИВЕН' if simple_futures_sync else '❌ ОТКЛЮЧЕН'}")
+        logger.info(f"🧠 TechnicalAnalysis: ✅ АКТИВЕН")
+        logger.info(f"🎛️ SignalManager: ✅ АКТИВЕН")
         logger.info(f"🎭 StrategyOrchestrator: {'✅ АКТИВЕН' if strategy_orchestrator else '❌ ОТКЛЮЧЕН'}")
-        if strategy_orchestrator:
-            logger.info(f"   • Режим: {'WebSocket (real-time)' if market_data_manager else 'REST API (1 min)'}")
-        
-        # MarketAnalyzer статус
-        logger.info(f"🔬 MarketAnalyzer: {'✅ СОЗДАН' if market_analyzer else '❌ НЕ СОЗДАН'}")
-        if market_analyzer:
-            logger.info(f"   • Комплексный анализ рынка")
-            logger.info(f"   • AI прогнозирование через OpenAI")
-            logger.info(f"   • Мнения {len(strategy_orchestrator.strategy_instances) if strategy_orchestrator else 0} стратегий")
-        
+        logger.info(f"   • Режим: REST API (60 секунд)")
+        logger.info(f"   • Стратегии сами получают данные из БД")
         logger.info("=" * 70)
         
         return True
         
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка инициализации торговой системы: {e}")
+        logger.error(f"❌ Критическая ошибка инициализации: {e}")
         logger.error(traceback.format_exc())
         return False
 
 
 async def create_app():
     """Создание веб-приложения"""
-    global bot_instance, market_analyzer
+    global bot_instance
     
     logger.info("=" * 60)
     logger.info("🚀 ЗАПУСК BYBIT TRADING BOT v2.5")
-    logger.info("   DataSourceAdapter + MarketAnalyzer Edition")
+    logger.info("   Simplified Architecture v2.0 Edition")
     logger.info("=" * 60)
     
     # ========== ШАГ 1: Инициализация базы данных ==========
@@ -1628,7 +1460,7 @@ async def create_app():
         else:
             logger.warning("⚠️ Продолжаем без базы данных (только для разработки)")
     
-    # ========== ШАГ 2: Инициализируем торговую систему (включая MarketAnalyzer) ==========
+    # ========== ШАГ 2: Инициализируем торговую систему ====================
     trading_system_started = await initialize_trading_system()
     if trading_system_started:
         logger.info("✅ Торговая система активна")
@@ -1637,28 +1469,22 @@ async def create_app():
         if futures_symbols:
             logger.info(f"📊 Futures: {', '.join(futures_symbols)}")
         logger.info(f"🧠 Technical Analysis: {'✅ Active' if ta_context_manager else '❌ Inactive'}")
-        logger.info(f"🔌 Data Source Adapter: {'✅ Active' if data_source_adapter else '❌ Inactive'}")
-        logger.info(f"🤖 OpenAI Analyzer: ✅ Active")
-        logger.info(f"🔬 MarketAnalyzer: {'✅ Active' if market_analyzer else '❌ Inactive'}")
-        logger.info(f"🎭 Strategy Mode: {'WebSocket' if market_data_manager else 'REST API'}")
+        logger.info(f"📊 Repository: {'✅ Active' if repository else '❌ Inactive'}")
+        logger.info(f"🎭 Strategy Mode: REST API (60s)")
         logger.info(f"🔧 Режим: {'Testnet' if Config.BYBIT_TESTNET else 'Mainnet'}")
         logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
     else:
         logger.warning("⚠️ Торговая система не активна, только Telegram бот")
     
-    # ========== ШАГ 3: Создаем экземпляр бота (ПОСЛЕ инициализации торговой системы) ==========
+    # ========== ШАГ 3: Создаем экземпляр бота ====================
     logger.info("🤖 Инициализация Telegram бота...")
     
-    # Проверяем что market_analyzer создан
-    if not market_analyzer:
-        logger.warning("⚠️ MarketAnalyzer не создан! Анализ рынка будет недоступен в боте.")
-    
+    # ✅ Создаем бот БЕЗ market_analyzer
     bot_instance = TelegramBot(
-        Config.TELEGRAM_BOT_TOKEN,
-        market_analyzer=market_analyzer
+        Config.TELEGRAM_BOT_TOKEN
     )
     
-    logger.info(f"✅ Telegram бот инициализирован (MarketAnalyzer: {'✓' if market_analyzer else '✗'})")
+    logger.info(f"✅ Telegram бот инициализирован")
     
     # Подписываем бота на сигналы (теперь bot_instance создан)
     if signal_manager and bot_instance:
@@ -1718,7 +1544,7 @@ async def main():
     """Главная функция приложения"""
     
     try:
-        logger.info("🌟 Запуск Bybit Trading Bot v2.5 - DataSourceAdapter + MarketAnalyzer Edition")
+        logger.info("🌟 Запуск Bybit Trading Bot v2.5 - Simplified Architecture v2.0")
         logger.info(f"🔧 Порт: {WEB_SERVER_PORT}")
         logger.info(f"🔧 Webhook URL: {BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
         logger.info(f"🔧 Testnet: {Config.BYBIT_TESTNET}")
@@ -1747,15 +1573,13 @@ async def main():
         logger.info(f"🌐 Веб-сервер: {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
         logger.info(f"🤖 Telegram бот: активен")
         logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
+        logger.info(f"📊 Repository: {'создан' if repository else 'не создан'}")
         logger.info(f"🔄 SimpleCandleSync: {'активен' if simple_candle_sync and simple_candle_sync.is_running else 'неактивен'}")
         logger.info(f"🔄 SimpleFuturesSync: {'активен' if simple_futures_sync and simple_futures_sync.is_running else 'неактивен'}")
         logger.info(f"🧠 TechnicalAnalysis: {'активен' if ta_context_manager and ta_context_manager.is_running else 'неактивен'}")
-        logger.info(f"🔌 DataSourceAdapter: {'создан' if data_source_adapter else 'не создан'}")
-        logger.info(f"🤖 OpenAI Analyzer: создан")
-        logger.info(f"🔬 MarketAnalyzer: {'создан' if market_analyzer else 'не создан'}")
         logger.info(f"🚀 Торговая система: {'активна' if strategy_orchestrator and strategy_orchestrator.is_running else 'неактивна'}")
         if strategy_orchestrator:
-            logger.info(f"   • Режим работы: {'WebSocket (real-time)' if market_data_manager else 'REST API (1 min)'}")
+            logger.info(f"   • Режим работы: REST API (60 секунд)")
         logger.info("=" * 60)
         logger.info("📡 Endpoints:")
         logger.info(f"   • Health: {BASE_WEBHOOK_URL}/health")
@@ -1828,8 +1652,7 @@ async def main():
                         logger.info(f"   • Фьючерсы свечей: {futures_synced}")
                         logger.info(f"   • TA контекстов: {ta_contexts}")
                         logger.info(f"   • Стратегии: {strategies_active}")
-                        logger.info(f"   • MarketAnalyzer: {'✓' if market_analyzer else '✗'}")
-                        logger.info(f"   • Режим оркестратора: {'WebSocket' if market_data_manager else 'REST API'}")
+                        logger.info(f"   • Режим оркестратора: REST API (60s)")
                         logger.info(f"   • БД: {db_status}")
                     except Exception as e:
                         logger.warning(f"⚠️ Не удалось получить статистику: {e}")
