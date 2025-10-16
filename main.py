@@ -1426,11 +1426,29 @@ async def initialize_trading_system():
             logger.info("⏭️ WebSocket отключен в конфиге, используем только SimpleCandleSync")
             market_data_manager = None
         
-        # ✅ ШАГ 5: SignalManager
-        logger.info("🎛️ Инициализация SignalManager...")
+        # ✅ ШАГ 4.5: DataSourceAdapter - СОЗДАЕМ ДО SignalManager
+        logger.info("🔌 Создание DataSourceAdapter...")
+        data_source_adapter = DataSourceAdapter(
+            ta_context_manager=ta_context_manager,
+            simple_candle_sync=simple_candle_sync,
+            simple_futures_sync=simple_futures_sync,
+            default_symbols=Config.get_bybit_symbols() + (Config.get_yfinance_symbols() if hasattr(Config, 'get_yfinance_symbols') else [])
+        )
+        logger.info("✅ DataSourceAdapter создан")
+        
+        # ✅ ШАГ 5: SignalManager с AI анализом
+        logger.info("🎛️ Инициализация SignalManager с OpenAI интеграцией...")
+        
+        # Создаем OpenAI анализатор
+        from openai_integration import OpenAIAnalyzer
+        openai_analyzer = OpenAIAnalyzer()
+        logger.info("🤖 OpenAI анализатор создан")
+        
         signal_manager = SignalManager(
             max_queue_size=1000,
-            notification_settings=system_config.notification_settings
+            notification_settings=system_config.notification_settings,
+            data_source_adapter=data_source_adapter,  # ✅ НОВОЕ: для получения market_data
+            openai_analyzer=openai_analyzer  # ✅ НОВОЕ: для AI анализа
         )
         
         # Подписываем Telegram бота на сигналы
@@ -1442,17 +1460,7 @@ async def initialize_trading_system():
         await signal_manager.start()
         logger.info("✅ SignalManager запущен")
         
-        # ✅ ШАГ 6: DataSourceAdapter - НОВЫЙ КОМПОНЕНТ!
-        logger.info("🔌 Создание DataSourceAdapter...")
-        data_source_adapter = DataSourceAdapter(
-            ta_context_manager=ta_context_manager,
-            simple_candle_sync=simple_candle_sync,
-            simple_futures_sync=simple_futures_sync,
-            default_symbols=Config.get_bybit_symbols() + (Config.get_yfinance_symbols() if hasattr(Config, 'get_yfinance_symbols') else [])
-        )
-        logger.info("✅ DataSourceAdapter создан")
-        
-        # ✅ ШАГ 7: StrategyOrchestrator - ТЕПЕРЬ ВСЕГДА ЗАПУСКАЕТСЯ!
+        # ✅ ШАГ 6: StrategyOrchestrator - ТЕПЕРЬ ВСЕГДА ЗАПУСКАЕТСЯ!
         logger.info("🎭 Инициализация StrategyOrchestrator...")
         
         # Определяем источник данных
@@ -1511,8 +1519,9 @@ async def initialize_trading_system():
         logger.info(f"   • Криптовалюты: {len(data_source_adapter.crypto_symbols)}")
         logger.info(f"   • Фьючерсы: {len(data_source_adapter.futures_symbols)}")
         
+        logger.info(f"🤖 OpenAI Analyzer: ✅ СОЗДАН")
         logger.info(f"📊 WebSocket ticker: {'✅ АКТИВЕН' if market_data_manager else '❌ ОТКЛЮЧЕН'}")
-        logger.info(f"🎛️ SignalManager: ✅ АКТИВЕН")
+        logger.info(f"🎛️ SignalManager: ✅ АКТИВЕН (с AI поддержкой)")
         logger.info(f"🎭 StrategyOrchestrator: {'✅ АКТИВЕН' if strategy_orchestrator else '❌ ОТКЛЮЧЕН'}")
         if strategy_orchestrator:
             logger.info(f"   • Режим: {'WebSocket (real-time)' if market_data_manager else 'REST API (1 min)'}")
@@ -1558,6 +1567,7 @@ async def create_app():
             logger.info(f"📊 Futures: {', '.join(futures_symbols)}")
         logger.info(f"🧠 Technical Analysis: {'✅ Active' if ta_context_manager else '❌ Inactive'}")
         logger.info(f"🔌 Data Source Adapter: {'✅ Active' if data_source_adapter else '❌ Inactive'}")
+        logger.info(f"🤖 OpenAI Analyzer: ✅ Active")
         logger.info(f"🎭 Strategy Mode: {'WebSocket' if market_data_manager else 'REST API'}")
         logger.info(f"🔧 Режим: {'Testnet' if Config.BYBIT_TESTNET else 'Mainnet'}")
         logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
@@ -1650,6 +1660,7 @@ async def main():
         logger.info(f"🔄 SimpleFuturesSync: {'активен' if simple_futures_sync and simple_futures_sync.is_running else 'неактивен'}")
         logger.info(f"🧠 TechnicalAnalysis: {'активен' if ta_context_manager and ta_context_manager.is_running else 'неактивен'}")
         logger.info(f"🔌 DataSourceAdapter: {'создан' if data_source_adapter else 'не создан'}")
+        logger.info(f"🤖 OpenAI Analyzer: создан")
         logger.info(f"🚀 Торговая система: {'активна' if strategy_orchestrator and strategy_orchestrator.is_running else 'неактивна'}")
         if strategy_orchestrator:
             logger.info(f"   • Режим работы: {'WebSocket (real-time)' if market_data_manager else 'REST API (1 min)'}")
