@@ -1,5 +1,5 @@
 """
-Breakout Strategy - Стратегия торговли пробоя
+Breakout Strategy v3.0 - Стратегия торговли пробоя с analyze_with_data()
 
 Торгует импульсные движения после преодоления ключевых уровней.
 
@@ -19,7 +19,7 @@ Breakout Strategy - Стратегия торговли пробоя
 - Отмена ордера если цена отошла на 1 ATR от заявки
 
 Author: Trading Bot Team
-Version: 1.0.0
+Version: 3.0.0 - Orchestrator Integration
 """
 
 import logging
@@ -27,26 +27,21 @@ from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timedelta
 
 from .base_strategy import BaseStrategy, TradingSignal, SignalType, SignalStrength
-from market_data import MarketDataSnapshot
-from strategies.technical_analysis import (
-    TechnicalAnalysisContext,
-    PatternDetector,
-    MarketConditionsAnalyzer,
-    BreakoutAnalyzer,
-    SupportResistanceLevel,
-    MarketCondition,
-    EnergyLevel
-)
 
 logger = logging.getLogger(__name__)
 
 
 class BreakoutStrategy(BaseStrategy):
     """
-    💥 Стратегия торговли пробоя уровней
+    💥 Стратегия торговли пробоя уровней v3.0
     
     Ставка на импульсное движение после преодоления ключевого уровня.
     Требует накопления энергии (консолидации) перед пробоем.
+    
+    Изменения v3.0:
+    - ✅ Реализован analyze_with_data() - получает готовые данные
+    - ✅ Убрана зависимость от MarketDataSnapshot
+    - ✅ Работа напрямую со свечами из параметров
     
     Сильные стороны:
     - Ловит крупные импульсные движения
@@ -61,11 +56,16 @@ class BreakoutStrategy(BaseStrategy):
     Usage:
         strategy = BreakoutStrategy(
             symbol="BTCUSDT",
+            repository=repository,
             ta_context_manager=ta_manager
         )
         
-        signal = await strategy.process_market_data(
-            market_data=snapshot,
+        signal = await strategy.analyze_with_data(
+            symbol="BTCUSDT",
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
+            candles_1h=candles_1h,
+            candles_1d=candles_1d,
             ta_context=context
         )
     """
@@ -73,61 +73,62 @@ class BreakoutStrategy(BaseStrategy):
     def __init__(
         self,
         symbol: str = "BTCUSDT",
-        ta_context_manager = None,
+        repository=None,
+        ta_context_manager=None,
         
         # Параметры уровней
-        min_level_strength: float = 0.5,        # Минимальная сила уровня
-        max_distance_to_level_percent: float = 2.0,  # Максимальное расстояние до уровня
+        min_level_strength: float = 0.5,
+        max_distance_to_level_percent: float = 2.0,
         
         # Параметры поджатия
-        require_compression: bool = True,        # Требовать поджатие
-        compression_min_bars: int = 3,          # Минимум баров поджатия
+        require_compression: bool = True,
+        compression_min_bars: int = 3,
         
         # Параметры ретеста
-        near_retest_max_days: int = 7,          # Ближний ретест < 7 дней
-        ideal_retest_touches: int = 3,          # Идеальное кол-во касаний
+        near_retest_max_days: int = 7,
+        ideal_retest_touches: int = 3,
         
         # Параметры закрытия
-        close_near_level_tolerance: float = 0.5,  # Допуск закрытия у уровня (%)
-        close_near_extreme_max_pullback: float = 10.0,  # Макс откат от Hi/Low (%)
+        close_near_level_tolerance: float = 0.5,
+        close_near_extreme_max_pullback: float = 10.0,
         
         # Параметры энергии
-        require_consolidation: bool = True,      # Требовать консолидацию
-        min_energy_level: str = "moderate",     # moderate, high, explosive
+        require_consolidation: bool = True,
+        min_energy_level: str = "moderate",
         
         # Параметры ATR
-        atr_exhaustion_threshold: float = 0.75,  # 75% = исчерпан
+        atr_exhaustion_threshold: float = 0.75,
         
         # Параметры ордеров
-        entry_offset_points: float = 2.0,       # Отступ от уровня для ордера
-        stop_loss_multiplier: float = 1.0,      # Множитель для SL
-        take_profit_ratio: float = 3.0,         # TP:SL ratio (минимум 3:1)
-        order_cancel_atr_distance: float = 1.0,  # Отмена если цена ушла на 1 ATR
+        entry_offset_points: float = 2.0,
+        stop_loss_multiplier: float = 1.0,
+        take_profit_ratio: float = 3.0,
+        order_cancel_atr_distance: float = 1.0,
         
         # Настройки стратегии
         min_signal_strength: float = 0.6,
-        signal_cooldown_minutes: int = 30,      # Долгий cooldown для пробоев
-        max_signals_per_hour: int = 2,          # Мало сигналов (качество > количество)
+        signal_cooldown_minutes: int = 30,
+        max_signals_per_hour: int = 2,
     ):
         """
         Инициализация стратегии пробоя
         
         Args:
             symbol: Торговый символ
+            repository: MarketDataRepository
             ta_context_manager: Менеджер технического анализа
             [остальные параметры см. выше]
         """
         super().__init__(
             name="BreakoutStrategy",
             symbol=symbol,
+            repository=repository,
+            ta_context_manager=ta_context_manager,
             min_signal_strength=min_signal_strength,
             signal_cooldown_minutes=signal_cooldown_minutes,
             max_signals_per_hour=max_signals_per_hour,
             enable_risk_management=True
         )
-        
-        # Менеджер технического анализа
-        self.ta_context_manager = ta_context_manager
         
         # Параметры уровней
         self.min_level_strength = min_level_strength
@@ -158,14 +159,6 @@ class BreakoutStrategy(BaseStrategy):
         self.take_profit_ratio = take_profit_ratio
         self.order_cancel_distance = order_cancel_atr_distance
         
-        # Инициализируем анализаторы
-        self.pattern_detector = PatternDetector(
-            compression_min_bars=compression_min_bars
-        )
-        
-        self.market_analyzer = MarketConditionsAnalyzer()
-        self.breakout_analyzer = BreakoutAnalyzer()
-        
         # Статистика стратегии
         self.strategy_stats = {
             "levels_analyzed": 0,
@@ -178,22 +171,26 @@ class BreakoutStrategy(BaseStrategy):
             "setups_filtered_by_compression": 0
         }
         
-        logger.info("💥 BreakoutStrategy инициализирована")
+        logger.info("💥 BreakoutStrategy v3.0 инициализирована")
         logger.info(f"   • Symbol: {symbol}")
         logger.info(f"   • Require compression: {require_compression}")
         logger.info(f"   • Require consolidation: {require_consolidation}")
         logger.info(f"   • Min energy: {min_energy_level}")
         logger.info(f"   • ATR exhaustion: {atr_exhaustion_threshold*100}%")
     
-    # ==================== ОСНОВНОЙ АНАЛИЗ ====================
+    # ==================== НОВЫЙ API v3.0 ====================
     
-    async def analyze_market_data(
+    async def analyze_with_data(
         self,
-        market_data: MarketDataSnapshot,
-        ta_context: Optional[TechnicalAnalysisContext] = None
+        symbol: str,
+        candles_1m: List[Dict],
+        candles_5m: List[Dict],
+        candles_1h: List[Dict],
+        candles_1d: List[Dict],
+        ta_context: Optional[Any] = None
     ) -> Optional[TradingSignal]:
         """
-        🎯 Основной метод анализа для стратегии пробоя
+        🎯 Анализ с готовыми данными (v3.0)
         
         Алгоритм:
         1. Проверка технического контекста
@@ -204,44 +201,56 @@ class BreakoutStrategy(BaseStrategy):
         6. Генерация сигнала
         
         Args:
-            market_data: Снимок рыночных данных
-            ta_context: Технический контекст (уровни, ATR, свечи)
+            symbol: Торговый символ
+            candles_1m: Минутные свечи (последние 100)
+            candles_5m: 5-минутные свечи (последние 50)
+            candles_1h: Часовые свечи (последние 24)
+            candles_1d: Дневные свечи (последние 180)
+            ta_context: Технический контекст (уровни, ATR)
             
         Returns:
             TradingSignal или None
         """
         try:
+            # Обновляем symbol (если был PLACEHOLDER)
+            self.symbol = symbol
+            
+            # Проверка минимальных данных
+            if not candles_5m or len(candles_5m) < 20:
+                if self.debug_mode:
+                    logger.debug(f"⚠️ {symbol}: недостаточно M5 свечей")
+                return None
+            
+            if not candles_1d or len(candles_1d) < 30:
+                if self.debug_mode:
+                    logger.debug(f"⚠️ {symbol}: недостаточно D1 свечей")
+                return None
+            
+            # Текущая цена из последней M5 свечи
+            current_price = float(candles_5m[-1]['close'])
+            
             # Шаг 1: Проверка технического контекста
-            if ta_context is None or not ta_context.is_fully_initialized():
+            if ta_context is None:
                 if self.debug_mode:
-                    logger.debug("⚠️ Технический контекст не инициализирован")
+                    logger.debug(f"⚠️ {symbol}: технический контекст недоступен")
                 return None
             
-            current_price = market_data.current_price
-            
-            # Шаг 2: Анализ рыночных условий
-            market_conditions = self.market_analyzer.analyze_conditions(
-                candles_h1=ta_context.recent_candles_h1,
-                candles_d1=ta_context.recent_candles_d1,
-                atr=ta_context.atr_data.calculated_atr if ta_context.atr_data else None,
-                current_price=current_price
-            )
-            
-            # Проверка пригодности для пробоя
-            if not market_conditions.is_suitable_for_breakout:
+            # Проверяем что контекст инициализирован
+            if not hasattr(ta_context, 'levels_d1') or not ta_context.levels_d1:
                 if self.debug_mode:
-                    logger.debug(f"⚠️ Условия не подходят для пробоя: "
-                               f"{market_conditions.market_condition.value}")
+                    logger.debug(f"⚠️ {symbol}: нет уровней D1 в контексте")
                 return None
             
-            # Шаг 3: Проверка ATR (не должен быть исчерпан)
-            if ta_context.atr_data and ta_context.is_atr_exhausted(self.atr_exhaustion_threshold):
-                self.strategy_stats["setups_filtered_by_atr"] += 1
-                if self.debug_mode:
-                    logger.debug(f"⚠️ ATR исчерпан: {ta_context.atr_data.current_range_used:.1f}%")
-                return None
+            # Шаг 2: Проверка ATR (не должен быть исчерпан)
+            if hasattr(ta_context, 'atr_data') and ta_context.atr_data:
+                atr_used = ta_context.atr_data.current_range_used if hasattr(ta_context.atr_data, 'current_range_used') else 0
+                if atr_used > self.atr_exhaustion_threshold:
+                    self.strategy_stats["setups_filtered_by_atr"] += 1
+                    if self.debug_mode:
+                        logger.debug(f"⚠️ {symbol}: ATR исчерпан: {atr_used*100:.1f}%")
+                    return None
             
-            # Шаг 4: Поиск ближайшего уровня
+            # Шаг 3: Поиск ближайшего уровня
             nearest_level, direction = self._find_nearest_level_for_breakout(
                 ta_context=ta_context,
                 current_price=current_price
@@ -252,13 +261,15 @@ class BreakoutStrategy(BaseStrategy):
             
             self.strategy_stats["levels_analyzed"] += 1
             
-            # Шаг 5: Проверка всех условий входа
-            setup_valid, setup_details = await self._validate_breakout_setup(
+            # Шаг 4: Проверка всех условий входа
+            setup_valid, setup_details = self._validate_breakout_setup(
                 level=nearest_level,
                 direction=direction,
                 ta_context=ta_context,
-                market_data=market_data,
-                market_conditions=market_conditions
+                candles_5m=candles_5m,
+                candles_1h=candles_1h,
+                candles_1d=candles_1d,
+                current_price=current_price
             )
             
             if not setup_valid:
@@ -266,7 +277,7 @@ class BreakoutStrategy(BaseStrategy):
             
             self.strategy_stats["setups_found"] += 1
             
-            # Шаг 6: Расчет параметров ордера
+            # Шаг 5: Расчет параметров ордера
             order_params = self._calculate_order_parameters(
                 level=nearest_level,
                 direction=direction,
@@ -274,30 +285,29 @@ class BreakoutStrategy(BaseStrategy):
                 current_price=current_price
             )
             
-            # Шаг 7: Проверка что цена не ушла слишком далеко
+            # Шаг 6: Проверка что цена не ушла слишком далеко
             if not self._check_order_validity(order_params, current_price, ta_context):
                 if self.debug_mode:
-                    logger.debug("⚠️ Цена слишком далеко от точки входа")
+                    logger.debug(f"⚠️ {symbol}: цена слишком далеко от точки входа")
                 return None
             
-            # Шаг 8: Генерация сигнала
+            # Шаг 7: Генерация сигнала
             signal = self._create_breakout_signal(
                 level=nearest_level,
                 direction=direction,
                 order_params=order_params,
                 setup_details=setup_details,
-                market_conditions=market_conditions,
                 current_price=current_price
             )
             
             self.strategy_stats["signals_generated"] += 1
             
-            logger.info(f"✅ Сигнал пробоя создан: {direction} через {nearest_level.price:.2f}")
+            logger.info(f"✅ {symbol}: Сигнал пробоя создан: {direction} через {nearest_level.price:.2f}")
             
             return signal
             
         except Exception as e:
-            logger.error(f"❌ Ошибка в analyze_market_data: {e}")
+            logger.error(f"❌ {symbol}: Ошибка в analyze_with_data: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return None
@@ -306,9 +316,9 @@ class BreakoutStrategy(BaseStrategy):
     
     def _find_nearest_level_for_breakout(
         self,
-        ta_context: TechnicalAnalysisContext,
+        ta_context: Any,
         current_price: float
-    ) -> Tuple[Optional[SupportResistanceLevel], str]:
+    ) -> Tuple[Optional[Any], str]:
         """
         Поиск ближайшего уровня для потенциального пробоя
         
@@ -342,24 +352,16 @@ class BreakoutStrategy(BaseStrategy):
             ]
             
             # Выбираем ближайший уровень
-            nearest_resistance = None
-            nearest_support = None
+            candidates = []
             
             if resistances:
                 nearest_resistance = min(resistances, key=lambda l: abs(l.price - current_price))
-            
-            if supports:
-                nearest_support = min(supports, key=lambda l: abs(l.price - current_price))
-            
-            # Определяем какой уровень ближе
-            candidates = []
-            
-            if nearest_resistance:
                 distance = abs(nearest_resistance.price - current_price) / current_price
                 if distance <= self.max_distance_to_level:
                     candidates.append((nearest_resistance, "up", distance))
             
-            if nearest_support:
+            if supports:
+                nearest_support = min(supports, key=lambda l: abs(l.price - current_price))
                 distance = abs(nearest_support.price - current_price) / current_price
                 if distance <= self.max_distance_to_level:
                     candidates.append((nearest_support, "down", distance))
@@ -382,13 +384,15 @@ class BreakoutStrategy(BaseStrategy):
     
     # ==================== ВАЛИДАЦИЯ УСЛОВИЙ ====================
     
-    async def _validate_breakout_setup(
+    def _validate_breakout_setup(
         self,
-        level: SupportResistanceLevel,
+        level: Any,
         direction: str,
-        ta_context: TechnicalAnalysisContext,
-        market_data: MarketDataSnapshot,
-        market_conditions: Any
+        ta_context: Any,
+        candles_5m: List[Dict],
+        candles_1h: List[Dict],
+        candles_1d: List[Dict],
+        current_price: float
     ) -> Tuple[bool, Dict[str, Any]]:
         """
         Валидация всех условий для пробоя
@@ -399,14 +403,16 @@ class BreakoutStrategy(BaseStrategy):
         3. ✅ Закрытие у уровня
         4. ✅ Консолидация (энергия)
         5. ✅ Закрытие под Hi/Low без отката
-        6. ✅ ATR не исчерпан
+        6. ✅ ATR не исчерпан (проверено выше)
         
         Args:
             level: Уровень для пробоя
             direction: Направление пробоя
             ta_context: Технический контекст
-            market_data: Рыночные данные
-            market_conditions: Условия рынка
+            candles_5m: 5-минутные свечи
+            candles_1h: Часовые свечи
+            candles_1d: Дневные свечи
+            current_price: Текущая цена
             
         Returns:
             Tuple[валидный setup?, детали]
@@ -419,139 +425,129 @@ class BreakoutStrategy(BaseStrategy):
                 "direction": direction
             }
             
-            # УСЛОВИЕ 1: Поджатие
-            has_compression = False
+            score = 0
+            max_score = 5  # 5 основных условий (ATR проверен выше)
             
-            if self.require_compression:
-                candles_m5 = ta_context.recent_candles_m5[-20:] if ta_context.recent_candles_m5 else []
+            # УСЛОВИЕ 1: Поджатие (проверка по M5)
+            has_compression = False
+            if self.require_compression and len(candles_5m) >= 20:
+                recent_m5 = candles_5m[-20:]
                 
-                if candles_m5:
-                    atr = ta_context.atr_data.calculated_atr if ta_context.atr_data else None
-                    
-                    has_compression, compression_details = self.pattern_detector.detect_compression(
-                        candles=candles_m5,
-                        level=level,
-                        atr=atr
-                    )
-                    
-                    details["compression"] = compression_details
-                    
-                    if not has_compression:
-                        self.strategy_stats["setups_filtered_by_compression"] += 1
-                        if self.debug_mode:
-                            logger.debug("❌ Нет поджатия")
-                        return False, details
-                    
+                # Простая проверка: последние свечи должны быть маленькими
+                # Считаем средний размер свечи
+                avg_size = sum(abs(float(c['high']) - float(c['low'])) for c in recent_m5) / len(recent_m5)
+                
+                # Последние 3 свечи должны быть меньше среднего
+                last_3_sizes = [abs(float(c['high']) - float(c['low'])) for c in recent_m5[-3:]]
+                avg_last_3 = sum(last_3_sizes) / len(last_3_sizes)
+                
+                has_compression = avg_last_3 < avg_size * 0.8  # На 20% меньше среднего
+                
+                if has_compression:
+                    score += 1
                     self.strategy_stats["compressions_found"] += 1
+                    logger.debug("✅ Поджатие обнаружено")
+                elif self.require_compression:
+                    self.strategy_stats["setups_filtered_by_compression"] += 1
+                    logger.debug("❌ Нет поджатия")
+                    return False, details
             
             details["has_compression"] = has_compression
             
             # УСЛОВИЕ 2: Ближний ретест
             is_near_retest = False
-            
-            if level.last_touch:
+            if hasattr(level, 'last_touch') and level.last_touch:
                 days_since_touch = (datetime.now() - level.last_touch).days
                 is_near_retest = days_since_touch <= self.near_retest_max_days
                 
-                details["days_since_touch"] = days_since_touch
-                details["is_near_retest"] = is_near_retest
+                if is_near_retest:
+                    score += 1
+                    logger.debug(f"✅ Ближний ретест: {days_since_touch} дней")
                 
-                if self.debug_mode:
-                    if is_near_retest:
-                        logger.debug(f"✅ Ближний ретест: {days_since_touch} дней")
-                    else:
-                        logger.debug(f"⚠️ Дальний ретест: {days_since_touch} дней")
+                details["days_since_touch"] = days_since_touch
+            
+            details["is_near_retest"] = is_near_retest
             
             # УСЛОВИЕ 3: Закрытие вблизи уровня
             close_near_level = False
-            
-            if ta_context.recent_candles_m5:
-                last_candle = ta_context.recent_candles_m5[-1]
-                close_near_level = self.pattern_detector.check_close_near_level(
-                    candle=last_candle,
-                    level=level,
-                    tolerance_percent=self.close_near_level_tolerance
-                )
+            if candles_5m:
+                last_close = float(candles_5m[-1]['close'])
+                distance = abs(last_close - level.price) / level.price * 100
                 
-                details["close_near_level"] = close_near_level
+                close_near_level = distance <= self.close_near_level_tolerance
                 
                 if close_near_level:
+                    score += 1
                     logger.debug("✅ Закрытие у уровня")
+                
+                details["close_distance_percent"] = distance
             
-            # УСЛОВИЕ 4: Консолидация и энергия
-            has_enough_energy = False
+            details["close_near_level"] = close_near_level
             
-            if self.require_consolidation:
-                if not market_conditions.has_consolidation:
+            # УСЛОВИЕ 4: Консолидация (по H1)
+            has_consolidation = False
+            if self.require_consolidation and len(candles_1h) >= 10:
+                # Простая проверка: последние 10 часов цена в узком диапазоне
+                recent_h1 = candles_1h[-10:]
+                highs = [float(c['high']) for c in recent_h1]
+                lows = [float(c['low']) for c in recent_h1]
+                
+                price_range = max(highs) - min(lows)
+                avg_price = (max(highs) + min(lows)) / 2
+                
+                # Диапазон меньше 2% от средней цены = консолидация
+                range_percent = price_range / avg_price * 100
+                has_consolidation = range_percent < 2.0
+                
+                if has_consolidation:
+                    score += 1
+                    self.strategy_stats["consolidations_found"] += 1
+                    logger.debug(f"✅ Консолидация: диапазон {range_percent:.2f}%")
+                elif self.require_consolidation:
                     self.strategy_stats["setups_filtered_by_energy"] += 1
-                    if self.debug_mode:
-                        logger.debug("❌ Нет консолидации")
+                    logger.debug(f"❌ Нет консолидации: диапазон {range_percent:.2f}%")
                     return False, details
                 
-                # Проверяем уровень энергии
-                energy_map = {
-                    "moderate": [EnergyLevel.MODERATE, EnergyLevel.HIGH, EnergyLevel.EXPLOSIVE],
-                    "high": [EnergyLevel.HIGH, EnergyLevel.EXPLOSIVE],
-                    "explosive": [EnergyLevel.EXPLOSIVE]
-                }
-                
-                required_levels = energy_map.get(self.min_energy_level, [EnergyLevel.MODERATE])
-                has_enough_energy = market_conditions.energy_level in required_levels
-                
-                details["consolidation_bars"] = market_conditions.consolidation_bars
-                details["energy_level"] = market_conditions.energy_level.value
-                details["has_enough_energy"] = has_enough_energy
-                
-                if not has_enough_energy:
-                    self.strategy_stats["setups_filtered_by_energy"] += 1
-                    if self.debug_mode:
-                        logger.debug(f"❌ Недостаточно энергии: {market_conditions.energy_level.value}")
-                    return False, details
-                
-                self.strategy_stats["consolidations_found"] += 1
+                details["consolidation_range_percent"] = range_percent
+            
+            details["has_consolidation"] = has_consolidation
             
             # УСЛОВИЕ 5: Закрытие под Hi/Low без отката
             close_near_extreme = False
-            extreme_type = None
-            
-            if ta_context.recent_candles_m5:
-                last_candle = ta_context.recent_candles_m5[-1]
-                close_near_extreme, extreme_type = self.pattern_detector.check_close_near_extreme(
-                    candle=last_candle,
-                    max_pullback_percent=self.close_near_extreme_max_pullback
-                )
+            if candles_5m:
+                last_candle = candles_5m[-1]
+                high = float(last_candle['high'])
+                low = float(last_candle['low'])
+                close = float(last_candle['close'])
                 
-                details["close_near_extreme"] = close_near_extreme
-                details["extreme_type"] = extreme_type
+                candle_size = high - low
+                
+                if direction == "up":
+                    # Для пробоя вверх: закрытие должно быть у High
+                    distance_from_high = high - close
+                    pullback_percent = (distance_from_high / candle_size * 100) if candle_size > 0 else 100
+                    close_near_extreme = pullback_percent <= self.close_near_extreme_max_pullback
+                else:
+                    # Для пробоя вниз: закрытие должно быть у Low
+                    distance_from_low = close - low
+                    pullback_percent = (distance_from_low / candle_size * 100) if candle_size > 0 else 100
+                    close_near_extreme = pullback_percent <= self.close_near_extreme_max_pullback
                 
                 if close_near_extreme:
-                    logger.debug(f"✅ Закрытие у {extreme_type}")
+                    score += 1
+                    logger.debug(f"✅ Закрытие у экстремума (откат {pullback_percent:.1f}%)")
+                
+                details["pullback_percent"] = pullback_percent
             
-            # УСЛОВИЕ 6: ATR не исчерпан (уже проверено в основном методе)
+            details["close_near_extreme"] = close_near_extreme
             
-            # Итоговая оценка setup
-            score = 0
-            max_score = 6
-            
-            if has_compression:
-                score += 1
-            if is_near_retest:
-                score += 1
-            if close_near_level:
-                score += 1
-            if has_enough_energy:
-                score += 1
-            if close_near_extreme:
-                score += 1
-            if not ta_context.is_atr_exhausted(self.atr_exhaustion_threshold):
-                score += 1
-            
+            # Итоговая оценка
             details["setup_score"] = score
             details["setup_score_max"] = max_score
             details["setup_quality"] = score / max_score
             
             # Минимальный score для входа
-            min_score = 4 if self.require_compression and self.require_consolidation else 3
+            min_score = 3  # Минимум 3 из 5 условий
             
             is_valid = score >= min_score
             
@@ -570,9 +566,9 @@ class BreakoutStrategy(BaseStrategy):
     
     def _calculate_order_parameters(
         self,
-        level: SupportResistanceLevel,
+        level: Any,
         direction: str,
-        ta_context: TechnicalAnalysisContext,
+        ta_context: Any,
         current_price: float
     ) -> Dict[str, float]:
         """
@@ -596,17 +592,19 @@ class BreakoutStrategy(BaseStrategy):
             level_price = level.price
             
             # ATR для расчетов
-            atr = ta_context.atr_data.calculated_atr if ta_context.atr_data else level_price * 0.02
+            atr = current_price * 0.02  # 2% по умолчанию
+            if hasattr(ta_context, 'atr_data') and ta_context.atr_data:
+                if hasattr(ta_context.atr_data, 'calculated_atr'):
+                    atr = ta_context.atr_data.calculated_atr
             
-            # Люфт (20% от Stop Loss, но пока используем фиксированный offset)
+            # Люфт (фиксированный offset)
             entry_offset = self.entry_offset
             
             if direction == "up":
                 # Пробой вверх (через сопротивление)
                 entry_price = level_price + entry_offset  # Buy Stop
                 
-                # Stop Loss за уровнем (технический)
-                # Используем расчетный stop = 10% от ATR для тренда
+                # Stop Loss за уровнем (10% от ATR)
                 stop_distance = atr * 0.10 * self.stop_loss_multiplier
                 stop_loss = entry_price - stop_distance
                 
@@ -647,7 +645,7 @@ class BreakoutStrategy(BaseStrategy):
         self,
         order_params: Dict[str, float],
         current_price: float,
-        ta_context: TechnicalAnalysisContext
+        ta_context: Any
     ) -> bool:
         """
         Проверка валидности ордера
@@ -671,7 +669,10 @@ class BreakoutStrategy(BaseStrategy):
             distance = abs(current_price - entry_price)
             
             # ATR для сравнения
-            atr = ta_context.atr_data.calculated_atr if ta_context.atr_data else current_price * 0.02
+            atr = current_price * 0.02
+            if hasattr(ta_context, 'atr_data') and ta_context.atr_data:
+                if hasattr(ta_context.atr_data, 'calculated_atr'):
+                    atr = ta_context.atr_data.calculated_atr
             
             max_distance = atr * self.order_cancel_distance
             
@@ -689,11 +690,10 @@ class BreakoutStrategy(BaseStrategy):
     
     def _create_breakout_signal(
         self,
-        level: SupportResistanceLevel,
+        level: Any,
         direction: str,
         order_params: Dict[str, float],
         setup_details: Dict[str, Any],
-        market_conditions: Any,
         current_price: float
     ) -> TradingSignal:
         """
@@ -704,7 +704,6 @@ class BreakoutStrategy(BaseStrategy):
             direction: Направление
             order_params: Параметры ордера
             setup_details: Детали setup
-            market_conditions: Условия рынка
             current_price: Текущая цена
             
         Returns:
@@ -723,8 +722,7 @@ class BreakoutStrategy(BaseStrategy):
             # Расчет силы сигнала
             strength = self._calculate_signal_strength(
                 setup_details=setup_details,
-                level=level,
-                market_conditions=market_conditions
+                level=level
             )
             
             # Расчет уверенности
@@ -778,14 +776,6 @@ class BreakoutStrategy(BaseStrategy):
                 f"R:R = {order_params.get('risk_reward_ratio')}:1"
             )
             
-            # Условия рынка
-            signal.market_conditions = {
-                "market_condition": market_conditions.market_condition.value,
-                "energy_level": market_conditions.energy_level.value,
-                "consolidation_bars": market_conditions.consolidation_bars,
-                "setup_quality": setup_quality
-            }
-            
             # Метаданные
             signal.technical_indicators["setup_details"] = setup_details
             signal.technical_indicators["order_params"] = order_params
@@ -806,8 +796,7 @@ class BreakoutStrategy(BaseStrategy):
     def _calculate_signal_strength(
         self,
         setup_details: Dict[str, Any],
-        level: SupportResistanceLevel,
-        market_conditions: Any
+        level: Any
     ) -> float:
         """Расчет силы сигнала"""
         strength = 0.5  # Базовая
@@ -817,11 +806,7 @@ class BreakoutStrategy(BaseStrategy):
         strength += setup_quality * 0.3
         
         # Бонус за сильный уровень
-        if level.is_strong:
-            strength += 0.1
-        
-        # Бонус за высокую энергию
-        if market_conditions.energy_level in [EnergyLevel.HIGH, EnergyLevel.EXPLOSIVE]:
+        if hasattr(level, 'is_strong') and level.is_strong:
             strength += 0.1
         
         return min(1.0, strength)
@@ -829,7 +814,7 @@ class BreakoutStrategy(BaseStrategy):
     def _calculate_signal_confidence(
         self,
         setup_details: Dict[str, Any],
-        level: SupportResistanceLevel
+        level: Any
     ) -> float:
         """Расчет уверенности в сигнале"""
         confidence = 0.6  # Базовая
@@ -843,19 +828,15 @@ class BreakoutStrategy(BaseStrategy):
             confidence += 0.1
         
         # Бонус за сильный уровень
-        if level.strength >= 0.8:
+        if hasattr(level, 'strength') and level.strength >= 0.8:
             confidence += 0.1
-        
-        # Бонус за множественные касания
-        if level.touches >= 3:
-            confidence += 0.05
         
         return min(1.0, confidence)
     
     def _build_signal_reasons(
         self,
         setup_details: Dict[str, Any],
-        level: SupportResistanceLevel,
+        level: Any,
         direction: str
     ) -> List[str]:
         """Построение списка причин сигнала"""
@@ -867,10 +848,9 @@ class BreakoutStrategy(BaseStrategy):
         if setup_details.get("has_compression"):
             reasons.append("Поджатие у уровня обнаружено")
         
-        if setup_details.get("has_enough_energy"):
-            energy = setup_details.get("energy_level", "unknown")
-            consol_bars = setup_details.get("consolidation_bars", 0)
-            reasons.append(f"Энергия накоплена: {energy} ({consol_bars} баров консолидации)")
+        if setup_details.get("has_consolidation"):
+            range_pct = setup_details.get("consolidation_range_percent", 0)
+            reasons.append(f"Консолидация (диапазон {range_pct:.1f}%)")
         
         if setup_details.get("is_near_retest"):
             days = setup_details.get("days_since_touch", 0)
@@ -880,10 +860,10 @@ class BreakoutStrategy(BaseStrategy):
             reasons.append("Закрытие вблизи уровня")
         
         if setup_details.get("close_near_extreme"):
-            reasons.append(f"Закрытие под {setup_details.get('extreme_type')}")
+            reasons.append(f"Закрытие у экстремума")
         
-        if level.is_strong:
-            reasons.append(f"Сильный уровень (strength={level.strength:.2f}, touches={level.touches})")
+        if hasattr(level, 'is_strong') and level.is_strong:
+            reasons.append(f"Сильный уровень (strength={level.strength:.2f})")
         
         return reasons
     
@@ -917,4 +897,4 @@ class BreakoutStrategy(BaseStrategy):
 # Export
 __all__ = ["BreakoutStrategy"]
 
-logger.info("✅ Breakout Strategy module loaded")
+logger.info("✅ Breakout Strategy v3.0 loaded - Orchestrator Integration Ready")
