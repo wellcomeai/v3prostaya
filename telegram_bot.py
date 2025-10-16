@@ -13,7 +13,7 @@ from openai_integration import OpenAIAnalyzer
 logger = logging.getLogger(__name__)
 
 class TelegramBot:
-    """Telegram бот для анализа рынка на aiogram (webhook режим) - v3.0"""
+    """Telegram бот для анализа рынка на aiogram (webhook режим) - v3.1 с мультистратегиями"""
     
     def __init__(self, token: str, repository=None, ta_context_manager=None):
         """
@@ -38,7 +38,7 @@ class TelegramBot:
         
         self.dp.include_router(self.router)
         
-        logger.info("🤖 TelegramBot v3.0 инициализирован")
+        logger.info("🤖 TelegramBot v3.1 инициализирован (Multi-Strategy)")
         logger.info(f"   • Repository: {'✅' if repository else '❌'}")
         logger.info(f"   • TA Context Manager: {'✅' if ta_context_manager else '❌'}")
         logger.info(f"   • OpenAI Analyzer: {'✅' if self.openai_analyzer else '❌'}")
@@ -111,7 +111,7 @@ class TelegramBot:
             
             keyboard = self._create_main_menu()
             
-            welcome_text = f"""🤖 *Bybit Trading Bot v3.0* 
+            welcome_text = f"""🤖 *Bybit Trading Bot v3.1* 
 
 Привет, {user_name}! 
 
@@ -122,16 +122,23 @@ class TelegramBot:
 - 🆕 Синхронизация фьючерсов CME (YFinance)
 - Сохранение исторических данных в PostgreSQL
 - 🤖 AI анализ рынка через OpenAI GPT-4
+- 🎭 Анализ через 3 торговые стратегии одновременно
 - 🚨 Отправка торговых сигналов в реальном времени
 - Модульная архитектура для надежности
 
-🔥 *Активные компоненты v3.0:*
+🔥 *Активные компоненты v3.1:*
 - SimpleCandleSync - синхронизация криптовалют
 - SimpleFuturesSync - синхронизация фьючерсов
 - Repository - прямой доступ к БД
 - TechnicalAnalysisContextManager - технический анализ
 - SignalManager - обработка с AI обогащением
 - StrategyOrchestrator - управление стратегиями
+- 🆕 Multi-Strategy Analysis - 3 стратегии параллельно
+
+🎭 *Стратегии для анализа:*
+- BreakoutStrategy - пробои уровней
+- BounceStrategy - отбои от уровней
+- FalseBreakoutStrategy - ложные пробои
 
 🚀 *Символы в мониторинге:*
 - Crypto: BTC, ETH, BNB, SOL, XRP, DOGE и др.
@@ -168,16 +175,23 @@ _(Можете отписаться в меню "Торговые сигналы
 - 🆕 Мониторинг фьючерсов CME (4 контракта)
 - 💾 Сохранение в PostgreSQL
 - 🤖 AI анализ через OpenAI GPT-4
+- 🎭 Анализ через 3 торговые стратегии
 - 🚨 Торговые сигналы в реальном времени
 
-🆕 *Архитектура v3.0:*
+🆕 *Архитектура v3.1:*
 - SimpleCandleSync - REST API синхронизация (крипта)
 - SimpleFuturesSync - YFinance синхронизация (фьючерсы)
 - Repository - прямой доступ к базе данных
 - TechnicalAnalysisContextManager - технический анализ
 - SignalManager - фильтрация + AI обогащение
 - StrategyOrchestrator - управление стратегиями
+- 🆕 Multi-Strategy Analysis - параллельный запуск
 - OpenAI GPT-4 - AI анализ рынка
+
+🎭 *Торговые стратегии:*
+- BreakoutStrategy - торговля пробоев уровней
+- BounceStrategy - торговля отбоев (БСУ-БПУ)
+- FalseBreakoutStrategy - ловля ложных пробоев
 
 🚨 *Торговые сигналы:*
 - Мониторинг в реальном времени
@@ -239,12 +253,14 @@ _(Можете отписаться в меню "Торговые сигналы
 - BTC, ETH, BNB, SOL, XRP, DOGE, ADA и др.
 - Анализ текущей ситуации
 - Технический анализ
+- 🎭 Мнения 3 торговых стратегий
 - AI прогноз на 1-3 дня
 
 **📊 Фьючерсы** - CME micro futures
 - MCL (нефть), MGC (золото)
 - MES (S&P 500), MNQ (Nasdaq)
 - Комплексный технический анализ
+- 🎭 Консенсус стратегий
 - AI оценка перспектив
 
 Нажмите кнопку ниже для выбора ⬇️"""
@@ -356,9 +372,13 @@ _(Можете отписаться в меню "Торговые сигналы
 - Текущая цена и изменения
 - Технический анализ (уровни, ATR, тренд)
 - Данные из базы за последние 24 часа
+- 🎭 Запуск 3 торговых стратегий:
+  • BreakoutStrategy
+  • BounceStrategy
+  • FalseBreakoutStrategy
 - 🤖 AI прогноз от OpenAI GPT-4
 
-⏱️ Анализ займет 5-10 секунд.
+⏱️ Анализ займет 8-12 секунд (запуск стратегий).
 
 Нажмите кнопку для запуска анализа ⬇️"""
             
@@ -375,7 +395,17 @@ _(Можете отписаться в меню "Торговые сигналы
             await callback.answer("❌ Произошла ошибка")
     
     async def handle_request_analysis(self, callback: CallbackQuery):
-        """Обработка запроса анализа - выполняем анализ через Repository + OpenAI"""
+        """
+        🆕 v3.1: Обработка запроса анализа с запуском ВСЕХ стратегий
+        
+        Алгоритм:
+        1. Загрузка всех необходимых свечей (1m, 5m, 1h, 1d)
+        2. Получение технического контекста
+        3. 🆕 ЗАПУСК ВСЕХ СТРАТЕГИЙ
+        4. Формирование analysis_data с мнениями стратегий
+        5. Отправка в OpenAI для комплексного анализа
+        6. Вывод результата пользователю
+        """
         try:
             await callback.answer()
             
@@ -406,36 +436,34 @@ _(Можете отписаться в меню "Торговые сигналы
                 f"{emoji} **АНАЛИЗ {symbol}**\n\n"
                 f"⏳ Собираю данные из БД...\n"
                 f"📊 Получаю технический анализ...\n"
+                f"🎭 Запускаю 3 торговые стратегии...\n"
                 f"🤖 Запрашиваю AI анализ...\n\n"
-                f"_Пожалуйста, подождите 5-10 секунд..._",
+                f"_Пожалуйста, подождите 8-12 секунд..._",
                 parse_mode=ParseMode.MARKDOWN
             )
             
-            logger.info(f"🔬 {user_name} ({user_id}) запустил анализ {symbol}")
+            logger.info(f"🔬 {user_name} ({user_id}) запустил Multi-Strategy анализ {symbol}")
             
             try:
-                # ========== ШАГ 1: Получаем последние свечи из БД ==========
+                # ========== ШАГ 1: Получаем ВСЕ свечи из БД ==========
                 end_time = datetime.now()
                 start_time_24h = end_time - timedelta(hours=24)
                 start_time_1h = end_time - timedelta(hours=1)
+                start_time_5h = end_time - timedelta(hours=5)
+                start_time_180d = end_time - timedelta(days=180)
                 
-                # Получаем часовые свечи за 24ч
-                candles_1h = await self.repository.get_candles(
-                    symbol=symbol.upper(),
-                    interval="1h",
-                    start_time=start_time_24h,
-                    end_time=end_time,
-                    limit=24
+                logger.info(f"📥 Загрузка свечей для {symbol}...")
+                
+                # Параллельная загрузка всех таймфреймов
+                candles_1m, candles_5m, candles_1h, candles_1d = await asyncio.gather(
+                    self.repository.get_candles(symbol.upper(), "1m", start_time=start_time_1h, limit=60),
+                    self.repository.get_candles(symbol.upper(), "5m", start_time=start_time_5h, limit=50),
+                    self.repository.get_candles(symbol.upper(), "1h", start_time=start_time_24h, limit=24),
+                    self.repository.get_candles(symbol.upper(), "1d", start_time=start_time_180d, limit=180)
                 )
                 
-                # Получаем минутные свечи за последний час
-                candles_1m = await self.repository.get_candles(
-                    symbol=symbol.upper(),
-                    interval="1m",
-                    start_time=start_time_1h,
-                    end_time=end_time,
-                    limit=60
-                )
+                logger.info(f"✅ Загружено свечей: 1m={len(candles_1m)}, 5m={len(candles_5m)}, "
+                           f"1h={len(candles_1h)}, 1d={len(candles_1d)}")
                 
                 if not candles_1h or len(candles_1h) < 5:
                     await callback.message.edit_text(
@@ -452,7 +480,6 @@ _(Можете отписаться в меню "Торговые сигналы
                 latest_candle = candles_1h[-1]
                 first_candle_24h = candles_1h[0]
                 
-                # ✅ ИСПРАВЛЕНО: Используем правильные ключи с суффиксом _price
                 current_price = float(latest_candle['close_price'])
                 price_24h_ago = float(first_candle_24h['open_price'])
                 price_change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100
@@ -461,7 +488,7 @@ _(Можете отписаться в меню "Торговые сигналы
                 low_24h = min(float(c['low_price']) for c in candles_1h)
                 volume_24h = sum(float(c['volume']) for c in candles_1h)
                 
-                # Краткосрочные изменения (если есть минутные данные)
+                # Краткосрочные изменения
                 price_change_1m = 0
                 price_change_5m = 0
                 
@@ -470,7 +497,6 @@ _(Можете отписаться в меню "Торговые сигналы
                     candle_5m_ago = candles_1m[-6] if len(candles_1m) >= 6 else candles_1m[0]
                     candle_1m_ago = candles_1m[-2] if len(candles_1m) >= 2 else candles_1m[0]
                     
-                    # ✅ ИСПРАВЛЕНО: Используем правильные ключи
                     price_now = float(latest_1m['close_price'])
                     price_1m = float(candle_1m_ago['close_price'])
                     price_5m = float(candle_5m_ago['close_price'])
@@ -480,7 +506,10 @@ _(Можете отписаться в меню "Торговые сигналы
                     if price_5m > 0:
                         price_change_5m = ((price_now - price_5m) / price_5m) * 100
                 
-                # ========== ШАГ 3: Получаем технический анализ (опционально) ==========
+                logger.info(f"💰 Цена: ${current_price:,.2f}, изменение 24ч: {price_change_24h:+.2f}%")
+                
+                # ========== ШАГ 3: Получаем технический контекст ==========
+                context = None
                 trend = "NEUTRAL"
                 volatility = "MEDIUM"
                 atr = 0.0
@@ -488,39 +517,125 @@ _(Можете отписаться в меню "Торговые сигналы
                 
                 if self.ta_context_manager:
                     try:
-                        context = await self.ta_context_manager.get_context(
-                            symbol=symbol.upper(),
-                            interval="1h"
-                        )
+                        logger.info(f"🧠 Получение технического контекста для {symbol}...")
+                        context = await self.ta_context_manager.get_context(symbol.upper())
                         
                         if context:
-                            trend = context.trend or "NEUTRAL"
-                            volatility = context.volatility or "MEDIUM"
-                            atr = context.atr or 0.0
+                            trend = context.dominant_trend_h1.value if context.dominant_trend_h1 else "NEUTRAL"
+                            volatility = context.volatility_level or "MEDIUM"
+                            
+                            if context.atr_data:
+                                atr = context.atr_data.calculated_atr
                             
                             # Извлекаем ключевые уровни
-                            if hasattr(context, 'support_levels') and context.support_levels:
-                                for level in context.support_levels[:3]:
+                            if context.levels_d1:
+                                for level in context.levels_d1[:5]:  # Топ-5 уровней
                                     key_levels.append({
-                                        'type': 'support',
-                                        'price': level
+                                        'type': level.level_type,
+                                        'price': level.price,
+                                        'strength': level.strength
                                     })
                             
-                            if hasattr(context, 'resistance_levels') and context.resistance_levels:
-                                for level in context.resistance_levels[:3]:
-                                    key_levels.append({
-                                        'type': 'resistance',
-                                        'price': level
-                                    })
-                            
-                            logger.info(f"✅ Получен технический анализ: trend={trend}, volatility={volatility}")
+                            logger.info(f"✅ Технический контекст: trend={trend}, volatility={volatility}, "
+                                       f"atr={atr:.2f}, levels={len(key_levels)}")
                     except Exception as e:
-                        logger.warning(f"⚠️ Не удалось получить технический анализ: {e}")
-                else:
-                    logger.info("ℹ️ TechnicalAnalysisContextManager не доступен")
+                        logger.warning(f"⚠️ Ошибка получения технического контекста: {e}")
                 
-                # ========== ШАГ 4: Формируем данные для OpenAI ==========
+                # ========== ШАГ 4: 🆕 ЗАПУСК ВСЕХ СТРАТЕГИЙ ==========
+                logger.info(f"🎭 Запуск торговых стратегий для {symbol}...")
+                
+                strategies_opinions = []
+                
+                # Проверяем что есть минимум данных для стратегий
+                if len(candles_5m) >= 20 and len(candles_1d) >= 30:
+                    # Импортируем стратегии
+                    from strategies import (
+                        BreakoutStrategy,
+                        BounceStrategy,
+                        FalseBreakoutStrategy
+                    )
+                    
+                    # Создаем экземпляры стратегий
+                    strategies = [
+                        BreakoutStrategy(
+                            symbol=symbol.upper(),
+                            repository=self.repository,
+                            ta_context_manager=self.ta_context_manager
+                        ),
+                        BounceStrategy(
+                            symbol=symbol.upper(),
+                            repository=self.repository,
+                            ta_context_manager=self.ta_context_manager
+                        ),
+                        FalseBreakoutStrategy(
+                            symbol=symbol.upper(),
+                            repository=self.repository,
+                            ta_context_manager=self.ta_context_manager
+                        )
+                    ]
+                    
+                    # Запускаем каждую стратегию
+                    for strategy in strategies:
+                        try:
+                            logger.info(f"   🔄 Запуск {strategy.name}...")
+                            
+                            signal = await strategy.analyze_with_data(
+                                symbol=symbol.upper(),
+                                candles_1m=candles_1m,
+                                candles_5m=candles_5m,
+                                candles_1h=candles_1h,
+                                candles_1d=candles_1d,
+                                ta_context=context
+                            )
+                            
+                            if signal:
+                                # Стратегия нашла сигнал
+                                signal_type = signal.signal_type.value
+                                
+                                if 'BUY' in signal_type:
+                                    opinion = 'BULLISH'
+                                elif 'SELL' in signal_type:
+                                    opinion = 'BEARISH'
+                                else:
+                                    opinion = 'NEUTRAL'
+                                
+                                strategies_opinions.append({
+                                    'name': strategy.name,
+                                    'opinion': opinion,
+                                    'confidence': signal.confidence,
+                                    'reasoning': ', '.join(signal.reasons[:2])  # Первые 2 причины
+                                })
+                                
+                                logger.info(f"   ✅ {strategy.name}: {opinion} (confidence={signal.confidence:.2f})")
+                            else:
+                                # Стратегия не нашла сигнал = нейтральна
+                                strategies_opinions.append({
+                                    'name': strategy.name,
+                                    'opinion': 'NEUTRAL',
+                                    'confidence': 0.5,
+                                    'reasoning': 'Условия для сигнала не выполнены'
+                                })
+                                
+                                logger.info(f"   ℹ️  {strategy.name}: NEUTRAL (нет сигнала)")
+                        
+                        except Exception as e:
+                            logger.error(f"   ❌ Ошибка в {strategy.name}: {e}")
+                            # Добавляем как нейтральную в случае ошибки
+                            strategies_opinions.append({
+                                'name': strategy.name,
+                                'opinion': 'NEUTRAL',
+                                'confidence': 0.3,
+                                'reasoning': f'Ошибка анализа: {str(e)[:50]}'
+                            })
+                    
+                    logger.info(f"🎭 Завершен анализ стратегий: {len(strategies_opinions)} мнений")
+                else:
+                    logger.warning(f"⚠️ Недостаточно данных для запуска стратегий "
+                                  f"(5m={len(candles_5m)}, 1d={len(candles_1d)})")
+                
+                # ========== ШАГ 5: Формируем данные для OpenAI ==========
                 analysis_data = {
+                    # Основные показатели
                     'symbol': symbol,
                     'current_price': current_price,
                     'price_change_24h': price_change_24h,
@@ -529,23 +644,26 @@ _(Можете отписаться в меню "Торговые сигналы
                     'volume_24h': volume_24h,
                     'high_24h': high_24h,
                     'low_24h': low_24h,
+                    
+                    # Технический анализ
                     'trend': trend,
                     'volatility': volatility,
                     'atr': atr,
                     'key_levels': key_levels,
-                    'strategies_opinions': []  # Можно добавить если есть
+                    
+                    # 🆕 МНЕНИЯ СТРАТЕГИЙ
+                    'strategies_opinions': strategies_opinions
                 }
                 
-                logger.info(f"📊 Данные для анализа подготовлены:")
+                logger.info(f"📊 Данные для AI подготовлены:")
                 logger.info(f"   • Цена: ${current_price:,.2f}")
                 logger.info(f"   • Изменение 24ч: {price_change_24h:+.2f}%")
-                logger.info(f"   • Свечей 1h: {len(candles_1h)}")
-                logger.info(f"   • Свечей 1m: {len(candles_1m)}")
                 logger.info(f"   • Тренд: {trend}")
                 logger.info(f"   • Ключевых уровней: {len(key_levels)}")
+                logger.info(f"   • Мнений стратегий: {len(strategies_opinions)}")
                 
-                # ========== ШАГ 5: Получаем AI анализ ==========
-                logger.info("🤖 Запрос AI анализа к OpenAI...")
+                # ========== ШАГ 6: Получаем AI анализ ==========
+                logger.info(f"🤖 Запрос комплексного AI анализа к OpenAI...")
                 ai_analysis = await self.openai_analyzer.comprehensive_market_analysis(analysis_data)
                 
                 if not ai_analysis or len(ai_analysis) < 50:
@@ -554,7 +672,28 @@ _(Можете отписаться в меню "Торговые сигналы
                 else:
                     logger.info(f"✅ AI анализ получен ({len(ai_analysis)} символов)")
                 
-                # ========== ШАГ 6: Формируем сообщение ==========
+                # ========== ШАГ 7: Формируем сообщение ==========
+                
+                # Формируем секцию с мнениями стратегий
+                strategies_text = ""
+                if strategies_opinions:
+                    strategies_text = "\n🎭 **Мнения торговых стратегий:**\n"
+                    
+                    for opinion in strategies_opinions:
+                        emoji_opinion = {
+                            'BULLISH': '🟢',
+                            'BEARISH': '🔴',
+                            'NEUTRAL': '🔶'
+                        }.get(opinion['opinion'], '⚪')
+                        
+                        confidence_pct = opinion['confidence'] * 100
+                        
+                        strategies_text += (
+                            f"{emoji_opinion} *{opinion['name']}*: {opinion['opinion']} "
+                            f"({confidence_pct:.0f}%)\n"
+                            f"   _{opinion['reasoning']}_\n"
+                        )
+                
                 message_text = f"""{emoji} **АНАЛИЗ {symbol}**
 
 💰 **Текущая цена:** ${current_price:,.2f}
@@ -573,12 +712,12 @@ _(Можете отписаться в меню "Торговые сигналы
 - Тренд: {trend}
 - Волатильность: {volatility}
 - ATR: {atr:.2f}
-
+{strategies_text}
 🤖 **AI АНАЛИЗ:**
 
 {ai_analysis}
 
-_Анализ основан на {len(candles_1h)} часовых свечах из базы данных_
+_Анализ основан на {len(candles_1h)} часовых свечах и мнениях {len(strategies_opinions)} стратегий_
 """
                 
                 keyboard = self._create_analysis_result_menu()
@@ -589,7 +728,7 @@ _Анализ основан на {len(candles_1h)} часовых свечах 
                     parse_mode=ParseMode.MARKDOWN
                 )
                 
-                logger.info(f"✅ Анализ {symbol} отправлен пользователю {user_id}")
+                logger.info(f"✅ Multi-Strategy анализ {symbol} отправлен пользователю {user_id}")
                 
                 if user_id in self.user_analysis_state:
                     del self.user_analysis_state[user_id]
@@ -633,8 +772,8 @@ _Анализ основан на {len(candles_1h)} часовых свечах 
             
             about_text = """ℹ️ *О боте*
 
-🤖 *Bybit Trading Bot v3.0*
-Direct Repository + AI Edition
+🤖 *Bybit Trading Bot v3.1*
+Multi-Strategy + AI Edition
 
 *🏗️ Упрощенная архитектура:*
 - 🔄 SimpleCandleSync - REST API синхронизация криптовалют
@@ -659,14 +798,11 @@ Direct Repository + AI Edition
   - Определение трендов и уровней
   - Кэширование результатов
 
-- 📊 MarketDataManager (опционально)
-  - WebSocket ticker для real-time цен
-  - Кэширование REST API запросов
-  - Переподключение при разрыве
-
 - 🎭 StrategyOrchestrator
   - Координация торговых стратегий
-  - MomentumStrategy для импульсов
+  - 🆕 BreakoutStrategy - пробои уровней
+  - 🆕 BounceStrategy - отбои от уровней
+  - 🆕 FalseBreakoutStrategy - ложные пробои
   - Параллельное выполнение анализа
 
 - 🎛️ SignalManager + AI
@@ -674,6 +810,12 @@ Direct Repository + AI Edition
   - Управление кулдаунами
   - Приоритизация сигналов
   - 🤖 AI обогащение каждого сигнала через OpenAI GPT-4
+
+*🆕 Multi-Strategy Analysis v3.1:*
+- При анализе запускаются ВСЕ 3 стратегии
+- OpenAI получает консенсус стратегий
+- Более точный и обоснованный анализ
+- Учет разных торговых подходов
 
 *Технологии:*
 - 📈 Bybit REST API v5 для криптовалют
@@ -697,11 +839,12 @@ Direct Repository + AI Edition
 - ✅ Health monitoring
 - ✅ Graceful shutdown
 
-*Особенности v3.0:*
+*Особенности v3.1:*
 - ✅ Прямой доступ к данным через Repository
 - ✅ Упрощенная архитектура без лишних слоев
 - ✅ AI анализ через OpenAI GPT-4
 - ✅ Поддержка крипты + фьючерсов
+- ✅ 🆕 Запуск всех 3 стратегий при анализе
 
 *Режим работы:*
 - 🔗 Webhook для мгновенных ответов
@@ -735,7 +878,7 @@ Direct Repository + AI Edition
             status_text = "✅ Активна" if is_subscribed else "❌ Неактивна"
             subscribers_count = len(self.signal_subscribers)
             
-            menu_text = f"""🚨 *Торговые сигналы v3.0*
+            menu_text = f"""🚨 *Торговые сигналы v3.1*
 
 📊 *Статус подписки:* {status_text}
 👥 *Подписчиков:* {subscribers_count}
@@ -745,13 +888,11 @@ Direct Repository + AI Edition
 - SimpleFuturesSync - актуальные данные фьючерсов
 - Repository - прямой доступ к БД
 - TechnicalAnalysisContextManager - технический анализ
-- MarketDataManager - real-time WebSocket ticker
 - StrategyOrchestrator - управление стратегиями
 - SignalManager - умная фильтрация
 - 🤖 OpenAI GPT-4 - AI анализ каждого сигнала
-- MomentumStrategy - импульсная торговля
 
-🔥 *Особенности v3.0:*
+🔥 *Особенности v3.1:*
 - ✅ Автоподписка при /start
 - REST API синхронизация без deadlock
 - Параллельная обработка крипты и фьючерсов
@@ -779,7 +920,6 @@ Direct Repository + AI Edition
 - Bybit REST API - криптовалюты
 - Yahoo Finance - CME фьючерсы
 - PostgreSQL - исторические данные
-- WebSocket - real-time цены (опционально)
 - OpenAI GPT-4 - AI анализ
 
 ⚠️ *ВНИМАНИЕ:* Торговые сигналы несут высокие риски! Это не инвестиционный совет!"""
@@ -808,22 +948,19 @@ Direct Repository + AI Edition
             
             await callback.message.edit_text(
                 "✅ *Подписка активирована!*\n\n"
-                "Теперь вы будете получать торговые сигналы от системы v3.0.\n\n"
+                "Теперь вы будете получать торговые сигналы от системы v3.1.\n\n"
                 "🏗️ *Сигналы генерируются через:*\n"
                 "• SimpleCandleSync - синхронизация криптовалют\n"
                 "• SimpleFuturesSync - синхронизация фьючерсов\n"
                 "• Repository - прямой доступ к БД\n"
                 "• TechnicalAnalysisContextManager - технический анализ\n"
-                "• MarketDataManager - real-time данные\n"
                 "• StrategyOrchestrator - координация стратегий\n"
                 "• SignalManager - фильтрация и обработка\n"
-                "• 🤖 OpenAI GPT-4 - AI анализ каждого сигнала\n"
-                "• MomentumStrategy - импульсная стратегия\n\n"
+                "• 🤖 OpenAI GPT-4 - AI анализ каждого сигнала\n\n"
                 "🔥 *Основа сигналов:*\n"
                 "• REST API синхронизация без блокировок\n"
                 "• Анализ 15 криптопар + 4 фьючерса\n"
                 "• Движения цены за 1m, 5m, 15m, 1h\n"
-                "• Мониторинг WebSocket ticker\n"
                 "• Объемный анализ торгов\n"
                 "• Детекция экстремальных движений\n"
                 "• 🤖 AI контекстный анализ от OpenAI\n\n"
@@ -839,7 +976,7 @@ Direct Repository + AI Edition
                 parse_mode=ParseMode.MARKDOWN
             )
             
-            logger.info(f"📡 Пользователь {user_name} ({user_id}) подписался на сигналы v3.0")
+            logger.info(f"📡 Пользователь {user_name} ({user_id}) подписался на сигналы v3.1")
             
         except Exception as e:
             logger.error(f"❌ Ошибка подписки на сигналы: {e}")
@@ -924,7 +1061,7 @@ Direct Repository + AI Edition
             
             keyboard = self._create_main_menu()
             
-            welcome_text = """🤖 *Bybit Trading Bot v3.0*
+            welcome_text = """🤖 *Bybit Trading Bot v3.1*
 
 Главное меню. Выберите действие:"""
             
@@ -965,7 +1102,7 @@ Direct Repository + AI Edition
                 
                 await message.answer(
                     "📊 Хотите получить AI анализ рынка?\n"
-                    "_Данные берутся из БД + OpenAI GPT-4_",
+                    "_Данные берутся из БД + 3 стратегии + OpenAI GPT-4_",
                     reply_markup=builder.as_markup(),
                     parse_mode=ParseMode.MARKDOWN
                 )
@@ -978,7 +1115,7 @@ Direct Repository + AI Edition
                 
                 await message.answer(
                     "🚨 Хотите настроить торговые сигналы?\n"
-                    "_Сигналы генерируются через StrategyOrchestrator v3.0 с AI_",
+                    "_Сигналы генерируются через StrategyOrchestrator v3.1 с AI_",
                     reply_markup=builder.as_markup(),
                     parse_mode=ParseMode.MARKDOWN
                 )
@@ -987,7 +1124,7 @@ Direct Repository + AI Edition
             else:
                 response_text = """🤖 Я анализирую рынок криптовалют и фьючерсов, отправляю торговые сигналы с AI!
 
-🆕 *Версия 3.0 - Direct Repository + AI Edition*
+🆕 *Версия 3.1 - Multi-Strategy + AI Edition*
 
 При /start вы автоматически подписываетесь на сигналы!
 
@@ -996,7 +1133,7 @@ Direct Repository + AI Edition
 /help - справка
 
 Или просто напишите:
-- "анализ" для AI анализа рынка
+- "анализ" для AI анализа рынка (+ 3 стратегии)
 - "сигналы" для настройки уведомлений
 - "помощь" для подробной информации"""
                 
