@@ -9,17 +9,21 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from telegram_bot import TelegramBot
 from config import Config
 
-# Модульная архитектура
+# Модульная архитектура v3.0
 from market_data import MarketDataManager
-from core import SignalManager, StrategyOrchestrator
-from core.data_models import SystemConfig, StrategyConfig, create_default_system_config
-from strategies import MomentumStrategy
+
+# ✅ ИСПРАВЛЕНО: Правильные импорты
+from core.signal_manager import SignalManager
+from strategies.strategy_orchestrator import StrategyOrchestrator
 
 # ✅ SimpleCandleSync для криптовалют (Bybit)
 from market_data.simple_candle_sync import SimpleCandleSync
 
 # ✅ SimpleFuturesSync для фьючерсов (YFinance)
 from market_data.simple_futures_sync import SimpleFuturesSync
+
+# ✅ TechnicalAnalysisContextManager
+from strategies.technical_analysis.context_manager import TechnicalAnalysisContextManager
 
 # База данных
 from database import initialize_database, close_database, get_database_health
@@ -40,7 +44,7 @@ WEBHOOK_SECRET = "bybit_trading_bot_secret_2025"
 # URL вашего сервера
 BASE_WEBHOOK_URL = "https://bybitmybot.onrender.com"
 
-# ✅ Глобальные переменные (упрощенная версия)
+# ✅ Глобальные переменные (упрощенная версия v3.0)
 bot_instance = None
 market_data_manager = None  # Опционально (WebSocket ticker)
 signal_manager = None
@@ -48,20 +52,13 @@ strategy_orchestrator = None
 simple_candle_sync = None
 simple_futures_sync = None
 ta_context_manager = None
-repository = None  # ✅ ДОБАВИТЬ
-system_config = None
+repository = None
 database_initialized = False
 
 
 def serialize_datetime_objects(obj):
     """
     Рекурсивно сериализует datetime объекты в ISO строки для JSON совместимости
-    
-    Args:
-        obj: Объект который может содержать datetime экземпляры
-        
-    Returns:
-        Объект с datetime экземплярами, преобразованными в строки
     """
     if isinstance(obj, datetime):
         return obj.isoformat()
@@ -72,7 +69,6 @@ def serialize_datetime_objects(obj):
     elif isinstance(obj, tuple):
         return tuple(serialize_datetime_objects(item) for item in obj)
     elif hasattr(obj, '__dict__'):
-        # Для пользовательских объектов с атрибутами
         return {key: serialize_datetime_objects(value) for key, value in obj.__dict__.items()}
     else:
         return obj
@@ -95,13 +91,12 @@ async def health_check(request):
         # Проверяем БД
         db_health = await get_database_health()
         
-        # ✅ Проверяем все компоненты
+        # ✅ Проверяем все компоненты v3.0
         trading_system_status = {
             "simple_candle_sync": "inactive",
             "simple_futures_sync": "inactive",
             "ta_context_manager": "inactive",
-            "repository": "inactive",  # ✅
-            "market_data_manager": "inactive",
+            "repository": "inactive",
             "signal_manager": "inactive", 
             "strategy_orchestrator": "inactive",
             "strategies_active": 0
@@ -131,7 +126,7 @@ async def health_check(request):
                 logger.warning(f"TechnicalAnalysisContextManager health check failed: {e}")
                 trading_system_status["ta_context_manager"] = "error"
         
-        # ✅ Repository статус
+        # Repository статус
         if repository:
             try:
                 trading_system_status["repository"] = "active"
@@ -139,14 +134,7 @@ async def health_check(request):
                 logger.warning(f"Repository health check failed: {e}")
                 trading_system_status["repository"] = "error"
         
-        if market_data_manager:
-            try:
-                health_status = market_data_manager.get_health_status()
-                trading_system_status["market_data_manager"] = health_status.get("overall_status", "unknown")
-            except Exception as e:
-                logger.warning(f"Market data manager health check failed: {e}")
-                trading_system_status["market_data_manager"] = "error"
-        
+        # SignalManager статус
         if signal_manager:
             try:
                 trading_system_status["signal_manager"] = "running" if signal_manager.is_running else "inactive"
@@ -154,10 +142,11 @@ async def health_check(request):
                 logger.warning(f"Signal manager health check failed: {e}")
                 trading_system_status["signal_manager"] = "error"
         
+        # StrategyOrchestrator статус
         if strategy_orchestrator:
             try:
-                trading_system_status["strategy_orchestrator"] = strategy_orchestrator.status.value
-                trading_system_status["strategies_active"] = strategy_orchestrator._count_active_strategies()
+                trading_system_status["strategy_orchestrator"] = "running" if strategy_orchestrator.is_running else "inactive"
+                trading_system_status["strategies_active"] = len(strategy_orchestrator.strategies)
             except Exception as e:
                 logger.warning(f"Strategy orchestrator health check failed: {e}")
                 trading_system_status["strategy_orchestrator"] = "error"
@@ -209,7 +198,6 @@ async def database_status(request):
     try:
         db_health = await get_database_health()
         
-        # Дополнительная информация о БД
         additional_info = {
             "config": {
                 "database_url_configured": bool(Config.get_database_url()),
@@ -225,7 +213,6 @@ async def database_status(request):
             "initialized": database_initialized
         }
         
-        # Сериализуем datetime объекты
         response_data = serialize_datetime_objects(response_data)
         
         return web.json_response(response_data)
@@ -346,138 +333,8 @@ async def ta_context_status_handler(request):
         }, status=500)
 
 
-# ========== YFINANCE STATUS ENDPOINTS ==========
-
-async def yfinance_status_handler(request):
-    """Проверка статуса YFinance WebSocket"""
-    try:
-        if not market_data_manager:
-            return web.json_response({
-                "status": "error",
-                "message": "MarketDataManager not initialized"
-            }, status=503)
-        
-        # Проверяем YFinance провайдер
-        yf_provider = market_data_manager.yfinance_websocket_provider
-        
-        if not yf_provider:
-            return web.json_response({
-                "status": "disabled",
-                "message": "YFinance WebSocket provider not initialized",
-                "config": {
-                    "enabled": Config.YFINANCE_WEBSOCKET_ENABLED,
-                    "symbols": Config.get_yfinance_symbols()
-                }
-            })
-        
-        # Получаем статистику
-        is_running = yf_provider.is_running()
-        stats = yf_provider.get_current_stats()
-        connection_stats = yf_provider.get_connection_stats()
-        
-        # Получаем снимки всех фьючерсов
-        futures_snapshots = {}
-        for symbol in Config.get_yfinance_symbols():
-            snapshot = await market_data_manager.get_futures_snapshot(symbol)
-            if snapshot:
-                futures_snapshots[symbol] = snapshot.to_dict()
-        
-        response_data = {
-            "status": "running" if is_running else "stopped",
-            "is_running": is_running,
-            "symbols": Config.get_yfinance_symbols(),
-            "connection_stats": connection_stats,
-            "current_stats": stats,
-            "futures_snapshots": futures_snapshots,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # Сериализуем datetime объекты
-        response_data = serialize_datetime_objects(response_data)
-        
-        return web.json_response(response_data)
-        
-    except Exception as e:
-        logger.error(f"Error getting YFinance status: {e}")
-        logger.error(traceback.format_exc())
-        return web.json_response({
-            "status": "error",
-            "error": str(e)
-        }, status=500)
-
-
-async def market_data_status_handler(request):
-    """Полный статус всех источников данных (Bybit + YFinance)"""
-    try:
-        if not market_data_manager:
-            return web.json_response({
-                "status": "error",
-                "message": "MarketDataManager not initialized"
-            }, status=503)
-        
-        # Получаем общую статистику
-        stats = market_data_manager.get_stats()
-        health = market_data_manager.get_health_status()
-        
-        # Bybit статус
-        bybit_status = {
-            "websocket_active": stats.get('bybit_websocket_active', False),
-            "rest_api_active": stats.get('rest_api_active', False),
-            "websocket_updates": stats.get('bybit_websocket_updates', 0),
-            "rest_api_calls": stats.get('bybit_rest_api_calls', 0),
-            "symbols": Config.get_bybit_symbols(),
-            "current_price": market_data_manager.get_current_price() if stats.get('bybit_websocket_active') else 0
-        }
-        
-        # YFinance статус
-        yfinance_status = {
-            "websocket_active": stats.get('yfinance_websocket_active', False),
-            "websocket_updates": stats.get('yfinance_websocket_updates', 0),
-            "enabled": Config.YFINANCE_WEBSOCKET_ENABLED,
-            "symbols": Config.get_yfinance_symbols()
-        }
-        
-        # Получаем цены фьючерсов
-        futures_prices = {}
-        if Config.YFINANCE_WEBSOCKET_ENABLED and stats.get('yfinance_websocket_active'):
-            for symbol in Config.get_yfinance_symbols():
-                price = market_data_manager.get_futures_price(symbol)
-                futures_prices[symbol] = price
-        
-        response_data = {
-            "status": "ok",
-            "overall_health": health['overall_status'],
-            "bybit": bybit_status,
-            "yfinance": yfinance_status,
-            "futures_prices": futures_prices,
-            "general_stats": {
-                "uptime_formatted": stats.get('uptime_formatted', '0:00:00'),
-                "total_snapshots": stats.get('data_snapshots_created', 0),
-                "futures_snapshots": stats.get('futures_snapshots_created', 0),
-                "errors": stats.get('errors', 0),
-                "success_rate": stats.get('success_rate_percent', 100)
-            },
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # Сериализуем datetime объекты
-        response_data = serialize_datetime_objects(response_data)
-        
-        return web.json_response(response_data)
-        
-    except Exception as e:
-        logger.error(f"Error getting market data status: {e}")
-        logger.error(traceback.format_exc())
-        return web.json_response({
-            "status": "error",
-            "error": str(e)
-        }, status=500)
-
-
-# ========== ОСТАЛЬНЫЕ ENDPOINTS ==========
-
 async def trading_system_status_handler(request):
-    """Endpoint для статуса торговой системы"""
+    """Endpoint для статуса торговой системы v3.0"""
     try:
         response_data = {}
         
@@ -505,7 +362,7 @@ async def trading_system_status_handler(request):
                 logger.warning(f"Failed to get ta_context_manager stats: {e}")
                 response_data["ta_context_manager"] = {"error": str(e)}
         
-        # ✅ Repository статус
+        # Repository статус
         if repository:
             try:
                 response_data["repository"] = {
@@ -515,14 +372,6 @@ async def trading_system_status_handler(request):
             except Exception as e:
                 logger.warning(f"Failed to get repository status: {e}")
                 response_data["repository"] = {"error": str(e)}
-        
-        # MarketDataManager статус
-        if market_data_manager:
-            try:
-                response_data["market_data_manager"] = market_data_manager.get_stats()
-            except Exception as e:
-                logger.warning(f"Failed to get market data stats: {e}")
-                response_data["market_data_manager"] = {"error": str(e)}
         
         # SignalManager статус
         if signal_manager:
@@ -547,8 +396,8 @@ async def trading_system_status_handler(request):
                 "simple_futures_sync": simple_futures_sync.get_health_status() if simple_futures_sync else None,
                 "ta_context_manager": ta_context_manager.get_health_status() if ta_context_manager else None,
                 "repository": "active" if repository else None,
-                "market_data": market_data_manager.get_health_status() if market_data_manager else None,
-                "strategies": strategy_orchestrator.get_health_status() if strategy_orchestrator else None
+                "signal_manager": signal_manager.get_health_status() if signal_manager else None,
+                "orchestrator": strategy_orchestrator.get_health_status() if strategy_orchestrator else None
             }
         except Exception as e:
             logger.warning(f"Failed to get system health: {e}")
@@ -564,7 +413,6 @@ async def trading_system_status_handler(request):
         response_data["timestamp"] = datetime.now().isoformat()
         response_data["status"] = "active"
         
-        # Сериализуем все datetime объекты
         response_data = serialize_datetime_objects(response_data)
         
         return web.json_response(response_data)
@@ -578,477 +426,22 @@ async def trading_system_status_handler(request):
         }, status=500)
 
 
-async def load_historical_data_handler(request):
-    """Endpoint для загрузки исторических данных через API"""
-    try:
-        # Проверяем что БД инициализирована
-        if not database_initialized:
-            return web.json_response({
-                "status": "error",
-                "message": "Database not initialized"
-            }, status=503)
-        
-        # Получаем параметры из request
-        try:
-            if request.content_type == 'application/json':
-                data = await request.json()
-            else:
-                data = {}
-        except Exception as e:
-            logger.warning(f"Failed to parse JSON, using defaults: {e}")
-            data = {}
-        
-        # Параметры по умолчанию
-        symbol = data.get('symbol', Config.SYMBOL)
-        days = int(data.get('days', 7))
-        intervals = data.get('intervals', ["1m", "5m", "1h", "1d"])
-        testnet = data.get('testnet', Config.BYBIT_TESTNET)
-        
-        # Валидация параметров
-        if days <= 0 or days > 365:
-            return web.json_response({
-                "status": "error",
-                "message": "Days must be between 1 and 365"
-            }, status=400)
-        
-        if not isinstance(intervals, list) or len(intervals) == 0:
-            return web.json_response({
-                "status": "error", 
-                "message": "Intervals must be a non-empty list"
-            }, status=400)
-        
-        logger.info(f"🚀 Запуск загрузки исторических данных:")
-        logger.info(f"   Symbol: {symbol}")
-        logger.info(f"   Days: {days}")
-        logger.info(f"   Intervals: {intervals}")
-        logger.info(f"   Testnet: {testnet}")
-        
-        # Проверяем доступность pybit
-        try:
-            from pybit.unified_trading import HTTP
-            logger.info("✅ pybit library available")
-        except ImportError as e:
-            logger.error(f"❌ pybit library not installed: {e}")
-            return web.json_response({
-                "status": "error",
-                "message": "pybit library not installed. Please install with: pip install pybit>=5.3.0",
-                "details": str(e)
-            }, status=500)
-        
-        # Проверяем БД подключение
-        try:
-            from database.connections import get_connection_manager
-            db_manager = await get_connection_manager()
-            health = await db_manager.get_health_status()
-            
-            if not health.get("healthy", False):
-                return web.json_response({
-                    "status": "error",
-                    "message": "Database connection unhealthy",
-                    "db_status": health
-                }, status=503)
-                
-            logger.info("✅ Database connection verified")
-            
-        except Exception as e:
-            logger.error(f"❌ Database connection failed: {e}")
-            return web.json_response({
-                "status": "error",
-                "message": f"Database connection failed: {str(e)}"
-            }, status=503)
-        
-        # Пробуем создать и инициализировать загрузчик
-        start_time = datetime.now()
-        
-        try:
-            logger.info("📦 Importing loader components...")
-            from database.loaders import create_historical_loader
-            
-            logger.info("🔧 Creating historical data loader...")
-            loader = await create_historical_loader(
-                symbol=symbol,
-                testnet=testnet,
-                enable_progress_tracking=True,
-                max_concurrent_requests=2,
-                batch_size=500
-            )
-            
-            logger.info("✅ Loader created and initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to create/initialize loader: {e}")
-            logger.error(f"Loader creation traceback: {traceback.format_exc()}")
-            
-            return web.json_response({
-                "status": "error",
-                "message": f"Failed to initialize data loader: {str(e)}",
-                "error_type": type(e).__name__,
-                "parameters": {
-                    "symbol": symbol,
-                    "testnet": testnet
-                }
-            }, status=500)
-        
-        # Запускаем загрузку данных
-        try:
-            logger.info("📥 Starting data loading process...")
-            
-            from database.loaders import load_year_data
-            
-            result = await load_year_data(
-                symbol=symbol,
-                intervals=intervals,
-                testnet=testnet,
-                start_date=datetime.now() - timedelta(days=days)
-            )
-            
-            end_time = datetime.now()
-            duration = (end_time - start_time).total_seconds()
-            
-            logger.info(f"✅ Загрузка данных завершена за {duration:.1f}s")
-            
-        except Exception as e:
-            logger.error(f"❌ Data loading failed: {e}")
-            logger.error(f"Loading traceback: {traceback.format_exc()}")
-            
-            return web.json_response({
-                "status": "error",
-                "message": f"Data loading failed: {str(e)}",
-                "error_type": type(e).__name__,
-                "parameters": {
-                    "symbol": symbol,
-                    "days": days,
-                    "intervals": intervals
-                }
-            }, status=500)
-        
-        finally:
-            try:
-                if 'loader' in locals():
-                    await loader.close()
-                    logger.info("🔐 Loader resources closed")
-            except Exception as e:
-                logger.warning(f"⚠️ Error closing loader: {e}")
-        
-        # Проверяем результат
-        try:
-            db_manager = await get_connection_manager()
-            count_result = await db_manager.fetchval(
-                "SELECT COUNT(*) FROM market_data_candles WHERE symbol = $1", 
-                symbol.upper()
-            )
-            total_candles = count_result if count_result else 0
-            
-        except Exception as e:
-            logger.warning(f"Failed to count candles: {e}")
-            total_candles = "unknown"
-        
-        response_data = {
-            "status": "success",
-            "message": f"Historical data loaded successfully for {symbol}",
-            "parameters": {
-                "symbol": symbol,
-                "days": days,
-                "intervals": intervals,
-                "testnet": testnet
-            },
-            "result": result,
-            "duration_seconds": round(duration, 2),
-            "total_candles_in_db": total_candles,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        response_data = serialize_datetime_objects(response_data)
-        
-        return web.json_response(response_data)
-        
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка в load_historical_data_handler: {e}")
-        logger.error(f"Handler traceback: {traceback.format_exc()}")
-        
-        return web.json_response({
-            "status": "error", 
-            "message": str(e),
-            "error_type": type(e).__name__,
-            "timestamp": datetime.now().isoformat()
-        }, status=500)
-
-
-async def check_database_data_handler(request):
-    """Endpoint для проверки данных в БД"""
-    try:
-        if not database_initialized:
-            return web.json_response({
-                "status": "error",
-                "message": "Database not initialized"
-            }, status=503)
-        
-        from database.connections import get_connection_manager
-        db_manager = await get_connection_manager()
-        
-        # Общая статистика
-        total_count = await db_manager.fetchval("SELECT COUNT(*) FROM market_data_candles")
-        
-        # Статистика по символам и интервалам
-        stats_query = """
-        SELECT 
-            symbol, 
-            interval, 
-            COUNT(*) as count,
-            MIN(open_time) as earliest_data,
-            MAX(open_time) as latest_data,
-            MAX(open_time) - MIN(open_time) as data_range,
-            MAX(created_at) as last_inserted,
-            data_source
-        FROM market_data_candles 
-        GROUP BY symbol, interval, data_source
-        ORDER BY symbol, interval
-        """
-        
-        stats_results = await db_manager.fetch(stats_query)
-        
-        # Последние записи
-        latest_query = """
-        SELECT symbol, interval, open_time, close_price, volume, data_source, created_at
-        FROM market_data_candles 
-        ORDER BY created_at DESC 
-        LIMIT 10
-        """
-        
-        latest_results = await db_manager.fetch(latest_query)
-        
-        response_data = {
-            "status": "success",
-            "timestamp": datetime.now().isoformat(),
-            "summary": {
-                "total_candles": total_count,
-                "symbols_intervals": len(stats_results)
-            },
-            "data_by_interval": [
-                {
-                    "symbol": row["symbol"],
-                    "interval": row["interval"], 
-                    "count": row["count"],
-                    "data_source": row.get("data_source", "unknown"),
-                    "earliest_data": row["earliest_data"].isoformat() if row["earliest_data"] else None,
-                    "latest_data": row["latest_data"].isoformat() if row["latest_data"] else None,
-                    "data_range_days": row["data_range"].days if row["data_range"] else 0,
-                    "last_inserted": row["last_inserted"].isoformat() if row["last_inserted"] else None
-                }
-                for row in stats_results
-            ],
-            "latest_entries": [
-                {
-                    "symbol": row["symbol"],
-                    "interval": row["interval"],
-                    "open_time": row["open_time"].isoformat(),
-                    "close_price": float(row["close_price"]),
-                    "volume": float(row["volume"]),
-                    "data_source": row.get("data_source", "unknown"),
-                    "created_at": row["created_at"].isoformat()
-                }
-                for row in latest_results
-            ]
-        }
-        
-        return web.json_response(response_data)
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка проверки данных БД: {e}")
-        return web.json_response({
-            "status": "error",
-            "message": str(e),
-            "timestamp": datetime.now().isoformat()
-        }, status=500)
-
-
-async def get_strategies_handler(request):
-    """Endpoint для получения списка доступных стратегий"""
-    try:
-        from strategies import get_available_strategies
-        
-        strategies = []
-        for key, info in get_available_strategies().items():
-            strategies.append({
-                "value": key,
-                "label": info["name"],
-                "description": info["description"]
-            })
-        
-        logger.info(f"📊 Возвращено {len(strategies)} доступных стратегий")
-        
-        return web.json_response({
-            "status": "success",
-            "strategies": strategies,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка получения стратегий: {e}")
-        return web.json_response({
-            "status": "error",
-            "message": str(e),
-            "timestamp": datetime.now().isoformat()
-        }, status=500)
-
-
-async def run_backtest_handler(request):
-    """Endpoint для бэктестинга с умной агрегацией данных"""
-    try:
-        if not database_initialized:
-            return web.json_response({
-                "status": "error",
-                "message": "Database not initialized"
-            }, status=503)
-        
-        # GET запрос - возвращаем интерактивный дашборд
-        if request.method == 'GET':
-            from backtesting import ReportGenerator
-            html = ReportGenerator.generate_dashboard_html()
-            return web.Response(text=html, content_type='text/html')
-        
-        # POST запрос - выполняем бэктест и возвращаем JSON
-        try:
-            params = await request.json()
-        except:
-            return web.json_response({
-                "status": "error",
-                "message": "Invalid JSON"
-            }, status=400)
-        
-        symbol = params.get('symbol', Config.SYMBOL)
-        interval = params.get('interval', '1h')
-        initial_capital = float(params.get('initial_capital', 10000))
-        strategy_type = params.get('strategy', 'momentum')
-        
-        # Параметры периода (опционально)
-        days = params.get('days', 365)  # По умолчанию 365 дней
-        
-        logger.info(f"🎯 Запуск бэктестинга: {symbol}, {interval}, капитал=${initial_capital:,.2f}, стратегия={strategy_type}, период={days}д")
-        
-        # Импорты
-        from backtesting import BacktestEngine, ReportGenerator
-        from database.repositories import get_market_data_repository
-        from strategies import create_strategy, get_available_strategies
-        
-        # Проверяем доступность стратегии
-        available_strategies = get_available_strategies()
-        if strategy_type not in available_strategies:
-            return web.json_response({
-                "status": "error",
-                "message": f"Strategy '{strategy_type}' not available",
-                "available_strategies": list(available_strategies.keys())
-            }, status=400)
-        
-        # Загружаем данные через репозиторий с умной агрегацией
-        repository = await get_market_data_repository()
-        
-        # Определяем временной диапазон
-        end_time = datetime.now()
-        start_time = end_time - timedelta(days=days)
-        
-        logger.info(f"📊 Загрузка данных из БД: {start_time.date()} - {end_time.date()}")
-        
-        try:
-            # Используем get_candles_smart для автоматической агрегации
-            candles_raw = await repository.get_candles_smart(
-                symbol=symbol.upper(),
-                interval=interval,
-                start_time=start_time,
-                end_time=end_time
-            )
-        except Exception as e:
-            logger.error(f"❌ Ошибка загрузки данных: {e}")
-            logger.error(traceback.format_exc())
-            return web.json_response({
-                "status": "error",
-                "message": f"Failed to load data: {str(e)}"
-            }, status=500)
-        
-        if not candles_raw:
-            return web.json_response({
-                "status": "error",
-                "message": f"No data found for {symbol} {interval} in specified period. Try loading historical data first via /admin/load-history"
-            }, status=404)
-        
-        # Преобразуем в формат для бэктеста
-        candles = []
-        for candle in candles_raw:
-            candles.append({
-                'symbol': candle['symbol'],
-                'interval': candle['interval'],
-                'open_time': candle['open_time'].isoformat() if isinstance(candle['open_time'], datetime) else candle['open_time'],
-                'close_time': candle['close_time'].isoformat() if isinstance(candle['close_time'], datetime) else candle['close_time'],
-                'open': float(candle['open']),
-                'high': float(candle['high']),
-                'low': float(candle['low']),
-                'close': float(candle['close']),
-                'volume': float(candle['volume'])
-            })
-        
-        logger.info(f"📊 Загружено {len(candles)} свечей ({interval}) из БД")
-        logger.info(f"   • Период: {candles[0]['open_time']} - {candles[-1]['open_time']}")
-        
-        # Создаем стратегию
-        try:
-            strategy = create_strategy(
-                strategy_type=strategy_type,
-                symbol=symbol,
-                min_signal_strength=0.5,
-                signal_cooldown_minutes=60
-            )
-            logger.info(f"✅ Стратегия '{strategy_type}' создана успешно")
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания стратегии: {e}")
-            return web.json_response({
-                "status": "error",
-                "message": f"Failed to create strategy: {str(e)}"
-            }, status=500)
-        
-        # Создаем движок бэктестинга
-        engine = BacktestEngine(
-            initial_capital=initial_capital,
-            commission_rate=0.001,
-            position_size_pct=0.95
-        )
-        
-        # Запускаем бэктест
-        result = await engine.run_backtest(candles, strategy, symbol)
-        
-        # Возвращаем JSON
-        json_data = ReportGenerator.generate_backtest_json(result)
-        
-        logger.info(f"✅ Бэктест завершен: PnL={result.total_pnl_percent:+.2f}%")
-        
-        return web.json_response(json_data)
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка бэктестинга: {e}")
-        logger.error(traceback.format_exc())
-        
-        return web.json_response({
-            "status": "error",
-            "message": str(e)
-        }, status=500)
-
-
 async def root_handler(request):
-    """Root endpoint с информацией о системе"""
+    """Root endpoint с информацией о системе v3.0"""
     try:
         system_info = {
-            "message": "Bybit Trading Bot v2.5 - Simplified Architecture v2.0",
+            "message": "Bybit Trading Bot v3.0 - Simplified Architecture",
             "features": [
                 "✅ PostgreSQL Database Integration",
-                "✅ Historical Data Storage", 
                 "✅ SimpleCandleSync - REST API Crypto Sync",
                 "✅ SimpleFuturesSync - YFinance Futures Sync",
                 "✅ TechnicalAnalysisContextManager",
                 "✅ Repository - Direct DB Access",
-                "✅ Strategy Orchestration (Simplified v2.0)",
-                "✅ Advanced Signal Management",
-                "✅ OpenAI Integration",
+                "✅ SignalManager v3.0",
+                "✅ StrategyOrchestrator v3.0",
+                "✅ 3 Level-Based Strategies (Breakout, Bounce, False Breakout)",
+                "✅ OpenAI GPT-4 Integration",
                 "✅ Telegram Notifications",
-                "✅ Backtesting Engine",
                 "🚀 Production Ready"
             ],
             "status": "active",
@@ -1058,7 +451,8 @@ async def root_handler(request):
             "simple_futures_sync_active": bool(simple_futures_sync and simple_futures_sync.is_running),
             "ta_context_manager_active": bool(ta_context_manager and ta_context_manager.is_running),
             "repository_active": bool(repository),
-            "orchestrator_mode": "REST API (60s)",
+            "signal_manager_active": bool(signal_manager and signal_manager.is_running),
+            "orchestrator_active": bool(strategy_orchestrator and strategy_orchestrator.is_running),
             "environment": Config.ENVIRONMENT,
             "webhook_path": WEBHOOK_PATH,
             "api_endpoints": {
@@ -1067,14 +461,7 @@ async def root_handler(request):
                 "trading_status": "/trading/status",
                 "simple_sync_status": "/admin/sync-status",
                 "futures_sync_status": "/admin/futures-sync-status",
-                "ta_context_status": "/admin/ta-context-status",
-                "market_data_status": "/admin/market-data-status",
-                "yfinance_status": "/admin/yfinance-status",
-                "check_data": "/admin/check-data",
-                "load_history": "/admin/load-history (POST)",
-                "strategies": "/backtest/strategies (GET)",
-                "backtest_get": "/backtest/run (GET)",
-                "backtest_post": "/backtest/run (POST)"
+                "ta_context_status": "/admin/ta-context-status"
             }
         }
         
@@ -1100,22 +487,15 @@ async def root_handler(request):
                 health = ta_context_manager.get_health_status()
                 system_info["ta_context_manager_health"] = health.get("healthy", False)
                 system_info["ta_contexts_count"] = len(ta_context_manager.contexts)
-                system_info["ta_updates_total"] = ta_context_manager.stats.get("total_updates", 0)
             except Exception as e:
                 logger.warning(f"Failed to get TechnicalAnalysisContextManager status: {e}")
         
-        if market_data_manager:
-            try:
-                system_info["market_data_status"] = market_data_manager.get_health_status().get("overall_status", "unknown")
-            except Exception as e:
-                logger.warning(f"Failed to get market data status: {e}")
-                system_info["market_data_status"] = "error"
-        
         if strategy_orchestrator:
             try:
-                system_info["active_strategies"] = strategy_orchestrator._count_active_strategies()
+                system_info["active_strategies"] = len(strategy_orchestrator.strategies)
+                system_info["orchestrator_cycles"] = strategy_orchestrator.stats.get("total_cycles", 0)
             except Exception as e:
-                logger.warning(f"Failed to get active strategies count: {e}")
+                logger.warning(f"Failed to get orchestrator stats: {e}")
                 system_info["active_strategies"] = 0
         
         if bot_instance:
@@ -1190,11 +570,20 @@ async def on_shutdown(bot) -> None:
 
 async def cleanup_resources():
     """Освобождение всех ресурсов"""
-    global bot_instance, market_data_manager, signal_manager, strategy_orchestrator
+    global bot_instance, signal_manager, strategy_orchestrator
     global simple_candle_sync, simple_futures_sync, ta_context_manager, repository
     global database_initialized
     
     try:
+        # Останавливаем StrategyOrchestrator
+        if strategy_orchestrator:
+            logger.info("🔄 Остановка StrategyOrchestrator...")
+            try:
+                await strategy_orchestrator.stop()
+                logger.info("✅ StrategyOrchestrator остановлен")
+            except Exception as e:
+                logger.error(f"❌ Ошибка остановки StrategyOrchestrator: {e}")
+        
         # Останавливаем TechnicalAnalysisContextManager
         if ta_context_manager:
             logger.info("🔄 Остановка TechnicalAnalysisContextManager...")
@@ -1222,15 +611,7 @@ async def cleanup_resources():
             except Exception as e:
                 logger.error(f"❌ Ошибка остановки SimpleCandleSync: {e}")
         
-        # Останавливаем торговую систему
-        if strategy_orchestrator:
-            logger.info("🔄 Остановка StrategyOrchestrator...")
-            try:
-                await strategy_orchestrator.stop()
-                logger.info("✅ StrategyOrchestrator остановлен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка остановки StrategyOrchestrator: {e}")
-        
+        # Останавливаем SignalManager
         if signal_manager:
             logger.info("🔄 Остановка SignalManager...")
             try:
@@ -1239,15 +620,7 @@ async def cleanup_resources():
             except Exception as e:
                 logger.error(f"❌ Ошибка остановки SignalManager: {e}")
         
-        if market_data_manager:
-            logger.info("🔄 Остановка MarketDataManager...")
-            try:
-                await market_data_manager.stop()
-                logger.info("✅ MarketDataManager остановлен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка остановки MarketDataManager: {e}")
-        
-        # ✅ Repository очистка
+        # Repository очистка
         if repository:
             logger.info("✅ Repository очищен")
             repository = None
@@ -1312,19 +685,23 @@ async def initialize_database_system():
 
 
 async def initialize_trading_system():
-    """Инициализация торговой системы (упрощенная v2.0)"""
+    """
+    ✅ ОБНОВЛЕННАЯ инициализация торговой системы v3.0
+    
+    Архитектура:
+    1. Repository - прямой доступ к БД
+    2. SimpleCandleSync - синхронизация криптовалют
+    3. SimpleFuturesSync - синхронизация фьючерсов  
+    4. TechnicalAnalysisContextManager - технический анализ
+    5. SignalManager - фильтрация и рассылка
+    6. StrategyOrchestrator - координация стратегий
+    """
     global signal_manager, strategy_orchestrator
     global simple_candle_sync, simple_futures_sync, ta_context_manager
-    global repository, system_config
+    global repository
     
     try:
-        logger.info("🚀 Инициализация торговой системы (упрощенная v2.0)...")
-        
-        # Создаем конфигурацию системы
-        system_config = create_default_system_config()
-        system_config.trading_mode = system_config.trading_mode.PAPER
-        system_config.bybit_testnet = Config.BYBIT_TESTNET
-        system_config.default_symbol = Config.SYMBOL
+        logger.info("🚀 Инициализация торговой системы v3.0...")
         
         # ==================== ШАГ 1: Repository ====================
         logger.info("📊 Инициализация Repository...")
@@ -1350,7 +727,7 @@ async def initialize_trading_system():
         logger.info("✅ SimpleCandleSync запущен")
         
         # ==================== ШАГ 3: SimpleFuturesSync ====================
-        futures_symbols = Config.get_yfinance_symbols() if hasattr(Config, 'get_yfinance_symbols') else []
+        futures_symbols = Config.get_yfinance_symbols()
         
         if futures_symbols:
             logger.info("🔄 Инициализация SimpleFuturesSync...")
@@ -1363,12 +740,11 @@ async def initialize_trading_system():
             await simple_futures_sync.start()
             logger.info("✅ SimpleFuturesSync запущен")
         else:
-            logger.info("⏭️ SimpleFuturesSync пропущен")
+            logger.info("⏭️ SimpleFuturesSync пропущен (нет символов)")
             simple_futures_sync = None
         
         # ==================== ШАГ 4: TechnicalAnalysis ====================
         logger.info("🧠 Инициализация TechnicalAnalysisContextManager...")
-        from strategies.technical_analysis import TechnicalAnalysisContextManager
         
         ta_context_manager = TechnicalAnalysisContextManager(
             repository=repository,
@@ -1379,7 +755,7 @@ async def initialize_trading_system():
         logger.info("✅ TechnicalAnalysisContextManager запущен")
         
         # ==================== ШАГ 5: SignalManager ====================
-        logger.info("🎛️ Инициализация SignalManager...")
+        logger.info("🎛️ Инициализация SignalManager v3.0...")
         
         # OpenAI анализатор (опционально)
         openai_analyzer = None
@@ -1391,47 +767,54 @@ async def initialize_trading_system():
             logger.warning(f"⚠️ OpenAI недоступен: {e}")
         
         signal_manager = SignalManager(
-            max_queue_size=1000,
-            notification_settings=system_config.notification_settings,
-            data_source_adapter=None,  # ❌ НЕ ИСПОЛЬЗУЕМ
-            openai_analyzer=openai_analyzer
+            openai_analyzer=openai_analyzer,
+            cooldown_minutes=5,
+            max_signals_per_hour=12,
+            enable_ai_enrichment=True,
+            min_signal_strength=0.5
         )
         
         await signal_manager.start()
         logger.info("✅ SignalManager запущен")
         
-        # ==================== ШАГ 6: StrategyOrchestrator ====================
-        logger.info("🎭 Инициализация StrategyOrchestrator (v2.0)...")
+        # ==================== ШАГ 6: StrategyOrchestrator v3.0 ====================
+        logger.info("🎭 Инициализация StrategyOrchestrator v3.0...")
         
+        # ✅ Собираем ВСЕ символы (крипта + фьючерсы)
+        all_symbols = Config.get_bybit_symbols()
+        if futures_symbols:
+            all_symbols.extend(futures_symbols)
+        
+        logger.info(f"   • Всего символов: {len(all_symbols)}")
+        logger.info(f"   • Крипта: {len(Config.get_bybit_symbols())}")
+        logger.info(f"   • Фьючерсы: {len(futures_symbols) if futures_symbols else 0}")
+        
+        # ✅ ПРАВИЛЬНАЯ ИНИЦИАЛИЗАЦИЯ v3.0
         strategy_orchestrator = StrategyOrchestrator(
+            repository=repository,
+            ta_context_manager=ta_context_manager,
             signal_manager=signal_manager,
-            repository=repository,  # ✅ Прямой доступ к БД
-            ta_context_manager=ta_context_manager,  # ✅ Опционально
-            system_config=system_config,
-            analysis_interval=60.0,  # ✅ Каждую минуту
-            max_concurrent_analyses=3,
-            enable_performance_monitoring=True
+            symbols=all_symbols,  # ✅ Список всех символов
+            analysis_interval_seconds=60,  # ✅ Анализ каждую минуту
+            enabled_strategies=["breakout", "bounce", "false_breakout"]  # ✅ v3.0 стратегии
         )
         
-        orchestrator_started = await strategy_orchestrator.start()
-        if orchestrator_started:
-            logger.info("✅ StrategyOrchestrator активен")
-        else:
-            logger.warning("⚠️ StrategyOrchestrator не запустился")
-            strategy_orchestrator = None
+        await strategy_orchestrator.start()
+        logger.info("✅ StrategyOrchestrator активен")
         
         # ==================== ФИНАЛЬНАЯ СТАТИСТИКА ====================
         logger.info("=" * 70)
-        logger.info("✅ ТОРГОВАЯ СИСТЕМА ЗАПУЩЕНА (УПРОЩЕННАЯ v2.0)")
+        logger.info("✅ ТОРГОВАЯ СИСТЕМА ЗАПУЩЕНА v3.0")
         logger.info("=" * 70)
         logger.info(f"📊 Repository: ✅ АКТИВЕН")
         logger.info(f"🔄 SimpleCandleSync: ✅ АКТИВЕН ({len(Config.get_bybit_symbols())} символов)")
         logger.info(f"🔄 SimpleFuturesSync: {'✅ АКТИВЕН' if simple_futures_sync else '❌ ОТКЛЮЧЕН'}")
         logger.info(f"🧠 TechnicalAnalysis: ✅ АКТИВЕН")
         logger.info(f"🎛️ SignalManager: ✅ АКТИВЕН")
-        logger.info(f"🎭 StrategyOrchestrator: {'✅ АКТИВЕН' if strategy_orchestrator else '❌ ОТКЛЮЧЕН'}")
-        logger.info(f"   • Режим: REST API (60 секунд)")
-        logger.info(f"   • Стратегии сами получают данные из БД")
+        logger.info(f"🎭 StrategyOrchestrator: ✅ АКТИВЕН")
+        logger.info(f"   • Символов: {len(all_symbols)}")
+        logger.info(f"   • Стратегий: {len(strategy_orchestrator.strategies)}")
+        logger.info(f"   • Интервал анализа: 60s")
         logger.info("=" * 70)
         
         return True
@@ -1447,8 +830,8 @@ async def create_app():
     global bot_instance
     
     logger.info("=" * 60)
-    logger.info("🚀 ЗАПУСК BYBIT TRADING BOT v2.5")
-    logger.info("   Simplified Architecture v2.0 Edition")
+    logger.info("🚀 ЗАПУСК BYBIT TRADING BOT v3.0")
+    logger.info("   Simplified Architecture Edition")
     logger.info("=" * 60)
     
     # ========== ШАГ 1: Инициализация базы данных ==========
@@ -1464,15 +847,6 @@ async def create_app():
     trading_system_started = await initialize_trading_system()
     if trading_system_started:
         logger.info("✅ Торговая система активна")
-        logger.info(f"📊 Crypto: {', '.join(Config.get_bybit_symbols())}")
-        futures_symbols = Config.get_yfinance_symbols() if hasattr(Config, 'get_yfinance_symbols') else []
-        if futures_symbols:
-            logger.info(f"📊 Futures: {', '.join(futures_symbols)}")
-        logger.info(f"🧠 Technical Analysis: {'✅ Active' if ta_context_manager else '❌ Inactive'}")
-        logger.info(f"📊 Repository: {'✅ Active' if repository else '❌ Inactive'}")
-        logger.info(f"🎭 Strategy Mode: REST API (60s)")
-        logger.info(f"🔧 Режим: {'Testnet' if Config.BYBIT_TESTNET else 'Mainnet'}")
-        logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
     else:
         logger.warning("⚠️ Торговая система не активна, только Telegram бот")
     
@@ -1487,7 +861,7 @@ async def create_app():
     
     logger.info(f"✅ Telegram бот инициализирован")
     
-    # Подписываем бота на сигналы (теперь bot_instance создан)
+    # Подписываем бота на сигналы
     if signal_manager and bot_instance:
         signal_manager.add_subscriber(bot_instance.broadcast_signal)
         logger.info("📡 Telegram бот подписан на торговые сигналы")
@@ -1504,23 +878,10 @@ async def create_app():
     app.router.add_get("/trading/status", trading_system_status_handler)
     app.router.add_get("/", root_handler)
     
-    # Endpoints для работы с историческими данными
-    app.router.add_post("/admin/load-history", load_historical_data_handler)
-    app.router.add_get("/admin/check-data", check_database_data_handler)
-    
-    # SimpleCandleSync + SimpleFuturesSync + TechnicalAnalysisContextManager endpoints
+    # Sync status endpoints
     app.router.add_get("/admin/sync-status", simple_sync_status_handler)
     app.router.add_get("/admin/futures-sync-status", futures_sync_status_handler)
     app.router.add_get("/admin/ta-context-status", ta_context_status_handler)
-    
-    # YFinance endpoints
-    app.router.add_get("/admin/yfinance-status", yfinance_status_handler)
-    app.router.add_get("/admin/market-data-status", market_data_status_handler)
-    
-    # Бэктестинг endpoints
-    app.router.add_get("/backtest/strategies", get_strategies_handler)
-    app.router.add_post("/backtest/run", run_backtest_handler)
-    app.router.add_get("/backtest/run", run_backtest_handler)
     
     # Webhook handler
     webhook_requests_handler = SimpleRequestHandler(
@@ -1545,18 +906,10 @@ async def main():
     """Главная функция приложения"""
     
     try:
-        logger.info("🌟 Запуск Bybit Trading Bot v2.5 - Simplified Architecture v2.0")
+        logger.info("🌟 Запуск Bybit Trading Bot v3.0")
         logger.info(f"🔧 Порт: {WEB_SERVER_PORT}")
         logger.info(f"🔧 Webhook URL: {BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
-        logger.info(f"🔧 Testnet: {Config.BYBIT_TESTNET}")
-        logger.info(f"🔧 Crypto: {', '.join(Config.get_bybit_symbols())}")
-        
-        futures_symbols = Config.get_yfinance_symbols() if hasattr(Config, 'get_yfinance_symbols') else []
-        if futures_symbols:
-            logger.info(f"🔧 Futures: {', '.join(futures_symbols)}")
-        
         logger.info(f"🔧 Environment: {Config.ENVIRONMENT}")
-        logger.info(f"🔧 Database: {'настроена' if Config.get_database_url() else 'НЕ НАСТРОЕНА'}")
         
         # Создаем приложение
         app = await create_app()
@@ -1574,26 +927,7 @@ async def main():
         logger.info(f"🌐 Веб-сервер: {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
         logger.info(f"🤖 Telegram бот: активен")
         logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
-        logger.info(f"📊 Repository: {'создан' if repository else 'не создан'}")
-        logger.info(f"🔄 SimpleCandleSync: {'активен' if simple_candle_sync and simple_candle_sync.is_running else 'неактивен'}")
-        logger.info(f"🔄 SimpleFuturesSync: {'активен' if simple_futures_sync and simple_futures_sync.is_running else 'неактивен'}")
-        logger.info(f"🧠 TechnicalAnalysis: {'активен' if ta_context_manager and ta_context_manager.is_running else 'неактивен'}")
-        logger.info(f"🚀 Торговая система: {'активна' if strategy_orchestrator and strategy_orchestrator.is_running else 'неактивна'}")
-        if strategy_orchestrator:
-            logger.info(f"   • Режим работы: REST API (60 секунд)")
-        logger.info("=" * 60)
-        logger.info("📡 Endpoints:")
-        logger.info(f"   • Health: {BASE_WEBHOOK_URL}/health")
-        logger.info(f"   • Database: {BASE_WEBHOOK_URL}/database/status")
-        logger.info(f"   • Trading: {BASE_WEBHOOK_URL}/trading/status")
-        logger.info(f"   • Crypto Sync: {BASE_WEBHOOK_URL}/admin/sync-status")
-        logger.info(f"   • Futures Sync: {BASE_WEBHOOK_URL}/admin/futures-sync-status")
-        logger.info(f"   • TA Context: {BASE_WEBHOOK_URL}/admin/ta-context-status")
-        logger.info(f"   • Market Data: {BASE_WEBHOOK_URL}/admin/market-data-status")
-        logger.info(f"   • Check Data: {BASE_WEBHOOK_URL}/admin/check-data")
-        logger.info(f"   • Load History: {BASE_WEBHOOK_URL}/admin/load-history")
-        logger.info(f"   • Strategies: {BASE_WEBHOOK_URL}/backtest/strategies")
-        logger.info(f"   • Backtest: {BASE_WEBHOOK_URL}/backtest/run")
+        logger.info(f"🚀 Торговая система: {'активна' if strategy_orchestrator else 'неактивна'}")
         logger.info("=" * 60)
         
         # Основной цикл приложения
@@ -1601,7 +935,7 @@ async def main():
             while True:
                 await asyncio.sleep(3600)
                 
-                # Мониторинг SimpleCandleSync
+                # Мониторинг компонентов
                 if simple_candle_sync and not simple_candle_sync.is_running:
                     logger.warning("⚠️ SimpleCandleSync остановился, перезапуск...")
                     try:
@@ -1610,7 +944,6 @@ async def main():
                     except Exception as e:
                         logger.error(f"❌ Не удалось перезапустить SimpleCandleSync: {e}")
                 
-                # Мониторинг SimpleFuturesSync
                 if simple_futures_sync and not simple_futures_sync.is_running:
                     logger.warning("⚠️ SimpleFuturesSync остановился, перезапуск...")
                     try:
@@ -1619,7 +952,6 @@ async def main():
                     except Exception as e:
                         logger.error(f"❌ Не удалось перезапустить SimpleFuturesSync: {e}")
                 
-                # Мониторинг TechnicalAnalysisContextManager
                 if ta_context_manager and not ta_context_manager.is_running:
                     logger.warning("⚠️ TechnicalAnalysisContextManager остановился, перезапуск...")
                     try:
@@ -1635,28 +967,6 @@ async def main():
                         logger.info("✅ StrategyOrchestrator перезапущен")
                     except Exception as e:
                         logger.error(f"❌ Не удалось перезапустить StrategyOrchestrator: {e}")
-                
-                # Статистика
-                if bot_instance:
-                    try:
-                        subscribers_count = len(bot_instance.signal_subscribers)
-                        strategies_active = strategy_orchestrator._count_active_strategies() if strategy_orchestrator else 0
-                        db_status = "OK" if database_initialized else "OFF"
-                        
-                        crypto_synced = simple_candle_sync.get_stats().get('candles_synced', 0) if simple_candle_sync else 0
-                        futures_synced = simple_futures_sync.get_stats().get('candles_synced', 0) if simple_futures_sync else 0
-                        ta_contexts = len(ta_context_manager.contexts) if ta_context_manager else 0
-                        
-                        logger.info(f"📊 Статистика:")
-                        logger.info(f"   • Подписчики: {subscribers_count}")
-                        logger.info(f"   • Крипта свечей: {crypto_synced}")
-                        logger.info(f"   • Фьючерсы свечей: {futures_synced}")
-                        logger.info(f"   • TA контекстов: {ta_contexts}")
-                        logger.info(f"   • Стратегии: {strategies_active}")
-                        logger.info(f"   • Режим оркестратора: REST API (60s)")
-                        logger.info(f"   • БД: {db_status}")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Не удалось получить статистику: {e}")
                 
         except asyncio.CancelledError:
             logger.info("📡 Получен сигнал отмены")
