@@ -7,7 +7,7 @@ Market Analyzer - Модуль для комплексного анализа р
 - StrategyOrchestrator (мнения стратегий)
 - OpenAI (AI анализ)
 
-Version: 1.0.1 - Fixed level object access
+Version: 1.0.2 - Fixed ATRData object access
 """
 
 import logging
@@ -205,10 +205,16 @@ class MarketAnalyzer:
                     "strength": 0.5
                 })
             
-            # ATR и волатильность
+            # ✅ ИСПРАВЛЕНО: ATR и волатильность - работа с объектом ATRData
             atr_value = 0.0
-            if ta_context.atr_data and "atr_d1" in ta_context.atr_data:
-                atr_value = ta_context.atr_data["atr_d1"]
+            if ta_context.atr_data:
+                # Используем getattr для безопасного доступа к атрибуту объекта
+                atr_value = getattr(ta_context.atr_data, "atr_d1", 0.0)
+                if atr_value == 0.0:
+                    # Пробуем альтернативные названия атрибутов
+                    atr_value = getattr(ta_context.atr_data, "value", 0.0)
+            
+            logger.debug(f"✅ ATR value: {atr_value:.2f}")
             
             # Определяем волатильность
             volatility_pct = (market_snapshot.high_24h - market_snapshot.low_24h) / market_snapshot.current_price * 100
@@ -450,4 +456,4 @@ class MarketAnalyzer:
 
 __all__ = ["MarketAnalyzer", "MarketAnalysisReport", "StrategyOpinion"]
 
-logger.info("✅ Market Analyzer module loaded (v1.0.1 - Fixed)")
+logger.info("✅ Market Analyzer module loaded (v1.0.2 - ATRData fixed)")
