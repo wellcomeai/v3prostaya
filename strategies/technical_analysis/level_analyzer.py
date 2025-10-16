@@ -16,7 +16,7 @@ Level Analyzer - Support and Resistance Level Detection
 - Resistance: уровни сопротивления (локальные максимумы)
 
 Author: Trading Bot Team
-Version: 1.0.0
+Version: 1.0.1
 """
 
 import logging
@@ -300,7 +300,7 @@ class LevelAnalyzer:
                 )
                 candidates.append(candidate)
                 
-                logger.debug(f"🔹 Локальный минимум: {current_low:.2f} @ {current_candle.open_time.date()}")
+                logger.debug(f"🔹 Локальный минимум: {current_low:.2f} @ {current_candle['open_time'].date()}")
         
         return candidates
     
@@ -349,7 +349,7 @@ class LevelAnalyzer:
                 )
                 candidates.append(candidate)
                 
-                logger.debug(f"🔸 Локальный максимум: {current_high:.2f} @ {current_candle.open_time.date()}")
+                logger.debug(f"🔸 Локальный максимум: {current_high:.2f} @ {current_candle['open_time'].date()}")
         
         return candidates
     
@@ -457,8 +457,8 @@ class LevelAnalyzer:
             distance = abs(price - level.price)
             
             if distance <= tolerance:
-                touches.append(candle.open_time)
-                logger.debug(f"👉 Касание {level_type} {level.price:.2f} @ {candle.open_time.date()}")
+                touches.append(candle['open_time'])
+                logger.debug(f"👉 Касание {level_type} {level.price:.2f} @ {candle['open_time'].date()}")
         
         return touches
     
