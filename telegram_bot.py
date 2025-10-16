@@ -452,12 +452,13 @@ _(Можете отписаться в меню "Торговые сигналы
                 latest_candle = candles_1h[-1]
                 first_candle_24h = candles_1h[0]
                 
-                current_price = float(latest_candle['close'])
-                price_24h_ago = float(first_candle_24h['open'])
+                # ✅ ИСПРАВЛЕНО: Используем правильные ключи с суффиксом _price
+                current_price = float(latest_candle['close_price'])
+                price_24h_ago = float(first_candle_24h['open_price'])
                 price_change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100
                 
-                high_24h = max(float(c['high']) for c in candles_1h)
-                low_24h = min(float(c['low']) for c in candles_1h)
+                high_24h = max(float(c['high_price']) for c in candles_1h)
+                low_24h = min(float(c['low_price']) for c in candles_1h)
                 volume_24h = sum(float(c['volume']) for c in candles_1h)
                 
                 # Краткосрочные изменения (если есть минутные данные)
@@ -469,9 +470,10 @@ _(Можете отписаться в меню "Торговые сигналы
                     candle_5m_ago = candles_1m[-6] if len(candles_1m) >= 6 else candles_1m[0]
                     candle_1m_ago = candles_1m[-2] if len(candles_1m) >= 2 else candles_1m[0]
                     
-                    price_now = float(latest_1m['close'])
-                    price_1m = float(candle_1m_ago['close'])
-                    price_5m = float(candle_5m_ago['close'])
+                    # ✅ ИСПРАВЛЕНО: Используем правильные ключи
+                    price_now = float(latest_1m['close_price'])
+                    price_1m = float(candle_1m_ago['close_price'])
+                    price_5m = float(candle_5m_ago['close_price'])
                     
                     if price_1m > 0:
                         price_change_1m = ((price_now - price_1m) / price_1m) * 100
