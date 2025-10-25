@@ -42,11 +42,8 @@ async def test_simple_signal():
         from telegram_bot import TelegramBot
         from config import Config
         
-        # Загружаем конфиг
-        config = Config()
-        
-        # Получаем токен
-        telegram_token = config.get_telegram_token()
+        # Получаем токен из Config
+        telegram_token = Config.TELEGRAM_BOT_TOKEN
         
         # Инициализируем Telegram бота
         telegram_bot = TelegramBot(
@@ -231,11 +228,8 @@ async def test_full_pipeline():
         from telegram_bot import TelegramBot
         from config import Config
         
-        # Загружаем конфиг
-        config = Config()
-        
-        # Получаем токен
-        telegram_token = config.get_telegram_token()
+        # Получаем токен из Config
+        telegram_token = Config.TELEGRAM_BOT_TOKEN
         
         # Инициализируем Telegram бота
         telegram_bot = TelegramBot(
@@ -356,6 +350,9 @@ async def test_full_pipeline():
             logger.warning("⚠️ Стратегия не создала сигнал!")
             logger.warning("   Возможно, условия все равно слишком жесткие")
             logger.warning("   Попробуйте режим --mode simple")
+            
+            # Закрываем бота
+            await telegram_bot.close()
             
             return False
         
