@@ -39,14 +39,21 @@ async def test_simple_signal():
     try:
         # Импортируем необходимые модули
         from strategies.base_strategy import TradingSignal, SignalType, SignalStrength
-        from notification_service import NotificationService
-        from config_loader import ConfigLoader
+        from telegram_bot import TelegramBot
+        from config import Config
         
         # Загружаем конфиг
-        config = ConfigLoader.load()
+        config = Config()
         
-        # Инициализируем сервис уведомлений
-        notification_service = NotificationService(config)
+        # Получаем токен
+        telegram_token = config.get_telegram_token()
+        
+        # Инициализируем Telegram бота
+        telegram_bot = TelegramBot(
+            token=telegram_token,
+            repository=None,
+            ta_context_manager=None
+        )
         
         logger.info("✅ Модули импортированы")
         
@@ -82,12 +89,45 @@ async def test_simple_signal():
         logger.info(f"   • TP: {signal.take_profit}")
         logger.info(f"   • Confidence: {signal.confidence*100:.0f}%")
         
-        # Отправляем в Telegram
+        # Формируем сообщение для Telegram
         logger.info("\n📤 Отправка в Telegram...")
         
-        await notification_service.send_trading_signal(signal)
+        # Формируем красивое сообщение
+        signal_emoji = "🚀" if "BUY" in signal.signal_type.value else "⚠️"
+        signal_text = "ПОКУПКУ" if "BUY" in signal.signal_type.value else "ПРОДАЖУ"
+        
+        sl_percent = ((signal.stop_loss - signal.current_price) / signal.current_price * 100)
+        tp_percent = ((signal.take_profit - signal.current_price) / signal.current_price * 100)
+        
+        message = f"""{signal_emoji} <b>🧪 ТЕСТОВЫЙ СИГНАЛ НА {signal_text}</b>
+
+💰 <b>{signal.symbol}</b>
+Цена: {signal.current_price:,.2f}
+
+📊 <b>Параметры входа:</b>
+• Stop Loss: {signal.stop_loss:,.2f} ({sl_percent:+.1f}%)
+• Take Profit: {signal.take_profit:,.2f} ({tp_percent:+.1f}%)
+• Риск/Прибыль: 3:1
+• Размер позиции: {signal.position_size_recommendation*100:.1f}%
+
+🎯 <b>Причины сигнала:</b>
+• 🧪 Тестовый сигнал
+• 💥 Пробой через 49500
+• 📊 Консолидация 24 часа
+• ✅ Все условия выполнены
+
+💪 <b>Уверенность:</b> {signal.confidence*100:.0f}%
+
+⚠️ <i>Это тестовый сигнал для проверки системы!</i>
+"""
+        
+        await telegram_bot.broadcast_signal(message)
         
         logger.info("✅ Сигнал отправлен в Telegram!")
+        
+        # Закрываем бота
+        await telegram_bot.close()
+        
         logger.info("\n🎉 ТЕСТ ПРОЙДЕН: Проверьте Telegram бота!")
         
         return True
@@ -188,14 +228,21 @@ async def test_full_pipeline():
     try:
         # Импортируем модули
         from strategies.breakout_strategy import BreakoutStrategy
-        from notification_service import NotificationService
-        from config_loader import ConfigLoader
+        from telegram_bot import TelegramBot
+        from config import Config
         
         # Загружаем конфиг
-        config = ConfigLoader.load()
+        config = Config()
         
-        # Инициализируем сервис уведомлений
-        notification_service = NotificationService(config)
+        # Получаем токен
+        telegram_token = config.get_telegram_token()
+        
+        # Инициализируем Telegram бота
+        telegram_bot = TelegramBot(
+            token=telegram_token,
+            repository=None,
+            ta_context_manager=None
+        )
         
         logger.info("✅ Модули импортированы")
         
@@ -266,9 +313,42 @@ async def test_full_pipeline():
             # Отправляем в Telegram
             logger.info(f"\n📤 Отправка в Telegram...")
             
-            await notification_service.send_trading_signal(signal)
+            # Формируем красивое сообщение
+            signal_emoji = "🚀" if "BUY" in signal.signal_type.value else "⚠️"
+            signal_text = "ПОКУПКУ" if "BUY" in signal.signal_type.value else "ПРОДАЖУ"
+            
+            sl_percent = ((signal.stop_loss - signal.current_price) / signal.current_price * 100) if signal.stop_loss else 0
+            tp_percent = ((signal.take_profit - signal.current_price) / signal.current_price * 100) if signal.take_profit else 0
+            
+            # Собираем причины
+            reasons_text = "\n".join(f"• {reason}" for reason in signal.reasons[:4])
+            
+            message = f"""{signal_emoji} <b>СИГНАЛ НА {signal_text}</b>
+
+💰 <b>{signal.symbol}</b>
+Цена: {signal.current_price:,.2f}
+
+📊 <b>Параметры входа:</b>
+• Stop Loss: {signal.stop_loss:,.2f} ({sl_percent:+.1f}%)
+• Take Profit: {signal.take_profit:,.2f} ({tp_percent:+.1f}%)
+• Размер позиции: {signal.position_size_recommendation*100:.1f}%
+
+🎯 <b>Причины сигнала:</b>
+{reasons_text}
+
+💪 <b>Уверенность:</b> {signal.confidence*100:.0f}%
+🎭 <b>Стратегия:</b> {signal.strategy_name}
+
+⚠️ <i>Тестовый сигнал через {strategy.name}</i>
+"""
+            
+            await telegram_bot.broadcast_signal(message)
             
             logger.info("✅ Сигнал отправлен в Telegram!")
+            
+            # Закрываем бота
+            await telegram_bot.close()
+            
             logger.info("\n🎉 ТЕСТ ПРОЙДЕН: Проверьте Telegram бота!")
             
             return True
