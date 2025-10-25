@@ -502,7 +502,7 @@ async def root_handler(request):
             try:
                 system_info["active_users"] = len(bot_instance.all_users)
             except Exception as e:
-                logger.warning(f"Failed to get signal subscribers count: {e}")
+                logger.warning(f"Failed to get active users count: {e}")
                 system_info["signal_subscribers"] = 0
         
         system_info = serialize_datetime_objects(system_info)
