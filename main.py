@@ -771,7 +771,7 @@ async def initialize_trading_system():
             cooldown_minutes=5,
             max_signals_per_hour=12,
             enable_ai_enrichment=True,
-            min_signal_strength=0.5
+            min_signal_strength=0.3
         )
         
         await signal_manager.start()
