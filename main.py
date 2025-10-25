@@ -500,7 +500,7 @@ async def root_handler(request):
         
         if bot_instance:
             try:
-                system_info["signal_subscribers"] = len(bot_instance.signal_subscribers)
+                system_info["active_users"] = len(bot_instance.all_users)
             except Exception as e:
                 logger.warning(f"Failed to get signal subscribers count: {e}")
                 system_info["signal_subscribers"] = 0
