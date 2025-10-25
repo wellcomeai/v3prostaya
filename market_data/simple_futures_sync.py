@@ -1,5 +1,5 @@
 """
-SimpleFuturesSync - Надежная синхронизация фьючерсных свечей через YFinance REST API
+SimpleFuturesSync v2 - Надежная синхронизация фьючерсных свечей через YFinance REST API
 
 Аналог SimpleCandleSync, но для CME фьючерсов (MCL, MGC, MES, MNQ).
 Использует Yahoo Finance API через библиотеку yfinance.
@@ -8,12 +8,13 @@ SimpleFuturesSync - Надежная синхронизация фьючерсн
 - Периодическая синхронизация свечей фьючерсов
 - Проверка и заполнение пропусков
 - Проверка минимального количества свечей перед стартом
+- Повторная догрузка если данных всё ещё не хватает
 - Учет ограничений YFinance на исторические данные
 - Параллельная работа с SimpleCandleSync (крипта)
 - Надежность и отказоустойчивость
 
 Author: Trading Bot Team
-Version: 1.1.0 - Добавлена проверка минимального количества свечей
+Version: 2.0 - Улучшенная догрузка истории
 """
 
 import asyncio
@@ -63,6 +64,7 @@ class SimpleFuturesSync:
     - Периодически обновляет свечи через YFinance REST API
     - Проверяет пропуски при старте
     - Проверяет минимальное количество свечей перед стартом
+    - Повторная догрузка если данных недостаточно
     - Заполняет обнаруженные пропуски
     - Работает параллельно с SimpleCandleSync (крипта)
     
@@ -154,6 +156,7 @@ class SimpleFuturesSync:
             "gaps_filled": 0,
             "history_checks": 0,
             "history_loaded": 0,
+            "retry_loads": 0,
             "yfinance_calls": 0,
             "yfinance_errors": 0,
             "last_sync": None,
@@ -163,7 +166,7 @@ class SimpleFuturesSync:
         # YFinance client (будет инициализирован при старте)
         self.yf = None
         
-        logger.info(f"🏗️ SimpleFuturesSync initialized")
+        logger.info(f"🏗️ SimpleFuturesSync v2 initialized")
         logger.info(f"   • Symbols (DB format): {', '.join(self.symbols)}")
         logger.info(f"   • Symbols (API format): {', '.join([f'{s}=F' for s in self.symbols])}")
         logger.info(f"   • Check gaps on start: {check_gaps_on_start}")
@@ -177,7 +180,7 @@ class SimpleFuturesSync:
             return
         
         try:
-            logger.info("🚀 Запуск SimpleFuturesSync...")
+            logger.info("🚀 Запуск SimpleFuturesSync v2...")
             
             # Проверяем доступность yfinance
             try:
@@ -203,7 +206,7 @@ class SimpleFuturesSync:
                 logger.info("🔍 Проверка пропусков в данных фьючерсов...")
                 await self._check_all_gaps()
             
-            # Шаг 2: НОВОЕ - Проверка минимального количества свечей
+            # Шаг 2: Проверка минимального количества свечей
             await self._ensure_minimum_candles()
             
             # Шаг 3: Запускаем основной цикл синхронизации
@@ -275,18 +278,24 @@ class SimpleFuturesSync:
                             missing = min_required - count
                             logger.warning(f"⚠️ [{symbol}] {interval}: {count}/{min_required} свечей (нехватка: {missing})")
                             
-                            # Догружаем историю с учетом лимитов YFinance
-                            loaded = await self._load_historical_candles(
+                            # Догружаем историю с учетом лимитов YFinance и повторными попытками
+                            loaded = await self._load_historical_candles_with_retry(
                                 symbol=symbol,
                                 interval=interval,
                                 min_required=min_required,
-                                current_count=count
+                                current_count=count,
+                                max_attempts=3
                             )
                             
                             total_loaded += loaded
                             self.stats["history_loaded"] += loaded
                             
-                            logger.info(f"✅ [{symbol}] {interval}: загружено {loaded} свечей")
+                            # Проверяем финальное количество
+                            final_count = await self.repository.count_candles(symbol, interval)
+                            if final_count >= min_required:
+                                logger.info(f"✅ [{symbol}] {interval}: загружено {loaded} свечей, итого {final_count}/{min_required}")
+                            else:
+                                logger.warning(f"⚠️ [{symbol}] {interval}: загружено {loaded} свечей, но всё ещё {final_count}/{min_required} (YFinance лимит)")
                             
                             # Rate limit защита
                             await asyncio.sleep(0.3)
@@ -311,12 +320,71 @@ class SimpleFuturesSync:
         finally:
             self.status = SyncStatus.RUNNING
     
-    async def _load_historical_candles(
+    async def _load_historical_candles_with_retry(
         self,
         symbol: str,
         interval: str,
         min_required: int,
-        current_count: int
+        current_count: int,
+        max_attempts: int = 3
+    ) -> int:
+        """
+        Загрузка исторических свечей с повторными попытками
+        
+        Args:
+            symbol: Фьючерсный символ БЕЗ =F
+            interval: Интервал
+            min_required: Минимум требуемых свечей
+            current_count: Текущее количество в БД
+            max_attempts: Максимум попыток
+            
+        Returns:
+            Количество загруженных свечей
+        """
+        total_loaded = 0
+        
+        for attempt in range(max_attempts):
+            try:
+                # Проверяем текущее количество
+                current = await self.repository.count_candles(symbol, interval)
+                
+                if current >= min_required:
+                    logger.info(f"✅ [{symbol}] {interval}: достигнут минимум {current}/{min_required}")
+                    break
+                
+                # Вычисляем сколько нужно загрузить
+                to_load = min_required - current
+                
+                if attempt > 0:
+                    logger.info(f"🔄 [{symbol}] {interval}: попытка {attempt + 1}/{max_attempts}, нужно ещё {to_load} свечей")
+                    self.stats["retry_loads"] += 1
+                
+                # Загружаем
+                loaded = await self._load_historical_candles(
+                    symbol=symbol,
+                    interval=interval,
+                    to_load=to_load
+                )
+                
+                total_loaded += loaded
+                
+                # Небольшая пауза между попытками
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка загрузки (попытка {attempt + 1}): {e}")
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(1)
+                continue
+        
+        return total_loaded
+    
+    async def _load_historical_candles(
+        self,
+        symbol: str,
+        interval: str,
+        to_load: int
     ) -> int:
         """
         Загрузка исторических свечей для достижения минимума
@@ -325,16 +393,12 @@ class SimpleFuturesSync:
         Args:
             symbol: Фьючерсный символ БЕЗ =F
             interval: Интервал
-            min_required: Минимум требуемых свечей
-            current_count: Текущее количество в БД
+            to_load: Сколько нужно загрузить
             
         Returns:
             Количество загруженных свечей
         """
         try:
-            # Вычисляем сколько нужно загрузить
-            to_load = min_required - current_count
-            
             # Проверяем лимиты YFinance
             max_history = self.YFINANCE_LIMITS.get(interval, timedelta(days=730))
             interval_enum = CandleInterval(interval)
@@ -345,14 +409,16 @@ class SimpleFuturesSync:
             
             # Корректируем количество с учетом лимитов
             to_load = min(to_load, max_candles_allowed)
-            to_load = min(to_load, 1000)  # Дополнительная защита
+            
+            # Добавляем 10% запас для учета выходных/праздников
+            to_load_with_margin = int(to_load * 1.1)
             
             logger.info(f"📥 Загрузка истории [{symbol}] {interval}: ~{to_load} свечей")
             logger.info(f"   • YFinance лимит: {max_history.days} дней ({max_candles_allowed} свечей)")
             
-            # Вычисляем start_time
+            # Вычисляем start_time и end_time
             now = datetime.now(timezone.utc)
-            start_time = now - timedelta(seconds=interval_seconds * to_load)
+            start_time = now - timedelta(seconds=interval_seconds * to_load_with_margin)
             
             # Проверяем что не выходим за лимит YFinance
             min_allowed_start = now - max_history
@@ -806,6 +872,7 @@ class SimpleFuturesSync:
             "successful_syncs": self.stats["successful_syncs"],
             "failed_syncs": self.stats["failed_syncs"],
             "history_loaded": self.stats["history_loaded"],
+            "retry_loads": self.stats["retry_loads"],
             "yfinance_errors": self.stats["yfinance_errors"],
             "last_sync": self.stats["last_sync"].isoformat() if self.stats["last_sync"] else None,
             "last_error": self.stats["last_error"]
@@ -824,4 +891,4 @@ __all__ = [
     "SyncStatus"
 ]
 
-logger.info("SimpleFuturesSync module loaded successfully")
+logger.info("SimpleFuturesSync v2 module loaded successfully")
