@@ -36,17 +36,18 @@ async def test_signal_chain():
     # ШАГ 2: Создание тестового сигнала
     print("\n🔔 ШАГ 2: Создание тестового сигнала...")
     test_signal = TradingSignal(
-        symbol="BTCUSDT",
         signal_type=SignalType.BUY,
-        price=50000.0,
-        timestamp=datetime.now(),
         strength=0.8,  # Высокая сила
         confidence=0.9,
-        reasons=["Тестовый сигнал для проверки"],
-        timeframe="1h"
+        price=50000.0,
+        timestamp=datetime.now(),
+        strategy_name="TestStrategy",
+        symbol="BTCUSDT",
+        reasons=["Тестовый сигнал для проверки цепочки"]
     )
     print(f"✅ Сигнал создан: {test_signal.symbol} - {test_signal.signal_type.name}")
     print(f"   Сила: {test_signal.strength}, Confidence: {test_signal.confidence}")
+    print(f"   Strategy: {test_signal.strategy_name}")
     
     # ШАГ 3: Инициализация компонентов
     print("\n🔧 ШАГ 3: Инициализация компонентов...")
