@@ -7,12 +7,13 @@ SimpleFuturesSync - Надежная синхронизация фьючерсн
 Особенности:
 - Периодическая синхронизация свечей фьючерсов
 - Проверка и заполнение пропусков
+- Проверка минимального количества свечей перед стартом
 - Учет ограничений YFinance на исторические данные
 - Параллельная работа с SimpleCandleSync (крипта)
 - Надежность и отказоустойчивость
 
 Author: Trading Bot Team
-Version: 1.0.1 - FIXED: YFinance API требует =F для фьючерсов
+Version: 1.1.0 - Добавлена проверка минимального количества свечей
 """
 
 import asyncio
@@ -34,6 +35,7 @@ class SyncStatus(Enum):
     SYNCING = "syncing"
     CHECKING_GAPS = "checking_gaps"
     FILLING_GAP = "filling_gap"
+    ENSURING_MINIMUM = "ensuring_minimum"
     ERROR = "error"
     STOPPED = "stopped"
 
@@ -60,6 +62,7 @@ class SimpleFuturesSync:
     Работает аналогично SimpleCandleSync, но для Yahoo Finance фьючерсов:
     - Периодически обновляет свечи через YFinance REST API
     - Проверяет пропуски при старте
+    - Проверяет минимальное количество свечей перед стартом
     - Заполняет обнаруженные пропуски
     - Работает параллельно с SimpleCandleSync (крипта)
     
@@ -91,7 +94,8 @@ class SimpleFuturesSync:
         symbols: List[str],
         repository,
         check_gaps_on_start: bool = True,
-        max_gap_fill_attempts: int = 3
+        max_gap_fill_attempts: int = 3,
+        min_candles_per_interval: Dict[str, int] = None
     ):
         """
         Инициализация SimpleFuturesSync
@@ -101,12 +105,24 @@ class SimpleFuturesSync:
             repository: MarketDataRepository для работы с БД
             check_gaps_on_start: Проверять пропуски при запуске
             max_gap_fill_attempts: Максимум попыток заполнить пропуск
+            min_candles_per_interval: Минимум свечей на интервал для стратегий
         """
         # Убираем =F если случайно передали
         self.symbols = [s.replace("=F", "") for s in symbols]
         self.repository = repository
         self.check_gaps_on_start = check_gaps_on_start
         self.max_gap_fill_attempts = max_gap_fill_attempts
+        
+        # Минимальное количество свечей для стратегий
+        # С учетом лимитов YFinance
+        self.min_candles_per_interval = min_candles_per_interval or {
+            "1m": 500,     # 7 дней доступно, 500 = ~8 часов
+            "5m": 250,     # 60 дней доступно
+            "15m": 250,    # 60 дней доступно
+            "1h": 300,     # 730 дней доступно
+            "4h": 200,     # 730 дней доступно
+            "1d": 180,     # Практически без ограничений
+        }
         
         # Статус
         self.is_running = False
@@ -136,6 +152,8 @@ class SimpleFuturesSync:
             "candles_synced": 0,
             "gaps_found": 0,
             "gaps_filled": 0,
+            "history_checks": 0,
+            "history_loaded": 0,
             "yfinance_calls": 0,
             "yfinance_errors": 0,
             "last_sync": None,
@@ -150,6 +168,7 @@ class SimpleFuturesSync:
         logger.info(f"   • Symbols (API format): {', '.join([f'{s}=F' for s in self.symbols])}")
         logger.info(f"   • Check gaps on start: {check_gaps_on_start}")
         logger.info(f"   • Intervals: {[s.interval for s in self.schedule]}")
+        logger.info(f"   • Min candles per interval: {self.min_candles_per_interval}")
     
     async def start(self):
         """Запустить сервис синхронизации"""
@@ -179,12 +198,15 @@ class SimpleFuturesSync:
             self.start_time = datetime.now(timezone.utc)
             self.stats["start_time"] = self.start_time
             
-            # Проверка пропусков при старте
+            # Шаг 1: Проверка пропусков при старте
             if self.check_gaps_on_start:
                 logger.info("🔍 Проверка пропусков в данных фьючерсов...")
                 await self._check_all_gaps()
             
-            # Запускаем основной цикл синхронизации
+            # Шаг 2: НОВОЕ - Проверка минимального количества свечей
+            await self._ensure_minimum_candles()
+            
+            # Шаг 3: Запускаем основной цикл синхронизации
             self._sync_task = asyncio.create_task(self._sync_loop())
             self._tasks.append(self._sync_task)
             
@@ -222,6 +244,158 @@ class SimpleFuturesSync:
         self._sync_task = None
         
         logger.info("✅ SimpleFuturesSync остановлен")
+    
+    async def _ensure_minimum_candles(self):
+        """
+        Проверка минимального количества свечей для всех символов и интервалов
+        Догружает историю если данных недостаточно (с учетом лимитов YFinance)
+        """
+        try:
+            self.status = SyncStatus.ENSURING_MINIMUM
+            logger.info("📊 Проверка минимального количества свечей для фьючерсов...")
+            
+            total_checks = 0
+            total_loaded = 0
+            
+            for symbol in self.symbols:
+                for schedule_item in self.schedule:
+                    interval = schedule_item.interval
+                    min_required = self.min_candles_per_interval.get(interval, 0)
+                    
+                    if min_required == 0:
+                        continue  # Пропускаем если не задано минимум
+                    
+                    try:
+                        total_checks += 1
+                        
+                        # Получаем количество свечей в БД (ищем БЕЗ =F)
+                        count = await self.repository.count_candles(symbol, interval)
+                        
+                        if count < min_required:
+                            missing = min_required - count
+                            logger.warning(f"⚠️ [{symbol}] {interval}: {count}/{min_required} свечей (нехватка: {missing})")
+                            
+                            # Догружаем историю с учетом лимитов YFinance
+                            loaded = await self._load_historical_candles(
+                                symbol=symbol,
+                                interval=interval,
+                                min_required=min_required,
+                                current_count=count
+                            )
+                            
+                            total_loaded += loaded
+                            self.stats["history_loaded"] += loaded
+                            
+                            logger.info(f"✅ [{symbol}] {interval}: загружено {loaded} свечей")
+                            
+                            # Rate limit защита
+                            await asyncio.sleep(0.3)
+                        else:
+                            logger.debug(f"✅ [{symbol}] {interval}: {count}/{min_required} свечей - OK")
+                    
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка проверки [{symbol}] {interval}: {e}")
+                        self.stats["yfinance_errors"] += 1
+                        continue
+            
+            self.stats["history_checks"] = total_checks
+            
+            if total_loaded > 0:
+                logger.info(f"✅ Догружено {total_loaded} исторических свечей из {total_checks} проверок")
+            else:
+                logger.info(f"✅ Все данные актуальны, догрузка не требуется")
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки минимального количества свечей: {e}")
+        
+        finally:
+            self.status = SyncStatus.RUNNING
+    
+    async def _load_historical_candles(
+        self,
+        symbol: str,
+        interval: str,
+        min_required: int,
+        current_count: int
+    ) -> int:
+        """
+        Загрузка исторических свечей для достижения минимума
+        С учетом лимитов YFinance на историю
+        
+        Args:
+            symbol: Фьючерсный символ БЕЗ =F
+            interval: Интервал
+            min_required: Минимум требуемых свечей
+            current_count: Текущее количество в БД
+            
+        Returns:
+            Количество загруженных свечей
+        """
+        try:
+            # Вычисляем сколько нужно загрузить
+            to_load = min_required - current_count
+            
+            # Проверяем лимиты YFinance
+            max_history = self.YFINANCE_LIMITS.get(interval, timedelta(days=730))
+            interval_enum = CandleInterval(interval)
+            interval_seconds = interval_enum.to_seconds()
+            
+            # Максимум свечей в пределах лимита YFinance
+            max_candles_allowed = int(max_history.total_seconds() / interval_seconds)
+            
+            # Корректируем количество с учетом лимитов
+            to_load = min(to_load, max_candles_allowed)
+            to_load = min(to_load, 1000)  # Дополнительная защита
+            
+            logger.info(f"📥 Загрузка истории [{symbol}] {interval}: ~{to_load} свечей")
+            logger.info(f"   • YFinance лимит: {max_history.days} дней ({max_candles_allowed} свечей)")
+            
+            # Вычисляем start_time
+            now = datetime.now(timezone.utc)
+            start_time = now - timedelta(seconds=interval_seconds * to_load)
+            
+            # Проверяем что не выходим за лимит YFinance
+            min_allowed_start = now - max_history
+            if start_time < min_allowed_start:
+                logger.warning(f"⚠️ start_time корректирован с учетом лимита YFinance")
+                start_time = min_allowed_start
+            
+            # Загружаем данные через YFinance (symbol БЕЗ =F, функция добавит =F)
+            candles = await self._fetch_yfinance_data(symbol, interval, start_time, now)
+            
+            if not candles:
+                logger.warning(f"⚠️ Нет данных от YFinance для {symbol} {interval}")
+                return 0
+            
+            # Сохраняем в БД (БЕЗ =F)
+            candle_objects = []
+            
+            for candle_dict in candles:
+                try:
+                    candle = MarketDataCandle.create_from_yfinance_data(
+                        symbol=symbol,  # БЕЗ =F
+                        interval=interval,
+                        yf_data=candle_dict
+                    )
+                    candle_objects.append(candle)
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка парсинга свечи: {e}")
+                    continue
+            
+            if candle_objects:
+                inserted, updated = await self.repository.bulk_insert_candles(
+                    candles=candle_objects,
+                    batch_size=500
+                )
+                
+                total_saved = inserted + updated
+                return total_saved
+            
+            return 0
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки исторических данных {symbol} {interval}: {e}")
+            raise
     
     async def _sync_loop(self):
         """Основной цикл синхронизации"""
@@ -631,6 +805,7 @@ class SimpleFuturesSync:
             "total_syncs": self.stats["total_syncs"],
             "successful_syncs": self.stats["successful_syncs"],
             "failed_syncs": self.stats["failed_syncs"],
+            "history_loaded": self.stats["history_loaded"],
             "yfinance_errors": self.stats["yfinance_errors"],
             "last_sync": self.stats["last_sync"].isoformat() if self.stats["last_sync"] else None,
             "last_error": self.stats["last_error"]
