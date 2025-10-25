@@ -1000,67 +1000,57 @@ if __name__ == "__main__":
 async def main():
     """Главная функция"""
     
-    # Парсинг аргументов
     parser = argparse.ArgumentParser(
-        description="Анализ сигналов торговых стратегий",
+        description="🔍 Диагностика системы генерации сигналов",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры использования:
-  python check_signals.py --days 7
-  python check_signals.py --symbol BTCUSDT --days 1
-  python check_signals.py --strategy breakout --days 3
-  python check_signals.py --detailed --days 7
+  python check_signals.py                      # Быстрая проверка
+  python check_signals.py --symbol BTCUSDT     # Проверка одного символа
+  python check_signals.py --test-strategies    # Полное тестирование стратегий
+  python check_signals.py --verbose            # Подробные логи
         """
-    )
-    
-    parser.add_argument(
-        "--days",
-        type=int,
-        default=7,
-        help="Количество дней для анализа (по умолчанию: 7)"
     )
     
     parser.add_argument(
         "--symbol",
         type=str,
-        help="Анализировать только один символ (например: BTCUSDT)"
+        help="Проверить конкретный символ"
     )
     
     parser.add_argument(
-        "--strategy",
-        type=str,
-        choices=["breakout", "bounce", "false_breakout", "all"],
-        default="all",
-        help="Анализировать только одну стратегию (по умолчанию: all)"
-    )
-    
-    parser.add_argument(
-        "--detailed",
+        "--test-strategies",
         action="store_true",
-        help="Показать подробную информацию о каждом сигнале"
+        help="Запустить тест генерации сигналов стратегиями"
     )
     
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Подробный вывод (DEBUG уровень)"
+        help="Подробные логи (DEBUG)"
     )
     
     args = parser.parse_args()
     
-    # Настройка уровня логирования
+    # Настройка логирования
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
     
     try:
-        logger.info("🚀 Запуск анализа сигналов...")
+        logger.info("🚀 Запуск диагностики системы...")
         
         # Инициализация БД
-        logger.info("📦 Инициализация базы данных...")
+        logger.info("📦 Подключение к базе данных...")
         db_success = await initialize_database()
         
         if not db_success:
             logger.error("❌ Не удалось подключиться к базе данных")
+            print("\n❌ КРИТИЧЕСКАЯ ОШИБКА: База данных недоступна!")
+            print("Проверьте:")
+            print("  1. Переменную окружения DATABASE_URL")
+            print("  2. Что PostgreSQL запущен")
+            print("  3. Правильность учетных данных")
             sys.exit(1)
         
         logger.info("✅ База данных подключена")
@@ -1072,49 +1062,34 @@ async def main():
         logger.info("🧠 Инициализация технического анализа...")
         ta_context_manager = TechnicalAnalysisContextManager(
             repository=repository,
-            auto_start_background_updates=False  # Не нужны фоновые обновления
+            auto_start_background_updates=False
         )
         
-        # Определяем список символов
+        # Определяем символы для проверки
         if args.symbol:
             symbols = [args.symbol.upper()]
         else:
-            # Все символы из конфига (крипто + фьючерсы)
-            symbols = Config.get_bybit_symbols()
-            futures = Config.get_yfinance_symbols()
-            if futures:
-                symbols.extend(futures)
+            # Первые 5 символов для быстроты
+            symbols = Config.get_bybit_symbols()[:5]
         
-        # Определяем список стратегий
-        if args.strategy == "all":
-            strategies = ["breakout", "bounce", "false_breakout"]
-        else:
-            strategies = [args.strategy]
+        # Создаем диагностику
+        diagnostics = SignalDiagnostics(repository, ta_context_manager)
         
-        # Создаем счетчик сигналов
-        counter = SignalCounter(repository, ta_context_manager)
-        
-        # Запускаем анализ
-        results = await counter.count_signals(
+        # Запускаем полную диагностику
+        results = await diagnostics.run_full_diagnostic(
             symbols=symbols,
-            strategies=strategies,
-            days_back=args.days,
-            detailed=args.detailed
+            test_strategies=args.test_strategies
         )
         
-        # Выводим отчет
-        counter.print_report(results)
-        
-        logger.info("\n✅ Анализ завершен успешно")
+        logger.info("\n✅ Диагностика завершена")
         
     except KeyboardInterrupt:
-        logger.info("\n⚠️ Анализ прерван пользователем")
+        logger.info("\n⚠️ Диагностика прервана пользователем")
         sys.exit(0)
         
     except Exception as e:
         logger.error(f"\n❌ Критическая ошибка: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        traceback.print_exc()
         sys.exit(1)
         
     finally:
