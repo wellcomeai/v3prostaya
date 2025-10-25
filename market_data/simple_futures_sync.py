@@ -119,12 +119,12 @@ class SimpleFuturesSync:
         
         # Расписание синхронизации для разных интервалов
         self.schedule: List[FuturesSyncSchedule] = [
-            FuturesSyncSchedule(interval="1m", sync_period_minutes=1, lookback_candles=60),
-            FuturesSyncSchedule(interval="5m", sync_period_minutes=5, lookback_candles=50),
-            FuturesSyncSchedule(interval="15m", sync_period_minutes=15, lookback_candles=40),
-            FuturesSyncSchedule(interval="1h", sync_period_minutes=60, lookback_candles=25),
-            FuturesSyncSchedule(interval="4h", sync_period_minutes=240, lookback_candles=20),
-            FuturesSyncSchedule(interval="1d", sync_period_minutes=1440, lookback_candles=10)
+            FuturesSyncSchedule(interval="1m", sync_period_minutes=1, lookback_candles=500),
+            FuturesSyncSchedule(interval="5m", sync_period_minutes=5, lookback_candles=250),
+            FuturesSyncSchedule(interval="15m", sync_period_minutes=15, lookback_candles=250),
+            FuturesSyncSchedule(interval="1h", sync_period_minutes=60, lookback_candles=50),
+            FuturesSyncSchedule(interval="4h", sync_period_minutes=240, lookback_candles=150),
+            FuturesSyncSchedule(interval="1d", sync_period_minutes=1440, lookback_candles=30)
         ]
         
         # Статистика
