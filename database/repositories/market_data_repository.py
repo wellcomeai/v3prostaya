@@ -300,6 +300,35 @@ class MarketDataRepository:
             order_desc=False
         )
     
+    async def count_candles(self, symbol: str, interval: str) -> int:
+        """
+        Подсчитать количество свечей для символа и интервала
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTCUSDT', 'MCL')
+            interval: Candle interval (e.g., '1m', '5m', '1h', '1d')
+            
+        Returns:
+            int: Количество свечей в БД
+        """
+        try:
+            query = """
+                SELECT COUNT(*) as count
+                FROM market_data_candles
+                WHERE symbol = $1 AND interval = $2
+            """
+            
+            result = await self.db.fetchrow(query, symbol.upper(), interval)
+            count = result['count'] if result else 0
+            
+            logger.debug(f"📊 Подсчет свечей {symbol} {interval}: {count}")
+            return count
+            
+        except Exception as e:
+            self.stats["query_errors"] += 1
+            logger.error(f"❌ Ошибка подсчета свечей {symbol} {interval}: {e}")
+            return 0
+    
     async def calculate_sma(self, symbol: str, interval: str, 
                            periods: int = 20, hours_back: int = 168) -> List[Dict[str, Any]]:
         """
