@@ -1,5 +1,5 @@
 """
-Simple Candle Sync Service
+Simple Candle Sync Service v2
 
 Простой и надежный синхронизатор свечей через REST API Bybit.
 Замена сложного CandleAggregator - БЕЗ WebSocket тиков, БЕЗ deadlock.
@@ -9,8 +9,11 @@ Simple Candle Sync Service
 - Работает со списком символов
 - Автоматическая проверка и заполнение пропусков
 - Проверка минимального количества свечей перед стартом
+- Повторная догрузка если данных всё ещё не хватает
 - Надежное восстановление при сбоях
 - Минимум кода, максимум надежности
+
+Version: 2.0 - Улучшенная догрузка истории
 """
 
 import asyncio
@@ -52,6 +55,7 @@ class SimpleCandleSync:
     - Нет deadlock (простые insert)
     - Автоматическое восстановление пропусков
     - Проверка минимального количества данных перед стартом
+    - Повторная догрузка если нужно
     - Легкая отладка
     - Минимум кода
     """
@@ -103,9 +107,10 @@ class SimpleCandleSync:
             "gaps_filled": 0,
             "history_checks": 0,
             "history_loaded": 0,
+            "retry_loads": 0,
         }
         
-        logger.info("🔧 SimpleCandleSync инициализирован")
+        logger.info("🔧 SimpleCandleSync v2 инициализирован")
         logger.info(f"   • Символы: {', '.join(self.symbols)}")
         logger.info(f"   • Интервалы: {', '.join([s.interval for s in self.schedule])}")
         logger.info(f"   • Проверка пропусков: {'✅' if check_gaps_on_start else '❌'}")
@@ -114,7 +119,7 @@ class SimpleCandleSync:
     async def start(self):
         """Запуск синхронизации для всех символов и интервалов"""
         try:
-            logger.info("🚀 Запуск SimpleCandleSync...")
+            logger.info("🚀 Запуск SimpleCandleSync v2...")
             self.is_running = True
             self.stats["start_time"] = datetime.now()
             
@@ -122,7 +127,7 @@ class SimpleCandleSync:
             if self.check_gaps_on_start:
                 await self._check_and_fill_all_gaps()
             
-            # Шаг 2: НОВОЕ - Проверка минимального количества свечей
+            # Шаг 2: Проверка минимального количества свечей
             await self._ensure_minimum_candles()
             
             # Шаг 3: Создаем задачу для каждого интервала
@@ -172,19 +177,25 @@ class SimpleCandleSync:
                             missing = min_required - count
                             logger.warning(f"⚠️ [{symbol}] {interval}: {count}/{min_required} свечей (нехватка: {missing})")
                             
-                            # Догружаем историю
-                            loaded = await self._load_historical_candles(
+                            # Догружаем историю с повторными попытками
+                            loaded = await self._load_historical_candles_with_retry(
                                 symbol=symbol,
                                 interval=interval,
                                 bybit_interval=schedule_item.bybit_interval,
                                 min_required=min_required,
-                                current_count=count
+                                current_count=count,
+                                max_attempts=3
                             )
                             
                             total_loaded += loaded
                             self.stats["history_loaded"] += loaded
                             
-                            logger.info(f"✅ [{symbol}] {interval}: загружено {loaded} свечей")
+                            # Проверяем финальное количество
+                            final_count = await self.repository.count_candles(symbol, interval)
+                            if final_count >= min_required:
+                                logger.info(f"✅ [{symbol}] {interval}: загружено {loaded} свечей, итого {final_count}/{min_required}")
+                            else:
+                                logger.warning(f"⚠️ [{symbol}] {interval}: загружено {loaded} свечей, но всё ещё {final_count}/{min_required}")
                             
                             # Rate limit защита
                             await asyncio.sleep(0.2)
@@ -207,13 +218,75 @@ class SimpleCandleSync:
             logger.error(f"❌ Ошибка проверки минимального количества свечей: {e}")
             logger.error(traceback.format_exc())
     
-    async def _load_historical_candles(
+    async def _load_historical_candles_with_retry(
         self,
         symbol: str,
         interval: str,
         bybit_interval: str,
         min_required: int,
-        current_count: int
+        current_count: int,
+        max_attempts: int = 3
+    ) -> int:
+        """
+        Загрузка исторических свечей с повторными попытками
+        
+        Args:
+            symbol: Символ
+            interval: Интервал
+            bybit_interval: Формат Bybit
+            min_required: Минимум требуемых свечей
+            current_count: Текущее количество в БД
+            max_attempts: Максимум попыток
+            
+        Returns:
+            Количество загруженных свечей
+        """
+        total_loaded = 0
+        
+        for attempt in range(max_attempts):
+            try:
+                # Проверяем текущее количество
+                current = await self.repository.count_candles(symbol, interval)
+                
+                if current >= min_required:
+                    logger.info(f"✅ [{symbol}] {interval}: достигнут минимум {current}/{min_required}")
+                    break
+                
+                # Вычисляем сколько нужно загрузить
+                to_load = min_required - current
+                
+                if attempt > 0:
+                    logger.info(f"🔄 [{symbol}] {interval}: попытка {attempt + 1}/{max_attempts}, нужно ещё {to_load} свечей")
+                    self.stats["retry_loads"] += 1
+                
+                # Загружаем
+                loaded = await self._load_historical_candles(
+                    symbol=symbol,
+                    interval=interval,
+                    bybit_interval=bybit_interval,
+                    to_load=to_load
+                )
+                
+                total_loaded += loaded
+                
+                # Небольшая пауза между попытками
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка загрузки (попытка {attempt + 1}): {e}")
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(1)
+                continue
+        
+        return total_loaded
+    
+    async def _load_historical_candles(
+        self,
+        symbol: str,
+        interval: str,
+        bybit_interval: str,
+        to_load: int
     ) -> int:
         """
         Загрузка исторических свечей для достижения минимума
@@ -222,8 +295,7 @@ class SimpleCandleSync:
             symbol: Символ
             interval: Интервал
             bybit_interval: Формат Bybit
-            min_required: Минимум требуемых свечей
-            current_count: Текущее количество в БД
+            to_load: Сколько нужно загрузить
             
         Returns:
             Количество загруженных свечей
@@ -231,29 +303,34 @@ class SimpleCandleSync:
         try:
             from database.models.market_data import CandleInterval
             
-            # Вычисляем сколько нужно загрузить
-            to_load = min_required - current_count
-            to_load = min(to_load, 1000)  # Ограничение для безопасности
+            # Ограничение для безопасности
+            to_load = min(to_load, 1000)
             
-            logger.info(f"📥 Загрузка истории [{symbol}] {interval}: ~{to_load} свечей")
+            logger.debug(f"📥 Загрузка истории [{symbol}] {interval}: ~{to_load} свечей")
             
             # Вычисляем start_time
             interval_enum = CandleInterval(interval)
             interval_seconds = interval_enum.to_seconds()
             
             now = datetime.now(timezone.utc)
-            start_time = now - timedelta(seconds=interval_seconds * to_load)
+            
+            # Добавляем 10% запас для учета выходных/праздников
+            to_load_with_margin = int(to_load * 1.1)
+            start_time = now - timedelta(seconds=interval_seconds * to_load_with_margin)
             
             # Загружаем партиями по 200 свечей
             candles_per_request = 200
-            num_requests = (to_load // candles_per_request) + 1
-            num_requests = min(num_requests, 10)  # Максимум 10 запросов
+            num_requests = (to_load_with_margin // candles_per_request) + 1
+            num_requests = min(num_requests, 20)  # Увеличено с 10 до 20
             
             total_saved = 0
-            current_start = start_time
+            current_end = now
             
             for i in range(num_requests):
                 try:
+                    # Вычисляем start для этой партии
+                    batch_start = current_end - timedelta(seconds=interval_seconds * candles_per_request)
+                    
                     # Запрос к Bybit
                     response = await self.bybit_client._make_request(
                         '/v5/market/kline',
@@ -261,7 +338,8 @@ class SimpleCandleSync:
                             'category': 'linear',
                             'symbol': symbol,
                             'interval': bybit_interval,
-                            'start': int(current_start.timestamp() * 1000),
+                            'start': int(batch_start.timestamp() * 1000),
+                            'end': int(current_end.timestamp() * 1000),
                             'limit': candles_per_request
                         }
                     )
@@ -276,14 +354,19 @@ class SimpleCandleSync:
                         )
                         total_saved += saved
                         
-                        # Обновляем start для следующей партии
-                        if raw_candles:
-                            # Bybit возвращает в обратном порядке, берем последнюю
-                            last_time = int(raw_candles[-1][0])
-                            current_start = datetime.fromtimestamp(last_time / 1000, tz=timezone.utc)
-                            current_start += timedelta(seconds=interval_seconds)
+                        # Обновляем current_end для следующей партии
+                        if raw_candles and saved > 0:
+                            # Bybit возвращает в обратном порядке (newest first)
+                            oldest_time = int(raw_candles[-1][0])
+                            current_end = datetime.fromtimestamp(oldest_time / 1000, tz=timezone.utc)
                     
                     await asyncio.sleep(0.2)  # Rate limit
+                    
+                    # Если получили меньше запрошенного - больше нет данных
+                    if response.get('result', {}).get('list'):
+                        if len(response['result']['list']) < candles_per_request:
+                            logger.debug(f"📭 [{symbol}] {interval}: получено {len(response['result']['list'])} свечей, останавливаем")
+                            break
                     
                 except Exception as e:
                     logger.error(f"❌ Ошибка загрузки партии {i+1}/{num_requests}: {e}")
@@ -553,12 +636,13 @@ class SimpleCandleSync:
             
             # Финальная статистика
             uptime = (datetime.now() - self.stats["start_time"]).total_seconds()
-            logger.info("📊 Финальная статистика SimpleCandleSync:")
+            logger.info("📊 Финальная статистика SimpleCandleSync v2:")
             logger.info(f"   • Время работы: {uptime:.0f}с")
             logger.info(f"   • Свечей синхронизировано: {self.stats['candles_synced']}")
             logger.info(f"   • API запросов: {self.stats['api_calls']}")
             logger.info(f"   • Пропусков заполнено: {self.stats['gaps_filled']}")
             logger.info(f"   • Истории загружено: {self.stats['history_loaded']}")
+            logger.info(f"   • Повторных загрузок: {self.stats['retry_loads']}")
             logger.info(f"   • Ошибок: {self.stats['errors']}")
             
             logger.info("✅ SimpleCandleSync остановлен")
@@ -595,6 +679,7 @@ class SimpleCandleSync:
             "success_rate": stats["success_rate"],
             "last_sync_times": self.stats["last_sync_by_interval"],
             "history_loaded": self.stats["history_loaded"],
+            "retry_loads": self.stats["retry_loads"],
             "errors": stats["errors"]
         }
 
