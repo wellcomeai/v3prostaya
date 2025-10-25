@@ -552,7 +552,7 @@ class BreakoutStrategy(BaseStrategy):
             details["setup_quality"] = score / max_score
             
             # Минимальный score для входа
-            min_score = 3  # Минимум 3 из 5 условий
+            min_score = 1  # Минимум 3 из 5 условий
             
             is_valid = score >= min_score
             
