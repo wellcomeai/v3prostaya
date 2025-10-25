@@ -14,7 +14,7 @@ Architecture:
 - SignalManager -> обработка и рассылка
 
 Author: Trading Bot Team
-Version: 3.1.0 - FIXED: Time sync, data requests, MIN_CANDLES validation
+Version: 3.1.1 - FIXED: Убран end_time для M1/M5 (работа с фьючерсами в нерабочие часы)
 """
 
 import asyncio
@@ -68,7 +68,7 @@ class CycleStats:
 
 class StrategyOrchestrator:
     """
-    🎭 Координатор торговых стратегий v3.1
+    🎭 Координатор торговых стратегий v3.1.1
     
     Управляет выполнением всех стратегий для всех символов.
     Запускается каждую минуту, анализирует все пары параллельно.
@@ -81,11 +81,12 @@ class StrategyOrchestrator:
     - Детальная статистика и метрики
     - Graceful shutdown
     - ✅ Синхронизация времени с data sync
-    - ✅ Правильные запросы данных
+    - ✅ Правильные запросы данных (без end_time для M1/M5)
     - ✅ Валидация минимального количества свечей
+    - ✅ Поддержка фьючерсов с нерабочими часами
     """
     
-    # ✅ FIX #3: Минимальное количество свечей для анализа
+    # ✅ Минимальное количество свечей для анализа
     MIN_CANDLES = {
         "1m": 100,   # 100 минут = 1.5 часа
         "5m": 50,    # 250 минут = 4+ часа
@@ -93,10 +94,7 @@ class StrategyOrchestrator:
         "1d": 180    # 180 дней = ~6 месяцев
     }
     
-    # ✅ FIX #2: Отступ от текущего времени при запросе данных
-    DATA_REQUEST_OFFSET_MINUTES = 2  # Запрашиваем данные до "2 минуты назад"
-    
-    # ✅ FIX #1: Задержка старта для синхронизации с data sync
+    # ✅ Задержка старта для синхронизации с data sync
     SYNC_START_SECOND = 40  # Запускаем анализ в :40 секунды каждой минуты
     
     def __init__(
@@ -143,7 +141,7 @@ class StrategyOrchestrator:
             "uptime_seconds": 0,
             "last_cycle_time": None,
             "average_cycle_time": 0.0,
-            "cycles_history": []  # Последние 100 циклов
+            "cycles_history": []
         }
         
         # История последнего цикла
@@ -151,22 +149,19 @@ class StrategyOrchestrator:
         self.symbol_results: Dict[str, AnalysisResult] = {}
         
         logger.info("=" * 70)
-        logger.info("🎭 StrategyOrchestrator v3.1 инициализирован")
+        logger.info("🎭 StrategyOrchestrator v3.1.1 инициализирован")
         logger.info("=" * 70)
         logger.info(f"   • Символы: {len(symbols)}")
         logger.info(f"   • Стратегии: {len(self.strategies)}")
         logger.info(f"   • Интервал анализа: {analysis_interval_seconds}s")
-        logger.info(f"   • Старт в :  {self.SYNC_START_SECOND} секунды каждой минуты")
-        logger.info(f"   • Отступ данных: {self.DATA_REQUEST_OFFSET_MINUTES} минуты")
+        logger.info(f"   • Старт в : {self.SYNC_START_SECOND} секунды каждой минуты")
         logger.info(f"   • Repository: {'✅' if repository else '❌'}")
         logger.info(f"   • TA Manager: {'✅' if ta_context_manager else '❌'}")
         logger.info(f"   • Signal Manager: {'✅' if signal_manager else '❌'}")
         logger.info("=" * 70)
         
-        # Логируем стратегии
         for strategy in self.strategies:
-            strategy_name = strategy.__class__.__name__
-            logger.info(f"   ✅ {strategy_name}")
+            logger.info(f"   ✅ {strategy.__class__.__name__}")
         
         logger.info("=" * 70)
         logger.info("📊 Минимальные требования к данным:")
@@ -175,15 +170,7 @@ class StrategyOrchestrator:
         logger.info("=" * 70)
     
     def _initialize_strategies(self, enabled_strategies: List[str] = None):
-        """
-        Инициализация стратегий
-        
-        Args:
-            enabled_strategies: Список названий стратегий для включения
-            
-        Returns:
-            List[BaseStrategy]: Список инициализированных стратегий
-        """
+        """Инициализация стратегий"""
         from strategies import (
             BreakoutStrategy,
             BounceStrategy,
@@ -196,11 +183,9 @@ class StrategyOrchestrator:
             "false_breakout": FalseBreakoutStrategy
         }
         
-        # Если не указано - включаем все
         if enabled_strategies is None:
             enabled_strategies = list(available_strategies.keys())
         
-        # Создаем экземпляры
         strategies = []
         for name in enabled_strategies:
             if name.lower() in available_strategies:
@@ -231,25 +216,19 @@ class StrategyOrchestrator:
         try:
             logger.info("🚀 Запуск StrategyOrchestrator...")
             
-            # Проверка зависимостей
             if not self.repository:
                 raise ValueError("Repository не инициализирован")
-            
             if not self.ta_context_manager:
                 raise ValueError("TechnicalAnalysisContextManager не инициализирован")
-            
             if not self.signal_manager:
                 raise ValueError("SignalManager не инициализирован")
-            
             if not self.strategies:
                 raise ValueError("Нет инициализированных стратегий")
             
-            # Запуск
             self.is_running = True
             self.status = OrchestratorStatus.RUNNING
             self.start_time = datetime.now(timezone.utc)
             
-            # Запускаем основной цикл
             self._main_task = asyncio.create_task(self._main_loop())
             
             logger.info("✅ StrategyOrchestrator запущен успешно")
@@ -274,7 +253,6 @@ class StrategyOrchestrator:
         self.is_running = False
         self.status = OrchestratorStatus.STOPPED
         
-        # Отменяем основную задачу
         if self._main_task and not self._main_task.done():
             self._main_task.cancel()
             try:
@@ -282,7 +260,6 @@ class StrategyOrchestrator:
             except asyncio.CancelledError:
                 pass
         
-        # Финальная статистика
         uptime = (datetime.now(timezone.utc) - self.start_time).total_seconds()
         
         logger.info("=" * 70)
@@ -302,20 +279,15 @@ class StrategyOrchestrator:
         """Основной цикл анализа"""
         logger.info("🔄 Основной цикл StrategyOrchestrator запущен")
         
-        # ✅ FIX #1: Ждём первую синхронизацию с нужной секундой
         await self._wait_for_sync_time()
         
         while self.is_running:
             try:
                 cycle_start = datetime.now(timezone.utc)
                 
-                # Запускаем цикл анализа
                 await self._run_analysis_cycle()
                 
-                # Пауза до следующего цикла
                 cycle_duration = (datetime.now(timezone.utc) - cycle_start).total_seconds()
-                
-                # ✅ FIX #1: Ждём следующую нужную секунду
                 wait_time = await self._calculate_wait_time(cycle_duration)
                 
                 if wait_time > 0:
@@ -331,24 +303,17 @@ class StrategyOrchestrator:
                 logger.error(f"❌ Ошибка в основном цикле: {e}")
                 self.stats["total_errors"] += 1
                 self.status = OrchestratorStatus.ERROR
-                
-                # Пауза при ошибке
                 await asyncio.sleep(60)
                 self.status = OrchestratorStatus.RUNNING
     
     async def _wait_for_sync_time(self):
-        """
-        ✅ FIX #1: Ожидание синхронизированного времени старта
-        Ждём пока не наступит нужная секунда минуты
-        """
+        """Ожидание синхронизированного времени старта"""
         now = datetime.now(timezone.utc)
         current_second = now.second
         
-        # Вычисляем сколько секунд ждать до нужной секунды
         if current_second < self.SYNC_START_SECOND:
             wait_seconds = self.SYNC_START_SECOND - current_second
         else:
-            # Ждём следующей минуты
             wait_seconds = (60 - current_second) + self.SYNC_START_SECOND
         
         if wait_seconds > 0:
@@ -356,18 +321,13 @@ class StrategyOrchestrator:
             await asyncio.sleep(wait_seconds)
     
     async def _calculate_wait_time(self, cycle_duration: float) -> float:
-        """
-        ✅ FIX #1: Расчёт времени ожидания с учётом синхронизации
-        """
+        """Расчёт времени ожидания с учётом синхронизации"""
         now = datetime.now(timezone.utc)
         current_second = now.second
         
-        # Вычисляем когда будет следующий запуск
         if current_second < self.SYNC_START_SECOND:
-            # В текущей минуте
             seconds_until_next = self.SYNC_START_SECOND - current_second
         else:
-            # В следующей минуте
             seconds_until_next = (60 - current_second) + self.SYNC_START_SECOND
         
         return max(0, seconds_until_next)
@@ -377,7 +337,6 @@ class StrategyOrchestrator:
         try:
             self.status = OrchestratorStatus.ANALYZING
             
-            # Создаем статистику цикла
             cycle_stats = CycleStats(
                 cycle_number=self.stats["total_cycles"] + 1,
                 start_time=datetime.now(timezone.utc)
@@ -389,43 +348,32 @@ class StrategyOrchestrator:
             logger.info(f"   • Символов: {len(self.symbols)}")
             logger.info(f"   • Стратегий: {len(self.strategies)}")
             
-            # Анализируем все символы параллельно
-            tasks = [
-                self._analyze_symbol(symbol)
-                for symbol in self.symbols
-            ]
-            
+            tasks = [self._analyze_symbol(symbol) for symbol in self.symbols]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            # Обрабатываем результаты
             for result in results:
                 if isinstance(result, AnalysisResult):
                     self.symbol_results[result.symbol] = result
                     cycle_stats.symbols_analyzed += 1
                     cycle_stats.signals_count += result.signals_count
-                    
                     if not result.success:
                         cycle_stats.errors_count += 1
                 elif isinstance(result, Exception):
                     logger.error(f"❌ Необработанная ошибка в цикле: {result}")
                     cycle_stats.errors_count += 1
             
-            # Финализируем статистику
             cycle_stats.finalize()
             
-            # Обновляем общую статистику
             self.stats["total_cycles"] += 1
             self.stats["total_symbols_analyzed"] += cycle_stats.symbols_analyzed
             self.stats["total_signals_generated"] += cycle_stats.signals_count
             self.stats["total_errors"] += cycle_stats.errors_count
             self.stats["last_cycle_time"] = cycle_stats.start_time
             
-            # Обновляем среднее время цикла
             total_time = self.stats.get("total_cycle_time", 0) + cycle_stats.execution_time
             self.stats["total_cycle_time"] = total_time
             self.stats["average_cycle_time"] = total_time / self.stats["total_cycles"]
             
-            # Сохраняем историю (последние 100 циклов)
             self.stats["cycles_history"].append({
                 "cycle": cycle_stats.cycle_number,
                 "time": cycle_stats.start_time.isoformat(),
@@ -440,7 +388,6 @@ class StrategyOrchestrator:
             
             self.last_cycle = cycle_stats
             
-            # Логируем результаты
             logger.info("=" * 70)
             logger.info(f"✅ ЦИКЛ #{cycle_stats.cycle_number} ЗАВЕРШЕН")
             logger.info("=" * 70)
@@ -464,7 +411,7 @@ class StrategyOrchestrator:
         Анализ одного символа всеми стратегиями
         
         Args:
-            symbol: Торговый символ (BTCUSDT, ETHUSDT, etc)
+            symbol: Торговый символ (BTCUSDT, ETHUSDT, MCL, MGC, etc)
             
         Returns:
             AnalysisResult: Результат анализа
@@ -477,55 +424,54 @@ class StrategyOrchestrator:
             logger.debug(f"📊 Анализ {symbol}...")
             
             # ШАГ 1: Получаем технический контекст (кэшированный)
-            ta_context = await self.ta_context_manager.get_context(
-                symbol=symbol
-            )
+            ta_context = await self.ta_context_manager.get_context(symbol=symbol)
             
             if not ta_context:
                 logger.warning(f"⚠️ {symbol}: технический контекст недоступен")
             
             # ШАГ 2: Получаем свежие свечи из БД
-            # ✅ FIX #2: Запрашиваем данные с отступом от текущего времени
             now = datetime.now(timezone.utc)
-            data_end_time = now - timedelta(minutes=self.DATA_REQUEST_OFFSET_MINUTES)
+            
+            # ✅ КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ v3.1.1:
+            # Убран end_time для M1 и M5 - берём последние N свечей что есть
+            # Это важно для фьючерсов которые не торгуются ночью!
             
             # Минутные свечи (последние 100)
+            # БЕЗ end_time - возьмёт последние 100 даже если они вчерашние
             candles_1m = await self.repository.get_candles(
                 symbol=symbol,
                 interval="1m",
-                start_time=data_end_time - timedelta(hours=2),
-                end_time=data_end_time,
+                start_time=now - timedelta(days=1),  # Последние 24 часа
                 limit=self.MIN_CANDLES["1m"]
             )
             
             # 5-минутные свечи (последние 50)
+            # БЕЗ end_time
             candles_5m = await self.repository.get_candles(
                 symbol=symbol,
                 interval="5m",
-                start_time=data_end_time - timedelta(hours=5),
-                end_time=data_end_time,
+                start_time=now - timedelta(days=2),  # Последние 48 часов
                 limit=self.MIN_CANDLES["5m"]
             )
             
             # Часовые свечи (последние 24)
+            # Можно с end_time так как это длинный период
             candles_1h = await self.repository.get_candles(
                 symbol=symbol,
                 interval="1h",
-                start_time=data_end_time - timedelta(hours=24),
-                end_time=data_end_time,
+                start_time=now - timedelta(days=2),
                 limit=self.MIN_CANDLES["1h"]
             )
             
-            # Дневные свечи (последние 180 для уровней)
+            # Дневные свечи (последние 180)
             candles_1d = await self.repository.get_candles(
                 symbol=symbol,
                 interval="1d",
-                start_time=data_end_time - timedelta(days=180),
-                end_time=data_end_time,
+                start_time=now - timedelta(days=200),
                 limit=self.MIN_CANDLES["1d"]
             )
             
-            # ✅ FIX #3: Улучшенная валидация данных
+            # ✅ Улучшенная валидация данных
             data_validation = self._validate_candles_data(
                 symbol=symbol,
                 candles_1m=candles_1m,
@@ -550,7 +496,6 @@ class StrategyOrchestrator:
                 try:
                     strategies_run += 1
                     
-                    # Вызываем analyze с данными
                     signal = await strategy.analyze_with_data(
                         symbol=symbol,
                         candles_1m=candles_1m,
@@ -560,7 +505,6 @@ class StrategyOrchestrator:
                         ta_context=ta_context
                     )
                     
-                    # Если есть сигнал - передаем в SignalManager
                     if signal:
                         await self.signal_manager.process_signal(signal)
                         signals_count += 1
@@ -574,7 +518,6 @@ class StrategyOrchestrator:
                     logger.error(f"❌ {symbol}: ошибка в {strategy.__class__.__name__}: {e}")
                     continue
             
-            # Успешно завершили
             execution_time = (datetime.now(timezone.utc) - start_time).total_seconds()
             
             return AnalysisResult(
@@ -606,15 +549,7 @@ class StrategyOrchestrator:
         candles_1h: List,
         candles_1d: List
     ) -> Dict[str, Any]:
-        """
-        ✅ FIX #3: Валидация количества свечей
-        
-        Returns:
-            Dict с ключами:
-                - valid: bool - данные валидны
-                - error: str - описание ошибки
-                - details: dict - детали по каждому интервалу
-        """
+        """Валидация количества свечей"""
         details = {
             "1m": {
                 "received": len(candles_1m) if candles_1m else 0,
@@ -638,18 +573,14 @@ class StrategyOrchestrator:
             }
         }
         
-        # Проверяем каждый интервал
         errors = []
         
         for interval, data in details.items():
             if data["received"] >= data["required"]:
                 data["valid"] = True
             else:
-                errors.append(
-                    f"{interval}: {data['received']}/{data['required']}"
-                )
+                errors.append(f"{interval}: {data['received']}/{data['required']}")
         
-        # Если есть ошибки
         if errors:
             return {
                 "valid": False,
@@ -679,7 +610,6 @@ class StrategyOrchestrator:
             "strategies_count": len(self.strategies),
             "analysis_interval": self.analysis_interval,
             "sync_start_second": self.SYNC_START_SECOND,
-            "data_offset_minutes": self.DATA_REQUEST_OFFSET_MINUTES,
             "last_cycle": {
                 "cycle_number": self.last_cycle.cycle_number if self.last_cycle else 0,
                 "start_time": self.last_cycle.start_time.isoformat() if self.last_cycle else None,
@@ -698,13 +628,11 @@ class StrategyOrchestrator:
             self.stats["total_errors"] < 100
         )
         
-        # Проверка что циклы выполняются
         if self.stats["last_cycle_time"]:
             time_since_last_cycle = (
                 datetime.now(timezone.utc) - self.stats["last_cycle_time"]
             ).total_seconds()
             
-            # Если прошло больше 2 интервалов - что-то не так
             if time_since_last_cycle > self.analysis_interval * 2:
                 is_healthy = False
         
@@ -730,7 +658,6 @@ class StrategyOrchestrator:
         )
 
 
-# Export
 __all__ = [
     "StrategyOrchestrator",
     "OrchestratorStatus",
@@ -738,4 +665,4 @@ __all__ = [
     "CycleStats"
 ]
 
-logger.info("✅ StrategyOrchestrator v3.1 module loaded successfully")
+logger.info("✅ StrategyOrchestrator v3.1.1 module loaded successfully")
