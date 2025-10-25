@@ -30,7 +30,8 @@ class TelegramBot:
         self.repository = repository
         self.ta_context_manager = ta_context_manager
         
-        self.signal_subscribers: Set[int] = set()
+        # ✅ Все пользователи, кто запустил бота (БЕЗ подписок)
+        self.all_users: Set[int] = set()
         
         self.user_analysis_state: Dict[int, Dict[str, Any]] = {}
         
@@ -96,18 +97,6 @@ class TelegramBot:
             F.data == "about"
         )
         self.router.callback_query.register(
-            self.handle_signals_menu,
-            F.data == "signals_menu"
-        )
-        self.router.callback_query.register(
-            self.handle_subscribe_signals,
-            F.data == "subscribe_signals"
-        )
-        self.router.callback_query.register(
-            self.handle_unsubscribe_signals,
-            F.data == "unsubscribe_signals"
-        )
-        self.router.callback_query.register(
             self.handle_back_to_menu,
             F.data == "back_to_menu"
         )
@@ -119,22 +108,21 @@ class TelegramBot:
         logger.info("✅ Все обработчики зарегистрированы")
     
     async def start_command(self, message: Message):
-        """Обработчик команды /start с АВТОМАТИЧЕСКОЙ подпиской"""
+        """Обработчик команды /start - добавляем пользователя в список"""
         try:
             user_name = message.from_user.first_name or "друг"
             user_id = message.from_user.id
             
-            self.signal_subscribers.add(user_id)
+            # ✅ Просто добавляем в список всех пользователей
+            self.all_users.add(user_id)
             
-            logger.info(f"👤 Пользователь: {user_name} (ID: {user_id}) ✅ АВТОМАТИЧЕСКИ ПОДПИСАН")
+            logger.info(f"👤 Пользователь: {user_name} (ID: {user_id}) добавлен. Всего: {len(self.all_users)}")
             
             keyboard = self._create_main_menu()
             
             welcome_text = f"""🤖 <b>Bybit Trading Bot v3.1.1</b> 
 
 Привет, {self.escape_html(user_name)}! 
-
-✅ <b>Вы автоматически подписаны на торговые сигналы!</b>
 
 📊 <b>Что я умею:</b>
 - Синхронизация данных криптовалют (Bybit)
@@ -164,8 +152,7 @@ class TelegramBot:
 - Futures: MCL, MGC, MES, MNQ (CME micro)
 
 🔔 <b>Уведомления:</b>
-Вы будете получать все торговые сигналы с AI анализом!
-<i>(Можете отписаться в меню "Торговые сигналы")</i>
+Вы будете получать все торговые сигналы с AI анализом автоматически!
 
 Нажми кнопку ниже, чтобы начать! 👇"""
             
@@ -185,7 +172,7 @@ class TelegramBot:
             help_text = """📖 <b>Справка по боту</b>
 
 🔧 <b>Доступные команды:</b>
-/start - Запуск бота и автоподписка на сигналы
+/start - Запуск бота
 /help - Эта справка
 
 📊 <b>Функции:</b>
@@ -221,9 +208,8 @@ class TelegramBot:
 - 🤖 AI обогащение каждого сигнала
 - Кулдаун между сигналами (5 минут)
 
-🔔 <b>Подписка на сигналы:</b>
-При первом запуске /start вы автоматически подписываетесь на все сигналы.
-Управлять подпиской можно в меню "Торговые сигналы".
+🔔 <b>Уведомления:</b>
+Все пользователи бота автоматически получают торговые сигналы.
 
 ⚠️ <b>Важно:</b>
 Бот предоставляет аналитическую информацию, но не является инвестиционным советом. Торговля криптовалютами связана с высокими рисками.
@@ -894,158 +880,22 @@ Multi-Strategy + AI Edition
             logger.error(f"❌ Ошибка в handle_about: {e}")
             await callback.answer("❌ Произошла ошибка")
     
-    async def handle_signals_menu(self, callback: CallbackQuery):
-        """Обработка меню торговых сигналов"""
-        try:
-            await callback.answer()
-            
-            user_id = callback.from_user.id
-            is_subscribed = user_id in self.signal_subscribers
-            
-            status_text = "✅ Активна" if is_subscribed else "❌ Неактивна"
-            subscribers_count = len(self.signal_subscribers)
-            
-            menu_text = f"""🚨 <b>Торговые сигналы v3.1.1</b>
-
-📊 <b>Статус подписки:</b> {status_text}
-👥 <b>Подписчиков:</b> {subscribers_count}
-
-🏗️ <b>Архитектура сигналов:</b>
-- SimpleCandleSync - актуальные данные криптовалют
-- SimpleFuturesSync - актуальные данные фьючерсов
-- Repository - прямой доступ к БД
-- TechnicalAnalysisContextManager - технический анализ
-- StrategyOrchestrator - управление стратегиями
-- SignalManager - умная фильтрация
-- 🤖 OpenAI GPT-4 - AI анализ каждого сигнала
-
-🔥 <b>Особенности v3.1.1:</b>
-- ✅ Автоподписка при /start
-- REST API синхронизация без deadlock
-- Параллельная обработка крипты и фьючерсов
-- Анализ 15 криптопар + 4 фьючерса
-- Детекция резких движений (&gt;2%)
-- Интеллектуальная фильтрация дубликатов
-- 🤖 AI обогащение каждого сигнала
-- Управление частотой сигналов (кулдаун 5 минут)
-
-⏱️ <b>Интервалы и фильтры:</b>
-- Анализ каждые 60 секунд
-- Мгновенные экстремальные сигналы (&gt;2%)
-- Кулдаун между сигналами: 5 минут
-- Минимальная сила сигнала: 0.5
-- Максимум 12 сигналов в час
-
-🎯 <b>Типы сигналов:</b>
-- 🟢 BUY / STRONG_BUY - сигналы на покупку
-- 🔴 SELL / STRONG_SELL - сигналы на продажу
-- Сила сигнала: 0.5 - 1.0
-- Уровень уверенности: LOW/MEDIUM/HIGH
-- 🤖 AI анализ с рыночным контекстом
-
-📈 <b>Источники данных:</b>
-- Bybit REST API - криптовалюты
-- Yahoo Finance - CME фьючерсы
-- PostgreSQL - исторические данные
-- OpenAI GPT-4 - AI анализ
-
-⚠️ <b>ВНИМАНИЕ:</b> Торговые сигналы несут высокие риски! Это не инвестиционный совет!"""
-            
-            keyboard = self._create_signals_menu(is_subscribed)
-            
-            await callback.message.edit_text(
-                menu_text,
-                reply_markup=keyboard,
-                parse_mode=ParseMode.HTML
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка в меню сигналов: {e}")
-            await callback.answer("❌ Произошла ошибка")
-    
-    async def handle_subscribe_signals(self, callback: CallbackQuery):
-        """Подписка на торговые сигналы"""
-        try:
-            await callback.answer()
-            
-            user_id = callback.from_user.id
-            user_name = callback.from_user.first_name or "пользователь"
-            
-            self.signal_subscribers.add(user_id)
-            
-            await callback.message.edit_text(
-                "✅ <b>Подписка активирована!</b>\n\n"
-                "Теперь вы будете получать торговые сигналы от системы v3.1.1.\n\n"
-                "🏗️ <b>Сигналы генерируются через:</b>\n"
-                "• SimpleCandleSync - синхронизация криптовалют\n"
-                "• SimpleFuturesSync - синхронизация фьючерсов\n"
-                "• Repository - прямой доступ к БД\n"
-                "• TechnicalAnalysisContextManager - технический анализ\n"
-                "• StrategyOrchestrator - координация стратегий\n"
-                "• SignalManager - фильтрация и обработка\n"
-                "• 🤖 OpenAI GPT-4 - AI анализ каждого сигнала\n\n"
-                "🔥 <b>Основа сигналов:</b>\n"
-                "• REST API синхронизация без блокировок\n"
-                "• Анализ 15 криптопар + 4 фьючерса\n"
-                "• Движения цены за 1m, 5m, 15m, 1h\n"
-                "• Объемный анализ торгов\n"
-                "• Детекция экстремальных движений\n"
-                "• 🤖 AI контекстный анализ от OpenAI\n\n"
-                "📱 <b>Уведомления:</b>\n"
-                "• При сильных сигналах (сила ≥0.5)\n"
-                "• Максимум 1 сигнал типа в 5 минут\n"
-                "• Умная фильтрация дубликатов\n"
-                "• AI обогащение каждого сигнала\n"
-                "• В любое время суток\n\n"
-                "⚠️ <b>Важно:</b> Торговые сигналы несут высокие риски!\n"
-                "<i>Это не инвестиционный совет!</i>",
-                reply_markup=self._create_signals_menu(True),
-                parse_mode=ParseMode.HTML
-            )
-            
-            logger.info(f"📡 Пользователь {user_name} ({user_id}) подписался на сигналы v3.1.1")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка подписки на сигналы: {e}")
-            await callback.answer("❌ Произошла ошибка")
-    
-    async def handle_unsubscribe_signals(self, callback: CallbackQuery):
-        """Отписка от торговых сигналов"""
-        try:
-            await callback.answer()
-            
-            user_id = callback.from_user.id
-            user_name = callback.from_user.first_name or "пользователь"
-            
-            self.signal_subscribers.discard(user_id)
-            
-            await callback.message.edit_text(
-                "🔕 <b>Подписка отключена</b>\n\n"
-                "Вы больше не будете получать торговые сигналы.\n\n"
-                "Вы можете снова подписаться в любое время через меню сигналов или выполнив /start.\n\n"
-                "Спасибо за использование наших сигналов! 🙏",
-                reply_markup=self._create_signals_menu(False),
-                parse_mode=ParseMode.HTML
-            )
-            
-            logger.info(f"📡 Пользователь {user_name} ({user_id}) отписался от сигналов")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка отписки от сигналов: {e}")
-            await callback.answer("❌ Произошла ошибка")
-    
     async def broadcast_signal(self, message: str):
-        """Отправляет сигнал всем подписчикам"""
+        """
+        ✅ Отправляет сигнал ВСЕМ пользователям (БЕЗ системы подписок)
+        """
         try:
-            if not self.signal_subscribers:
-                logger.info("📡 Нет подписчиков для сигнала")
+            if not self.all_users:
+                logger.info("📡 Нет пользователей для отправки сигнала")
                 return
             
             sent_count = 0
             failed_count = 0
             blocked_users = []
             
-            for user_id in self.signal_subscribers.copy():
+            logger.info(f"📤 Отправка сигнала {len(self.all_users)} пользователям...")
+            
+            for user_id in self.all_users.copy():
                 try:
                     await self.bot.send_message(
                         chat_id=user_id,
@@ -1071,12 +921,13 @@ Multi-Strategy + AI Edition
                         logger.warning(f"⚠️ Не удалось отправить сигнал пользователю {user_id}: {e}")
             
             for user_id in blocked_users:
-                self.signal_subscribers.discard(user_id)
+                self.all_users.discard(user_id)
             
             if blocked_users:
-                logger.info(f"🧹 Удалено {len(blocked_users)} неактивных подписчиков")
+                logger.info(f"🧹 Удалено {len(blocked_users)} неактивных пользователей")
             
-            logger.info(f"📨 Сигнал отправлен: ✅{sent_count} успешно, ❌{failed_count} ошибок")
+            logger.info(f"📨 Сигнал отправлен: ✅{sent_count} успешно, ❌{failed_count} ошибок. "
+                       f"Осталось: {len(self.all_users)} активных")
             
         except Exception as e:
             logger.error(f"💥 Ошибка рассылки сигнала: {e}")
@@ -1133,19 +984,6 @@ Multi-Strategy + AI Edition
                     reply_markup=builder.as_markup(),
                     parse_mode=ParseMode.HTML
                 )
-            elif any(word in user_text for word in ['сигнал', 'сигналы', 'уведомления', 'подписка']):
-                builder = InlineKeyboardBuilder()
-                builder.add(InlineKeyboardButton(
-                    text="🚨 Торговые сигналы",
-                    callback_data="signals_menu"
-                ))
-                
-                await message.answer(
-                    "🚨 Хотите настроить торговые сигналы?\n"
-                    "<i>Сигналы генерируются через StrategyOrchestrator v3.1.1 с AI</i>",
-                    reply_markup=builder.as_markup(),
-                    parse_mode=ParseMode.HTML
-                )
             elif any(word in user_text for word in ['помощь', 'справка', 'help']):
                 await self.help_command(message)
             else:
@@ -1153,15 +991,14 @@ Multi-Strategy + AI Edition
 
 🆕 <b>Версия 3.1.1 - Multi-Strategy + AI Edition</b>
 
-При /start вы автоматически подписываетесь на сигналы!
+При /start вы автоматически добавляетесь в список получателей сигналов!
 
 Используйте кнопки меню или команды:
-/start - главное меню и автоподписка
+/start - главное меню
 /help - справка
 
 Или просто напишите:
 - "анализ" для AI анализа рынка (+ 3 стратегии)
-- "сигналы" для настройки уведомлений
 - "помощь" для подробной информации"""
                 
                 keyboard = self._create_main_menu()
@@ -1178,9 +1015,6 @@ Multi-Strategy + AI Edition
             InlineKeyboardButton(text="📊 Анализ рынка с ИИ", callback_data="market_analysis")
         )
         builder.add(
-            InlineKeyboardButton(text="🚨 Торговые сигналы", callback_data="signals_menu")
-        )
-        builder.add(
             InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")
         )
         builder.adjust(1)
@@ -1189,9 +1023,6 @@ Multi-Strategy + AI Edition
     def _create_analysis_menu(self):
         """Создание меню после анализа"""
         builder = InlineKeyboardBuilder()
-        builder.add(
-            InlineKeyboardButton(text="🚨 Торговые сигналы", callback_data="signals_menu")
-        )
         builder.add(
             InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")
         )
@@ -1205,27 +1036,9 @@ Multi-Strategy + AI Edition
         """Создание меню в разделе О боте"""
         builder = InlineKeyboardBuilder()
         builder.add(
-            InlineKeyboardButton(text="🚨 Торговые сигналы", callback_data="signals_menu")
-        )
-        builder.add(
             InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_menu")
         )
         builder.adjust(1)
-        return builder.as_markup()
-    
-    def _create_signals_menu(self, is_subscribed: bool):
-        """Создание меню сигналов"""
-        builder = InlineKeyboardBuilder()
-        
-        if is_subscribed:
-            builder.add(InlineKeyboardButton(text="🔕 Отписаться", callback_data="unsubscribe_signals"))
-        else:
-            builder.add(InlineKeyboardButton(text="🔔 Подписаться", callback_data="subscribe_signals"))
-            
-        builder.add(InlineKeyboardButton(text="ℹ️ О боте", callback_data="about"))
-        builder.add(InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_menu"))
-        builder.adjust(1)
-        
         return builder.as_markup()
     
     def _create_asset_type_menu(self):
@@ -1269,7 +1082,6 @@ Multi-Strategy + AI Edition
         """Создание меню после получения анализа"""
         builder = InlineKeyboardBuilder()
         builder.add(InlineKeyboardButton(text="🔄 Другой символ", callback_data="market_analysis"))
-        builder.add(InlineKeyboardButton(text="🚨 Торговые сигналы", callback_data="signals_menu"))
         builder.add(InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_menu"))
         builder.adjust(1)
         return builder.as_markup()
