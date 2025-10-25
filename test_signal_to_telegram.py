@@ -38,7 +38,7 @@ async def test_simple_signal():
     
     try:
         # Импортируем необходимые модули
-        from strategies.base_strategy import TradingSignal, SignalType, SignalStrength
+        from strategies.base_strategy import TradingSignal, SignalType
         from telegram_bot import TelegramBot
         from config import Config
         
@@ -54,13 +54,13 @@ async def test_simple_signal():
         
         logger.info("✅ Модули импортированы")
         
-        # Создаем фиктивный сигнал
+        # Создаем фиктивный сигнал (с правильными параметрами)
         signal = TradingSignal(
             symbol="TESTUSDT",
             signal_type=SignalType.STRONG_BUY,
-            strength=SignalStrength.STRONG,
+            strength=0.9,  # ✅ float, не SignalStrength.STRONG
             confidence=0.95,
-            current_price=50000.0,
+            price=50000.0,  # ✅ price, не current_price
             timestamp=datetime.now(),
             strategy_name="TestStrategy",
             reasons=[
@@ -81,7 +81,7 @@ async def test_simple_signal():
         signal.add_technical_indicator("risk_reward_ratio", 3.0, "R:R = 3:1")
         
         logger.info(f"✅ Сигнал создан: {signal.symbol} {signal.signal_type.value}")
-        logger.info(f"   • Price: {signal.current_price}")
+        logger.info(f"   • Price: {signal.price}")
         logger.info(f"   • SL: {signal.stop_loss}")
         logger.info(f"   • TP: {signal.take_profit}")
         logger.info(f"   • Confidence: {signal.confidence*100:.0f}%")
@@ -93,13 +93,13 @@ async def test_simple_signal():
         signal_emoji = "🚀" if "BUY" in signal.signal_type.value else "⚠️"
         signal_text = "ПОКУПКУ" if "BUY" in signal.signal_type.value else "ПРОДАЖУ"
         
-        sl_percent = ((signal.stop_loss - signal.current_price) / signal.current_price * 100)
-        tp_percent = ((signal.take_profit - signal.current_price) / signal.current_price * 100)
+        sl_percent = ((signal.stop_loss - signal.price) / signal.price * 100)
+        tp_percent = ((signal.take_profit - signal.price) / signal.price * 100)
         
         message = f"""{signal_emoji} <b>🧪 ТЕСТОВЫЙ СИГНАЛ НА {signal_text}</b>
 
 💰 <b>{signal.symbol}</b>
-Цена: {signal.current_price:,.2f}
+Цена: {signal.price:,.2f}
 
 📊 <b>Параметры входа:</b>
 • Stop Loss: {signal.stop_loss:,.2f} ({sl_percent:+.1f}%)
@@ -297,9 +297,9 @@ async def test_full_pipeline():
             logger.info(f"✅ Сигнал создан стратегией!")
             logger.info(f"   • Symbol: {signal.symbol}")
             logger.info(f"   • Type: {signal.signal_type.value}")
-            logger.info(f"   • Strength: {signal.strength.value}")
+            logger.info(f"   • Strength: {signal.strength}")
             logger.info(f"   • Confidence: {signal.confidence*100:.0f}%")
-            logger.info(f"   • Price: {signal.current_price}")
+            logger.info(f"   • Price: {signal.price}")
             logger.info(f"   • SL: {signal.stop_loss}")
             logger.info(f"   • TP: {signal.take_profit}")
             logger.info(f"   • Reasons: {len(signal.reasons)}")
@@ -311,8 +311,8 @@ async def test_full_pipeline():
             signal_emoji = "🚀" if "BUY" in signal.signal_type.value else "⚠️"
             signal_text = "ПОКУПКУ" if "BUY" in signal.signal_type.value else "ПРОДАЖУ"
             
-            sl_percent = ((signal.stop_loss - signal.current_price) / signal.current_price * 100) if signal.stop_loss else 0
-            tp_percent = ((signal.take_profit - signal.current_price) / signal.current_price * 100) if signal.take_profit else 0
+            sl_percent = ((signal.stop_loss - signal.price) / signal.price * 100) if signal.stop_loss else 0
+            tp_percent = ((signal.take_profit - signal.price) / signal.price * 100) if signal.take_profit else 0
             
             # Собираем причины
             reasons_text = "\n".join(f"• {reason}" for reason in signal.reasons[:4])
@@ -320,7 +320,7 @@ async def test_full_pipeline():
             message = f"""{signal_emoji} <b>СИГНАЛ НА {signal_text}</b>
 
 💰 <b>{signal.symbol}</b>
-Цена: {signal.current_price:,.2f}
+Цена: {signal.price:,.2f}
 
 📊 <b>Параметры входа:</b>
 • Stop Loss: {signal.stop_loss:,.2f} ({sl_percent:+.1f}%)
