@@ -165,7 +165,7 @@ async def health_check(request):
                 "status": bot_status,
                 "username": bot_info.username if bot_info else None,
                 "bot_id": bot_info.id if bot_info else None,
-                "signal_subscribers": len(bot_instance.signal_subscribers) if bot_instance else 0
+                "active_users": len(bot_instance.all_users) if bot_instance else 0
             },
             "trading_system": trading_system_status
         }
