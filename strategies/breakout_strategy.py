@@ -94,7 +94,7 @@ class BreakoutStrategy(BaseStrategy):
         close_near_extreme_max_pullback: float = 10.0,
         
         # Параметры энергии
-        require_consolidation: bool = True,
+        require_consolidation: bool = False,
         min_energy_level: str = "moderate",
         
         # Параметры ATR
