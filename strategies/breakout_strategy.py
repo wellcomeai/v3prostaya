@@ -82,7 +82,7 @@ class BreakoutStrategy(BaseStrategy):
         max_distance_to_level_percent: float = 2.0,
         
         # Параметры поджатия
-        require_compression: bool = True,
+        require_compression: bool = False,
         compression_min_bars: int = 3,
         
         # Параметры ретеста
