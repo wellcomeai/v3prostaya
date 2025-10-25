@@ -14,7 +14,7 @@ Architecture:
 - SignalManager -> обработка и рассылка
 
 Author: Trading Bot Team
-Version: 3.0.2 - FIXED: Removed interval parameter from get_context()
+Version: 3.1.0 - FIXED: Time sync, data requests, MIN_CANDLES validation
 """
 
 import asyncio
@@ -68,7 +68,7 @@ class CycleStats:
 
 class StrategyOrchestrator:
     """
-    🎭 Координатор торговых стратегий v3.0
+    🎭 Координатор торговых стратегий v3.1
     
     Управляет выполнением всех стратегий для всех символов.
     Запускается каждую минуту, анализирует все пары параллельно.
@@ -80,7 +80,24 @@ class StrategyOrchestrator:
     - Обработка ошибок без остановки
     - Детальная статистика и метрики
     - Graceful shutdown
+    - ✅ Синхронизация времени с data sync
+    - ✅ Правильные запросы данных
+    - ✅ Валидация минимального количества свечей
     """
+    
+    # ✅ FIX #3: Минимальное количество свечей для анализа
+    MIN_CANDLES = {
+        "1m": 100,   # 100 минут = 1.5 часа
+        "5m": 50,    # 250 минут = 4+ часа
+        "1h": 24,    # 24 часа = 1 день
+        "1d": 180    # 180 дней = ~6 месяцев
+    }
+    
+    # ✅ FIX #2: Отступ от текущего времени при запросе данных
+    DATA_REQUEST_OFFSET_MINUTES = 2  # Запрашиваем данные до "2 минуты назад"
+    
+    # ✅ FIX #1: Задержка старта для синхронизации с data sync
+    SYNC_START_SECOND = 40  # Запускаем анализ в :40 секунды каждой минуты
     
     def __init__(
         self,
@@ -134,11 +151,13 @@ class StrategyOrchestrator:
         self.symbol_results: Dict[str, AnalysisResult] = {}
         
         logger.info("=" * 70)
-        logger.info("🎭 StrategyOrchestrator v3.0 инициализирован")
+        logger.info("🎭 StrategyOrchestrator v3.1 инициализирован")
         logger.info("=" * 70)
         logger.info(f"   • Символы: {len(symbols)}")
         logger.info(f"   • Стратегии: {len(self.strategies)}")
         logger.info(f"   • Интервал анализа: {analysis_interval_seconds}s")
+        logger.info(f"   • Старт в :  {self.SYNC_START_SECOND} секунды каждой минуты")
+        logger.info(f"   • Отступ данных: {self.DATA_REQUEST_OFFSET_MINUTES} минуты")
         logger.info(f"   • Repository: {'✅' if repository else '❌'}")
         logger.info(f"   • TA Manager: {'✅' if ta_context_manager else '❌'}")
         logger.info(f"   • Signal Manager: {'✅' if signal_manager else '❌'}")
@@ -149,6 +168,10 @@ class StrategyOrchestrator:
             strategy_name = strategy.__class__.__name__
             logger.info(f"   ✅ {strategy_name}")
         
+        logger.info("=" * 70)
+        logger.info("📊 Минимальные требования к данным:")
+        for interval, min_count in self.MIN_CANDLES.items():
+            logger.info(f"   • {interval}: {min_count} свечей")
         logger.info("=" * 70)
     
     def _initialize_strategies(self, enabled_strategies: List[str] = None):
@@ -161,14 +184,12 @@ class StrategyOrchestrator:
         Returns:
             List[BaseStrategy]: Список инициализированных стратегий
         """
-        # ✅ ИСПРАВЛЕНО: Убран MomentumStrategy
         from strategies import (
             BreakoutStrategy,
             BounceStrategy,
             FalseBreakoutStrategy
         )
         
-        # ✅ ИСПРАВЛЕНО: Только 3 стратегии v3.0
         available_strategies = {
             "breakout": BreakoutStrategy,
             "bounce": BounceStrategy,
@@ -185,11 +206,8 @@ class StrategyOrchestrator:
             if name.lower() in available_strategies:
                 strategy_class = available_strategies[name.lower()]
                 try:
-                    # Стратегии сейчас требуют symbol и ta_context_manager в конструкторе
-                    # Но мы будем передавать данные через analyze_with_data
-                    # Поэтому создаем с фиктивными параметрами
                     strategy = strategy_class(
-                        symbol="PLACEHOLDER",  # Будет переопределено при анализе
+                        symbol="PLACEHOLDER",
                         ta_context_manager=self.ta_context_manager
                     )
                     strategies.append(strategy)
@@ -237,6 +255,7 @@ class StrategyOrchestrator:
             logger.info("✅ StrategyOrchestrator запущен успешно")
             logger.info(f"   • Будет анализировать {len(self.symbols)} символов каждые {self.analysis_interval}s")
             logger.info(f"   • Активных стратегий: {len(self.strategies)}")
+            logger.info(f"   • Старт анализа в :{self.SYNC_START_SECOND} секунды каждой минуты")
             
         except Exception as e:
             logger.error(f"❌ Ошибка запуска StrategyOrchestrator: {e}")
@@ -283,6 +302,9 @@ class StrategyOrchestrator:
         """Основной цикл анализа"""
         logger.info("🔄 Основной цикл StrategyOrchestrator запущен")
         
+        # ✅ FIX #1: Ждём первую синхронизацию с нужной секундой
+        await self._wait_for_sync_time()
+        
         while self.is_running:
             try:
                 cycle_start = datetime.now(timezone.utc)
@@ -292,7 +314,9 @@ class StrategyOrchestrator:
                 
                 # Пауза до следующего цикла
                 cycle_duration = (datetime.now(timezone.utc) - cycle_start).total_seconds()
-                wait_time = max(0, self.analysis_interval - cycle_duration)
+                
+                # ✅ FIX #1: Ждём следующую нужную секунду
+                wait_time = await self._calculate_wait_time(cycle_duration)
                 
                 if wait_time > 0:
                     logger.debug(f"💤 Ожидание {wait_time:.1f}s до следующего цикла")
@@ -311,6 +335,42 @@ class StrategyOrchestrator:
                 # Пауза при ошибке
                 await asyncio.sleep(60)
                 self.status = OrchestratorStatus.RUNNING
+    
+    async def _wait_for_sync_time(self):
+        """
+        ✅ FIX #1: Ожидание синхронизированного времени старта
+        Ждём пока не наступит нужная секунда минуты
+        """
+        now = datetime.now(timezone.utc)
+        current_second = now.second
+        
+        # Вычисляем сколько секунд ждать до нужной секунды
+        if current_second < self.SYNC_START_SECOND:
+            wait_seconds = self.SYNC_START_SECOND - current_second
+        else:
+            # Ждём следующей минуты
+            wait_seconds = (60 - current_second) + self.SYNC_START_SECOND
+        
+        if wait_seconds > 0:
+            logger.info(f"⏰ Синхронизация времени: ожидание {wait_seconds}s до :{self.SYNC_START_SECOND} секунды")
+            await asyncio.sleep(wait_seconds)
+    
+    async def _calculate_wait_time(self, cycle_duration: float) -> float:
+        """
+        ✅ FIX #1: Расчёт времени ожидания с учётом синхронизации
+        """
+        now = datetime.now(timezone.utc)
+        current_second = now.second
+        
+        # Вычисляем когда будет следующий запуск
+        if current_second < self.SYNC_START_SECOND:
+            # В текущей минуте
+            seconds_until_next = self.SYNC_START_SECOND - current_second
+        else:
+            # В следующей минуте
+            seconds_until_next = (60 - current_second) + self.SYNC_START_SECOND
+        
+        return max(0, seconds_until_next)
     
     async def _run_analysis_cycle(self):
         """Выполнить один цикл анализа всех символов"""
@@ -417,7 +477,6 @@ class StrategyOrchestrator:
             logger.debug(f"📊 Анализ {symbol}...")
             
             # ШАГ 1: Получаем технический контекст (кэшированный)
-            # ✅ ИСПРАВЛЕНО: Убран параметр interval
             ta_context = await self.ta_context_manager.get_context(
                 symbol=symbol
             )
@@ -426,54 +485,64 @@ class StrategyOrchestrator:
                 logger.warning(f"⚠️ {symbol}: технический контекст недоступен")
             
             # ШАГ 2: Получаем свежие свечи из БД
+            # ✅ FIX #2: Запрашиваем данные с отступом от текущего времени
             now = datetime.now(timezone.utc)
+            data_end_time = now - timedelta(minutes=self.DATA_REQUEST_OFFSET_MINUTES)
             
             # Минутные свечи (последние 100)
             candles_1m = await self.repository.get_candles(
                 symbol=symbol,
                 interval="1m",
-                start_time=now - timedelta(hours=2),
-                end_time=now,
-                limit=100
+                start_time=data_end_time - timedelta(hours=2),
+                end_time=data_end_time,
+                limit=self.MIN_CANDLES["1m"]
             )
             
             # 5-минутные свечи (последние 50)
             candles_5m = await self.repository.get_candles(
                 symbol=symbol,
                 interval="5m",
-                start_time=now - timedelta(hours=5),
-                end_time=now,
-                limit=50
+                start_time=data_end_time - timedelta(hours=5),
+                end_time=data_end_time,
+                limit=self.MIN_CANDLES["5m"]
             )
             
             # Часовые свечи (последние 24)
             candles_1h = await self.repository.get_candles(
                 symbol=symbol,
                 interval="1h",
-                start_time=now - timedelta(hours=24),
-                end_time=now,
-                limit=24
+                start_time=data_end_time - timedelta(hours=24),
+                end_time=data_end_time,
+                limit=self.MIN_CANDLES["1h"]
             )
             
             # Дневные свечи (последние 180 для уровней)
             candles_1d = await self.repository.get_candles(
                 symbol=symbol,
                 interval="1d",
-                start_time=now - timedelta(days=180),
-                end_time=now,
-                limit=180
+                start_time=data_end_time - timedelta(days=180),
+                end_time=data_end_time,
+                limit=self.MIN_CANDLES["1d"]
             )
             
-            # Проверка минимального количества данных
-            if not candles_1m or len(candles_1m) < 10:
-                logger.warning(f"⚠️ {symbol}: недостаточно данных M1 ({len(candles_1m) if candles_1m else 0})")
+            # ✅ FIX #3: Улучшенная валидация данных
+            data_validation = self._validate_candles_data(
+                symbol=symbol,
+                candles_1m=candles_1m,
+                candles_5m=candles_5m,
+                candles_1h=candles_1h,
+                candles_1d=candles_1d
+            )
+            
+            if not data_validation["valid"]:
+                logger.warning(f"⚠️ {symbol}: {data_validation['error']}")
                 return AnalysisResult(
                     symbol=symbol,
                     success=False,
                     signals_count=0,
                     strategies_run=0,
                     execution_time=0,
-                    error="Insufficient data"
+                    error=data_validation['error']
                 )
             
             # ШАГ 3: Запускаем все стратегии
@@ -529,6 +598,71 @@ class StrategyOrchestrator:
                 error=str(e)
             )
     
+    def _validate_candles_data(
+        self,
+        symbol: str,
+        candles_1m: List,
+        candles_5m: List,
+        candles_1h: List,
+        candles_1d: List
+    ) -> Dict[str, Any]:
+        """
+        ✅ FIX #3: Валидация количества свечей
+        
+        Returns:
+            Dict с ключами:
+                - valid: bool - данные валидны
+                - error: str - описание ошибки
+                - details: dict - детали по каждому интервалу
+        """
+        details = {
+            "1m": {
+                "received": len(candles_1m) if candles_1m else 0,
+                "required": self.MIN_CANDLES["1m"],
+                "valid": False
+            },
+            "5m": {
+                "received": len(candles_5m) if candles_5m else 0,
+                "required": self.MIN_CANDLES["5m"],
+                "valid": False
+            },
+            "1h": {
+                "received": len(candles_1h) if candles_1h else 0,
+                "required": self.MIN_CANDLES["1h"],
+                "valid": False
+            },
+            "1d": {
+                "received": len(candles_1d) if candles_1d else 0,
+                "required": self.MIN_CANDLES["1d"],
+                "valid": False
+            }
+        }
+        
+        # Проверяем каждый интервал
+        errors = []
+        
+        for interval, data in details.items():
+            if data["received"] >= data["required"]:
+                data["valid"] = True
+            else:
+                errors.append(
+                    f"{interval}: {data['received']}/{data['required']}"
+                )
+        
+        # Если есть ошибки
+        if errors:
+            return {
+                "valid": False,
+                "error": f"Недостаточно данных: {', '.join(errors)}",
+                "details": details
+            }
+        
+        return {
+            "valid": True,
+            "error": None,
+            "details": details
+        }
+    
     def get_stats(self) -> Dict[str, Any]:
         """Получить полную статистику"""
         uptime = 0
@@ -544,6 +678,8 @@ class StrategyOrchestrator:
             "symbols_count": len(self.symbols),
             "strategies_count": len(self.strategies),
             "analysis_interval": self.analysis_interval,
+            "sync_start_second": self.SYNC_START_SECOND,
+            "data_offset_minutes": self.DATA_REQUEST_OFFSET_MINUTES,
             "last_cycle": {
                 "cycle_number": self.last_cycle.cycle_number if self.last_cycle else 0,
                 "start_time": self.last_cycle.start_time.isoformat() if self.last_cycle else None,
@@ -580,7 +716,8 @@ class StrategyOrchestrator:
             "total_signals": self.stats["total_signals_generated"],
             "total_errors": self.stats["total_errors"],
             "last_cycle_time": self.stats["last_cycle_time"].isoformat() if self.stats["last_cycle_time"] else None,
-            "average_cycle_time": self.stats["average_cycle_time"]
+            "average_cycle_time": self.stats["average_cycle_time"],
+            "sync_second": self.SYNC_START_SECOND
         }
     
     def __repr__(self):
@@ -601,4 +738,4 @@ __all__ = [
     "CycleStats"
 ]
 
-logger.info("✅ StrategyOrchestrator module loaded successfully")
+logger.info("✅ StrategyOrchestrator v3.1 module loaded successfully")
