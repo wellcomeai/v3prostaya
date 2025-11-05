@@ -9,14 +9,20 @@ from aiogram.filters import Command
 from aiogram.enums import ParseMode
 
 from openai_integration import OpenAIAnalyzer
+from database import get_database_manager
 
 logger = logging.getLogger(__name__)
 
 class TelegramBot:
     """
-    Telegram бот для анализа рынка на aiogram (webhook режим) - v3.2.0
+    Telegram бот для анализа рынка на aiogram (webhook режим) - v3.2.1
     
-    ✅ Новое в v3.2.0:
+    ✅ Исправлено в v3.2.1:
+    - Правильный доступ к БД через get_database_manager()
+    - Удален неправильный self.repository.pool
+    - Все методы БД используют единый подход
+    
+    ✅ Функции v3.2.0:
     - Сохранение пользователей в PostgreSQL
     - Загрузка пользователей при старте
     - Автоматическая синхронизация с БД
@@ -48,7 +54,7 @@ class TelegramBot:
         
         self.dp.include_router(self.router)
         
-        logger.info("🤖 TelegramBot v3.2.0 инициализирован (DB-backed users)")
+        logger.info("🤖 TelegramBot v3.2.1 инициализирован (DB-backed users, fixed)")
         logger.info(f"   • Repository: {'✅' if repository else '❌'}")
         logger.info(f"   • TA Context Manager: {'✅' if ta_context_manager else '❌'}")
         logger.info(f"   • OpenAI Analyzer: {'✅' if self.openai_analyzer else '❌'}")
@@ -62,12 +68,11 @@ class TelegramBot:
         Returns:
             int: Количество загруженных пользователей
         """
-        if not self.repository or not hasattr(self.repository, 'pool'):
-            logger.warning("⚠️ Repository или connection pool не инициализирован")
-            return 0
-        
         try:
             logger.info("📥 Загрузка пользователей из БД...")
+            
+            # ✅ ИСПРАВЛЕНО: Правильный доступ к БД
+            db_manager = get_database_manager()
             
             # Проверяем существование таблицы
             check_table_query = """
@@ -77,26 +82,25 @@ class TelegramBot:
                 );
             """
             
-            async with self.repository.pool.acquire() as conn:
-                table_exists = await conn.fetchval(check_table_query)
-                
-                if not table_exists:
-                    logger.warning("⚠️ Таблица bot_users не существует, создаю...")
-                    await self._create_bot_users_table()
-                
-                # Загружаем активных пользователей
-                query = """
-                    SELECT user_id 
-                    FROM bot_users 
-                    WHERE is_active = TRUE AND is_blocked = FALSE
-                    ORDER BY last_interaction_at DESC;
-                """
-                
-                rows = await conn.fetch(query)
-                
-                # Добавляем в память
-                for row in rows:
-                    self.all_users.add(row['user_id'])
+            table_exists = await db_manager.fetchval(check_table_query)
+            
+            if not table_exists:
+                logger.warning("⚠️ Таблица bot_users не существует, создаю...")
+                await self._create_bot_users_table()
+            
+            # Загружаем активных пользователей
+            query = """
+                SELECT user_id 
+                FROM bot_users 
+                WHERE is_active = TRUE AND is_blocked = FALSE
+                ORDER BY last_interaction_at DESC;
+            """
+            
+            rows = await db_manager.fetch(query)
+            
+            # Добавляем в память
+            for row in rows:
+                self.all_users.add(row['user_id'])
             
             logger.info(f"✅ Загружено {len(self.all_users)} активных пользователей")
             
@@ -110,11 +114,10 @@ class TelegramBot:
     
     async def _create_bot_users_table(self):
         """Создать таблицу bot_users если её нет"""
-        if not self.repository or not hasattr(self.repository, 'pool'):
-            logger.error("❌ Repository не инициализирован")
-            return
-        
         try:
+            # ✅ ИСПРАВЛЕНО: Правильный доступ к БД
+            db_manager = get_database_manager()
+            
             create_table_query = """
                 CREATE TABLE IF NOT EXISTS bot_users (
                     user_id BIGINT PRIMARY KEY,
@@ -136,9 +139,7 @@ class TelegramBot:
                     ON bot_users(last_interaction_at);
             """
             
-            async with self.repository.pool.acquire() as conn:
-                await conn.execute(create_table_query)
-            
+            await db_manager.execute(create_table_query)
             logger.info("✅ Таблица bot_users создана")
             
         except Exception as e:
@@ -165,11 +166,10 @@ class TelegramBot:
         Returns:
             bool: True если успешно
         """
-        if not self.repository or not hasattr(self.repository, 'pool'):
-            logger.debug(f"⚠️ Repository не инициализирован, пользователь {user_id} не сохранен")
-            return False
-        
         try:
+            # ✅ ИСПРАВЛЕНО: Правильный доступ к БД
+            db_manager = get_database_manager()
+            
             query = """
                 INSERT INTO bot_users (
                     user_id, username, first_name, last_name, language_code,
@@ -187,15 +187,14 @@ class TelegramBot:
                     is_blocked = FALSE;
             """
             
-            async with self.repository.pool.acquire() as conn:
-                await conn.execute(
-                    query,
-                    user_id,
-                    username,
-                    first_name,
-                    last_name,
-                    language_code
-                )
+            await db_manager.execute(
+                query,
+                user_id,
+                username,
+                first_name,
+                last_name,
+                language_code
+            )
             
             logger.debug(f"💾 Пользователь {user_id} сохранен в БД")
             return True
@@ -214,18 +213,17 @@ class TelegramBot:
         Returns:
             bool: True если успешно
         """
-        if not self.repository or not hasattr(self.repository, 'pool'):
-            return False
-        
         try:
+            # ✅ ИСПРАВЛЕНО: Правильный доступ к БД
+            db_manager = get_database_manager()
+            
             query = """
                 UPDATE bot_users 
                 SET last_interaction_at = NOW()
                 WHERE user_id = $1;
             """
             
-            async with self.repository.pool.acquire() as conn:
-                await conn.execute(query, user_id)
+            await db_manager.execute(query, user_id)
             return True
             
         except Exception as e:
@@ -242,19 +240,17 @@ class TelegramBot:
         Returns:
             bool: True если успешно
         """
-        if not self.repository or not hasattr(self.repository, 'pool'):
-            return False
-        
         try:
+            # ✅ ИСПРАВЛЕНО: Правильный доступ к БД
+            db_manager = get_database_manager()
+            
             query = """
                 UPDATE bot_users 
                 SET is_blocked = TRUE, is_active = FALSE
                 WHERE user_id = $1;
             """
             
-            async with self.repository.pool.acquire() as conn:
-                await conn.execute(query, user_id)
-            
+            await db_manager.execute(query, user_id)
             logger.info(f"🚫 Пользователь {user_id} помечен как заблокированный")
             return True
             
@@ -272,10 +268,10 @@ class TelegramBot:
         Returns:
             bool: True если успешно
         """
-        if not self.repository or not hasattr(self.repository, 'pool'):
-            return False
-        
         try:
+            # ✅ ИСПРАВЛЕНО: Правильный доступ к БД
+            db_manager = get_database_manager()
+            
             query = """
                 UPDATE bot_users 
                 SET signals_received_count = signals_received_count + 1,
@@ -283,8 +279,7 @@ class TelegramBot:
                 WHERE user_id = $1;
             """
             
-            async with self.repository.pool.acquire() as conn:
-                await conn.execute(query, user_id)
+            await db_manager.execute(query, user_id)
             return True
             
         except Exception as e:
@@ -301,10 +296,10 @@ class TelegramBot:
         Returns:
             Optional[Dict]: Статистика или None
         """
-        if not self.repository or not hasattr(self.repository, 'pool'):
-            return None
-        
         try:
+            # ✅ ИСПРАВЛЕНО: Правильный доступ к БД
+            db_manager = get_database_manager()
+            
             query = """
                 SELECT 
                     user_id,
@@ -319,8 +314,7 @@ class TelegramBot:
                 WHERE user_id = $1;
             """
             
-            async with self.repository.pool.acquire() as conn:
-                row = await conn.fetchrow(query, user_id)
+            row = await db_manager.fetchrow(query, user_id)
             
             if row:
                 return dict(row)
@@ -338,15 +332,10 @@ class TelegramBot:
         Returns:
             Dict: Статистика
         """
-        if not self.repository or not hasattr(self.repository, 'pool'):
-            return {
-                "total_users": len(self.all_users),
-                "active_users": len(self.all_users),
-                "blocked_users": 0,
-                "total_signals_sent": 0
-            }
-        
         try:
+            # ✅ ИСПРАВЛЕНО: Правильный доступ к БД
+            db_manager = get_database_manager()
+            
             query = """
                 SELECT 
                     COUNT(*) as total_users,
@@ -357,8 +346,7 @@ class TelegramBot:
                 FROM bot_users;
             """
             
-            async with self.repository.pool.acquire() as conn:
-                row = await conn.fetchrow(query)
+            row = await db_manager.fetchrow(query)
             
             return {
                 "total_users": row['total_users'] or 0,
@@ -476,7 +464,7 @@ class TelegramBot:
             
             keyboard = self._create_main_menu()
             
-            welcome_text = f"""🤖 <b>Bybit Trading Bot v3.2.0</b> 
+            welcome_text = f"""🤖 <b>Bybit Trading Bot v3.2.1</b> 
 
 Привет, {self.escape_html(user_name)}! 
 
@@ -817,7 +805,6 @@ class TelegramBot:
             
             try:
                 # ========== ПОЛНЫЙ КОД АНАЛИЗА ИЗ ОРИГИНАЛА ==========
-                # (Весь код из handle_request_analysis сохранен)
                 
                 end_time = datetime.now()
                 start_time_24h = end_time - timedelta(hours=24)
@@ -1126,8 +1113,8 @@ class TelegramBot:
             
             about_text = f"""ℹ️ <b>О боте</b>
 
-🤖 <b>Bybit Trading Bot v3.2.0</b>
-Multi-Strategy + AI + DB Storage Edition
+🤖 <b>Bybit Trading Bot v3.2.1</b>
+Multi-Strategy + AI + DB Storage Edition (Fixed)
 
 📊 <b>Статистика пользователей:</b>
 - Всего пользователей: {stats['total_users']}
@@ -1166,6 +1153,7 @@ Multi-Strategy + AI + DB Storage Edition
 - ✅ Health monitoring
 - ✅ Graceful shutdown
 - ✅ Сохранение пользователей в БД
+- ✅ Исправлен доступ к БД (v3.2.1)
 
 ⚠️ <b>Дисклеймер:</b>
 Все данные предоставляются исключительно в информационных целях и не являются инвестиционным советом."""
@@ -1253,7 +1241,7 @@ Multi-Strategy + AI + DB Storage Edition
             
             keyboard = self._create_main_menu()
             
-            welcome_text = """🤖 <b>Bybit Trading Bot v3.2.0</b>
+            welcome_text = """🤖 <b>Bybit Trading Bot v3.2.1</b>
 
 Главное меню. Выберите действие:"""
             
@@ -1306,7 +1294,7 @@ Multi-Strategy + AI + DB Storage Edition
             else:
                 response_text = """🤖 Я анализирую рынок криптовалют и фьючерсов, отправляю торговые сигналы с AI!
 
-🆕 <b>Версия 3.2.0 - DB Storage Edition</b>
+🆕 <b>Версия 3.2.1 - DB Storage Fixed</b>
 
 При /start вы автоматически сохраняетесь в БД и получаете все сигналы!
 
