@@ -3,6 +3,8 @@
 🔍 ДЕТАЛЬНАЯ ОТЛАДКА BREAKOUT STRATEGY
 
 Показывает ШАГ ЗА ШАГОМ что происходит в стратегии
+
+FIXED v2: Увеличено количество свечей до 40 (было 20)
 """
 
 import asyncio
@@ -24,14 +26,18 @@ from strategies.technical_analysis.context import (
 
 
 async def create_test_data():
-    """Создать тестовые данные"""
+    """
+    Создать тестовые данные
+    
+    FIXED v2: Создаём 40 свечей вместо 20 (требование стратегии: min 30 для D1)
+    """
     base_price = 50000.0
     now = datetime.now(timezone.utc)
     candles = []
     
-    # Консолидация
-    for i in range(20):
-        time = now - timedelta(minutes=100-i*5)
+    # 1. Консолидация (40 свечей - достаточно для D1!) ✅
+    for i in range(40):  # ✅ ИСПРАВЛЕНО: было 20
+        time = now - timedelta(minutes=200-i*5)  # ✅ ИСПРАВЛЕНО: было 100
         candles.append({
             'symbol': 'BTCUSDT',
             'interval': '5m',
@@ -43,7 +49,7 @@ async def create_test_data():
             'volume': 100.0
         })
     
-    # Пробой
+    # 2. Пробой
     breakout_time = now - timedelta(minutes=5)
     candles.append({
         'symbol': 'BTCUSDT',
@@ -56,7 +62,7 @@ async def create_test_data():
         'volume': 500.0
     })
     
-    # Технический контекст
+    # 3. Технический контекст
     resistance = SupportResistanceLevel(
         price=50000.0,
         level_type="resistance",
@@ -95,7 +101,7 @@ async def debug_strategy():
     """Детальная отладка"""
     
     print("\n" + "="*70)
-    print("🔍 ДЕТАЛЬНАЯ ОТЛАДКА BREAKOUT STRATEGY")
+    print("🔍 ДЕТАЛЬНАЯ ОТЛАДКА BREAKOUT STRATEGY v2 (FIXED)")
     print("="*70)
     
     try:
@@ -107,7 +113,7 @@ async def debug_strategy():
         candles, ta_context = await create_test_data()
         
         print(f"\n📊 ТЕСТОВЫЕ ДАННЫЕ:")
-        print(f"   • Свечей: {len(candles)}")
+        print(f"   • Всего свечей: {len(candles)} (требуется min 30 для D1) ✅")
         print(f"   • Последняя цена: ${float(candles[-1]['close_price']):,.2f}")
         print(f"   • Уровень сопротивления: ${ta_context.levels_d1[0].price:,.2f}")
         print(f"   • Разница: +${float(candles[-1]['close_price']) - ta_context.levels_d1[0].price:,.2f}")
@@ -142,8 +148,8 @@ async def debug_strategy():
             symbol="BTCUSDT",
             candles_1m=candles,
             candles_5m=candles,
-            candles_1h=candles[:10],
-            candles_1d=candles[:5],
+            candles_1h=candles[:24],
+            candles_1d=candles,  # ✅ ИСПРАВЛЕНО: все свечи (41 штука)
             ta_context=ta_context
         )
         
@@ -156,6 +162,7 @@ async def debug_strategy():
             print(f"   • Тип: {signal.signal_type.value}")
             print(f"   • Сила: {signal.strength:.2f}")
             print(f"   • Уверенность: {signal.confidence:.2f}")
+            print(f"   • Цена: ${signal.price:,.2f}")
             print(f"   • Причины:")
             for reason in signal.reasons:
                 print(f"      - {reason}")
