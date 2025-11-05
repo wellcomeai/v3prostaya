@@ -421,7 +421,7 @@ class BreakoutStrategy(BaseStrategy):
             # УСЛОВИЕ 2: Ближний ретест
             is_near_retest = False
             if hasattr(level, 'last_touch') and level.last_touch:
-                days_since_touch = (datetime.now() - level.last_touch).days
+                days_since_touch = (datetime.now(timezone.utc) - level.last_touch).days
                 is_near_retest = days_since_touch <= self.near_retest_max_days
                 
                 if is_near_retest:
