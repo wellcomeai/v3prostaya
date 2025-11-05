@@ -1,1121 +1,1404 @@
-import asyncio
 import logging
-import sys
-import os
-import traceback
+import asyncio
+from typing import Set, Optional, Dict, Any, List
 from datetime import datetime, timedelta
-from aiohttp import web
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from telegram_bot import TelegramBot
-from config import Config
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.filters import Command
+from aiogram.enums import ParseMode
 
-# Модульная архитектура v3.0
-from market_data import MarketDataManager
+from openai_integration import OpenAIAnalyzer
+from database import get_database_manager
 
-# ✅ ИСПРАВЛЕНО: Правильные импорты
-from core.signal_manager import SignalManager
-from strategies.strategy_orchestrator import StrategyOrchestrator
-
-# ✅ SimpleCandleSync для криптовалют (Bybit)
-from market_data.simple_candle_sync import SimpleCandleSync
-
-# ✅ SimpleFuturesSync для фьючерсов (YFinance)
-from market_data.simple_futures_sync import SimpleFuturesSync
-
-# ✅ TechnicalAnalysisContextManager
-from strategies.technical_analysis.context_manager import TechnicalAnalysisContextManager
-
-# База данных
-from database import initialize_database, close_database, get_database_health
-
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
 logger = logging.getLogger(__name__)
 
-# Настройки webhook
-WEB_SERVER_HOST = "0.0.0.0"
-WEB_SERVER_PORT = int(os.getenv("PORT", 8080))
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_SECRET = "bybit_trading_bot_secret_2025"
-
-# URL вашего сервера
-BASE_WEBHOOK_URL = "https://bybitmybot.onrender.com"
-
-# ✅ Глобальные переменные (упрощенная версия v3.0)
-bot_instance = None
-market_data_manager = None
-signal_manager = None
-strategy_orchestrator = None
-simple_candle_sync = None
-simple_futures_sync = None
-ta_context_manager = None
-repository = None
-database_initialized = False
-trading_system_ready = False
-
-
-def serialize_datetime_objects(obj):
+class TelegramBot:
     """
-    Рекурсивно сериализует datetime объекты в ISO строки для JSON совместимости
+    Telegram бот для анализа рынка на aiogram (webhook режим) - v3.2.0
+    
+    ✅ Новое в v3.2.0:
+    - Сохранение пользователей в PostgreSQL
+    - Загрузка пользователей при старте
+    - Автоматическая синхронизация с БД
+    - Статистика использования
+    - Управление заблокированными пользователями
     """
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    elif isinstance(obj, dict):
-        return {key: serialize_datetime_objects(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
-        return [serialize_datetime_objects(item) for item in obj]
-    elif isinstance(obj, tuple):
-        return tuple(serialize_datetime_objects(item) for item in obj)
-    elif hasattr(obj, '__dict__'):
-        return {key: serialize_datetime_objects(value) for key, value in obj.__dict__.items()}
-    else:
-        return obj
-
-
-async def health_check(request):
-    """Health check endpoint для Render и мониторинга"""
-    try:
-        # Проверяем бот
-        bot_status = "inactive"
-        bot_info = None
-        if bot_instance and bot_instance.bot:
-            try:
-                bot_info = await bot_instance.bot.get_me()
-                bot_status = "active"
-            except Exception as e:
-                bot_status = "error"
-                logger.warning(f"Bot health check failed: {e}")
-        
-        # Проверяем БД
-        db_health = await get_database_health()
-        
-        # ✅ Проверяем все компоненты v3.0
-        trading_system_status = {
-            "simple_candle_sync": "inactive",
-            "simple_futures_sync": "inactive",
-            "ta_context_manager": "inactive",
-            "repository": "inactive",
-            "signal_manager": "inactive", 
-            "strategy_orchestrator": "inactive",
-            "strategies_active": 0,
-            "system_ready": trading_system_ready
-        }
-        
-        # SimpleCandleSync статус
-        if simple_candle_sync:
-            try:
-                trading_system_status["simple_candle_sync"] = "running" if simple_candle_sync.is_running else "inactive"
-            except Exception as e:
-                logger.warning(f"SimpleCandleSync health check failed: {e}")
-                trading_system_status["simple_candle_sync"] = "error"
-        
-        # SimpleFuturesSync статус
-        if simple_futures_sync:
-            try:
-                trading_system_status["simple_futures_sync"] = "running" if simple_futures_sync.is_running else "inactive"
-            except Exception as e:
-                logger.warning(f"SimpleFuturesSync health check failed: {e}")
-                trading_system_status["simple_futures_sync"] = "error"
-        
-        # TechnicalAnalysisContextManager статус
-        if ta_context_manager:
-            try:
-                trading_system_status["ta_context_manager"] = "running" if ta_context_manager.is_running else "inactive"
-            except Exception as e:
-                logger.warning(f"TechnicalAnalysisContextManager health check failed: {e}")
-                trading_system_status["ta_context_manager"] = "error"
-        
-        # Repository статус
-        if repository:
-            try:
-                trading_system_status["repository"] = "active"
-            except Exception as e:
-                logger.warning(f"Repository health check failed: {e}")
-                trading_system_status["repository"] = "error"
-        
-        # SignalManager статус
-        if signal_manager:
-            try:
-                trading_system_status["signal_manager"] = "running" if signal_manager.is_running else "inactive"
-            except Exception as e:
-                logger.warning(f"Signal manager health check failed: {e}")
-                trading_system_status["signal_manager"] = "error"
-        
-        # StrategyOrchestrator статус
-        if strategy_orchestrator:
-            try:
-                trading_system_status["strategy_orchestrator"] = "running" if strategy_orchestrator.is_running else "inactive"
-                trading_system_status["strategies_active"] = len(strategy_orchestrator.strategies)
-            except Exception as e:
-                logger.warning(f"Strategy orchestrator health check failed: {e}")
-                trading_system_status["strategy_orchestrator"] = "error"
-                trading_system_status["strategies_active"] = 0
-        
-        # Формируем ответ
-        health_response = {
-            "status": "ok",
-            "timestamp": datetime.now().isoformat(),
-            "database": {
-                "status": "connected" if db_health.get("healthy", False) else "disconnected",
-                "initialized": database_initialized,
-                **db_health
-            },
-            "telegram_bot": {
-                "status": bot_status,
-                "username": bot_info.username if bot_info else None,
-                "bot_id": bot_info.id if bot_info else None,
-                "active_users": len(bot_instance.all_users) if bot_instance else 0
-            },
-            "trading_system": trading_system_status
-        }
-        
-        # Сериализуем все datetime объекты
-        health_response = serialize_datetime_objects(health_response)
-        
-        # Определяем HTTP статус
-        overall_healthy = (
-            db_health.get("healthy", False) and 
-            bot_status == "active" and
-            database_initialized
-        )
-        
-        status_code = 200 if overall_healthy else 503
-        
-        return web.json_response(health_response, status=status_code)
-        
-    except Exception as e:
-        logger.error(f"❌ Health check failed: {e}")
-        return web.json_response({
-            "status": "error",
-            "message": str(e),
-            "timestamp": datetime.now().isoformat()
-        }, status=500)
-
-
-async def database_status(request):
-    """Endpoint для детального статуса БД"""
-    try:
-        db_health = await get_database_health()
-        
-        additional_info = {
-            "config": {
-                "database_url_configured": bool(Config.get_database_url()),
-                "ssl_mode": Config.get_ssl_mode(),
-                "environment": Config.ENVIRONMENT,
-                "auto_migrate": Config.should_auto_migrate()
-            }
-        }
-        
-        response_data = {
-            **db_health,
-            **additional_info,
-            "initialized": database_initialized
-        }
-        
-        response_data = serialize_datetime_objects(response_data)
-        
-        return web.json_response(response_data)
-        
-    except Exception as e:
-        logger.error(f"❌ Database status check failed: {e}")
-        return web.json_response({
-            "status": "error",
-            "message": str(e),
-            "initialized": database_initialized,
-            "timestamp": datetime.now().isoformat()
-        }, status=500)
-
-
-# ========== SYNC STATUS ENDPOINTS ==========
-
-async def simple_sync_status_handler(request):
-    """Endpoint для статуса SimpleCandleSync (крипта)"""
-    try:
-        if not simple_candle_sync:
-            return web.json_response({
-                "status": "error",
-                "message": "SimpleCandleSync not initialized"
-            }, status=503)
-        
-        stats = simple_candle_sync.get_stats()
-        health = simple_candle_sync.get_health_status()
-        
-        response_data = {
-            "status": "running" if simple_candle_sync.is_running else "stopped",
-            "health": health,
-            "stats": stats,
-            "symbols": simple_candle_sync.symbols,
-            "intervals": [s.interval for s in simple_candle_sync.schedule],
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        response_data = serialize_datetime_objects(response_data)
-        
-        return web.json_response(response_data)
-        
-    except Exception as e:
-        logger.error(f"Error getting SimpleCandleSync status: {e}")
-        logger.error(traceback.format_exc())
-        return web.json_response({
-            "status": "error",
-            "error": str(e)
-        }, status=500)
-
-
-async def futures_sync_status_handler(request):
-    """Endpoint для статуса SimpleFuturesSync (фьючерсы)"""
-    try:
-        if not simple_futures_sync:
-            return web.json_response({
-                "status": "error",
-                "message": "SimpleFuturesSync not initialized"
-            }, status=503)
-        
-        stats = simple_futures_sync.get_stats()
-        health = simple_futures_sync.get_health_status()
-        
-        response_data = {
-            "status": "running" if simple_futures_sync.is_running else "stopped",
-            "health": health,
-            "stats": stats,
-            "symbols": simple_futures_sync.symbols,
-            "intervals": [s.interval for s in simple_futures_sync.schedule],
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        response_data = serialize_datetime_objects(response_data)
-        
-        return web.json_response(response_data)
-        
-    except Exception as e:
-        logger.error(f"Error getting SimpleFuturesSync status: {e}")
-        logger.error(traceback.format_exc())
-        return web.json_response({
-            "status": "error",
-            "error": str(e)
-        }, status=500)
-
-
-async def ta_context_status_handler(request):
-    """Endpoint для статуса Technical Analysis Context Manager"""
-    try:
-        if not ta_context_manager:
-            return web.json_response({
-                "status": "error",
-                "message": "TechnicalAnalysisContextManager not initialized"
-            }, status=503)
-        
-        stats = ta_context_manager.get_stats()
-        health = ta_context_manager.get_health_status()
-        analyzer_stats = ta_context_manager.get_analyzer_stats_summary()
-        
-        response_data = {
-            "status": "running" if ta_context_manager.is_running else "stopped",
-            "health": health,
-            "stats": stats,
-            "analyzers": analyzer_stats,
-            "contexts": list(ta_context_manager.contexts.keys()),
-            "contexts_count": len(ta_context_manager.contexts),
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        response_data = serialize_datetime_objects(response_data)
-        
-        return web.json_response(response_data)
-        
-    except Exception as e:
-        logger.error(f"Error getting TA Context status: {e}")
-        logger.error(traceback.format_exc())
-        return web.json_response({
-            "status": "error",
-            "error": str(e)
-        }, status=500)
-
-
-async def trading_system_status_handler(request):
-    """Endpoint для статуса торговой системы v3.0"""
-    try:
-        response_data = {}
-        
-        # SimpleCandleSync статус
-        if simple_candle_sync:
-            try:
-                response_data["simple_candle_sync"] = simple_candle_sync.get_stats()
-            except Exception as e:
-                logger.warning(f"Failed to get simple_candle_sync stats: {e}")
-                response_data["simple_candle_sync"] = {"error": str(e)}
-        
-        # SimpleFuturesSync статус
-        if simple_futures_sync:
-            try:
-                response_data["simple_futures_sync"] = simple_futures_sync.get_stats()
-            except Exception as e:
-                logger.warning(f"Failed to get simple_futures_sync stats: {e}")
-                response_data["simple_futures_sync"] = {"error": str(e)}
-        
-        # TechnicalAnalysisContextManager статус
-        if ta_context_manager:
-            try:
-                response_data["ta_context_manager"] = ta_context_manager.get_stats()
-            except Exception as e:
-                logger.warning(f"Failed to get ta_context_manager stats: {e}")
-                response_data["ta_context_manager"] = {"error": str(e)}
-        
-        # Repository статус
-        if repository:
-            try:
-                response_data["repository"] = {
-                    "status": "active",
-                    "type": "MarketDataRepository"
-                }
-            except Exception as e:
-                logger.warning(f"Failed to get repository status: {e}")
-                response_data["repository"] = {"error": str(e)}
-        
-        # SignalManager статус
-        if signal_manager:
-            try:
-                response_data["signal_manager"] = signal_manager.get_stats()
-            except Exception as e:
-                logger.warning(f"Failed to get signal manager stats: {e}")
-                response_data["signal_manager"] = {"error": str(e)}
-        
-        # StrategyOrchestrator статус
-        if strategy_orchestrator:
-            try:
-                response_data["strategy_orchestrator"] = strategy_orchestrator.get_stats()
-            except Exception as e:
-                logger.warning(f"Failed to get orchestrator stats: {e}")
-                response_data["strategy_orchestrator"] = {"error": str(e)}
-        
-        # System health
-        try:
-            response_data["system_health"] = {
-                "simple_candle_sync": simple_candle_sync.get_health_status() if simple_candle_sync else None,
-                "simple_futures_sync": simple_futures_sync.get_health_status() if simple_futures_sync else None,
-                "ta_context_manager": ta_context_manager.get_health_status() if ta_context_manager else None,
-                "repository": "active" if repository else None,
-                "signal_manager": signal_manager.get_health_status() if signal_manager else None,
-                "orchestrator": strategy_orchestrator.get_health_status() if strategy_orchestrator else None
-            }
-        except Exception as e:
-            logger.warning(f"Failed to get system health: {e}")
-            response_data["system_health"] = {"error": str(e)}
-        
-        # Database
-        try:
-            response_data["database"] = await get_database_health()
-        except Exception as e:
-            logger.warning(f"Failed to get database health: {e}")
-            response_data["database"] = {"error": str(e)}
-        
-        response_data["timestamp"] = datetime.now().isoformat()
-        response_data["status"] = "active"
-        response_data["system_ready"] = trading_system_ready
-        
-        response_data = serialize_datetime_objects(response_data)
-        
-        return web.json_response(response_data)
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка в trading_system_status: {e}")
-        return web.json_response({
-            "status": "error", 
-            "message": str(e),
-            "timestamp": datetime.now().isoformat()
-        }, status=500)
-
-
-async def root_handler(request):
-    """Root endpoint с информацией о системе v3.0"""
-    try:
-        system_info = {
-            "message": "Bybit Trading Bot v3.0 - Simplified Architecture",
-            "features": [
-                "✅ PostgreSQL Database Integration",
-                "✅ SimpleCandleSync - REST API Crypto Sync",
-                "✅ SimpleFuturesSync - YFinance Futures Sync",
-                "✅ TechnicalAnalysisContextManager",
-                "✅ Repository - Direct DB Access",
-                "✅ SignalManager v3.0",
-                "✅ StrategyOrchestrator v3.0",
-                "✅ 3 Level-Based Strategies (Breakout, Bounce, False Breakout)",
-                "✅ OpenAI GPT-4 Integration",
-                "✅ Telegram Notifications",
-                "🚀 Production Ready"
-            ],
-            "status": "active",
-            "timestamp": datetime.now().isoformat(),
-            "database_enabled": database_initialized,
-            "simple_candle_sync_active": bool(simple_candle_sync and simple_candle_sync.is_running),
-            "simple_futures_sync_active": bool(simple_futures_sync and simple_futures_sync.is_running),
-            "ta_context_manager_active": bool(ta_context_manager and ta_context_manager.is_running),
-            "repository_active": bool(repository),
-            "signal_manager_active": bool(signal_manager and signal_manager.is_running),
-            "orchestrator_active": bool(strategy_orchestrator and strategy_orchestrator.is_running),
-            "trading_system_ready": trading_system_ready,
-            "environment": Config.ENVIRONMENT,
-            "webhook_path": WEBHOOK_PATH,
-            "api_endpoints": {
-                "health": "/health",
-                "database_status": "/database/status", 
-                "trading_status": "/trading/status",
-                "simple_sync_status": "/admin/sync-status",
-                "futures_sync_status": "/admin/futures-sync-status",
-                "ta_context_status": "/admin/ta-context-status"
-            }
-        }
-        
-        # Дополнительная информация
-        if simple_candle_sync:
-            try:
-                health = simple_candle_sync.get_health_status()
-                system_info["simple_candle_sync_health"] = health.get("healthy", False)
-                system_info["candles_synced"] = simple_candle_sync.stats.get("candles_synced", 0)
-            except Exception as e:
-                logger.warning(f"Failed to get SimpleCandleSync status: {e}")
-        
-        if simple_futures_sync:
-            try:
-                health = simple_futures_sync.get_health_status()
-                system_info["simple_futures_sync_health"] = health.get("healthy", False)
-                system_info["futures_candles_synced"] = simple_futures_sync.stats.get("candles_synced", 0)
-            except Exception as e:
-                logger.warning(f"Failed to get SimpleFuturesSync status: {e}")
-        
-        if ta_context_manager:
-            try:
-                health = ta_context_manager.get_health_status()
-                system_info["ta_context_manager_health"] = health.get("healthy", False)
-                system_info["ta_contexts_count"] = len(ta_context_manager.contexts)
-            except Exception as e:
-                logger.warning(f"Failed to get TechnicalAnalysisContextManager status: {e}")
-        
-        if strategy_orchestrator:
-            try:
-                system_info["active_strategies"] = len(strategy_orchestrator.strategies)
-                system_info["orchestrator_cycles"] = strategy_orchestrator.stats.get("total_cycles", 0)
-            except Exception as e:
-                logger.warning(f"Failed to get orchestrator stats: {e}")
-                system_info["active_strategies"] = 0
-        
-        if bot_instance:
-            try:
-                system_info["active_users"] = len(bot_instance.all_users)
-            except Exception as e:
-                logger.warning(f"Failed to get active users count: {e}")
-                system_info["active_users"] = 0
-        
-        system_info = serialize_datetime_objects(system_info)
-        
-        return web.json_response(system_info)
-        
-    except Exception as e:
-        logger.error(f"❌ Root handler failed: {e}")
-        return web.json_response({
-            "status": "error",
-            "message": str(e),
-            "timestamp": datetime.now().isoformat()
-        }, status=500)
-
-
-# ========== LIFECYCLE HANDLERS ==========
-
-async def on_startup(bot) -> None:
-    """Действия при запуске - устанавливаем webhook"""
-    webhook_url = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
-    logger.info(f"🔗 Настройка webhook: {webhook_url}")
     
-    try:
-        logger.info("🔄 Удаляю старый webhook...")
-        await bot.delete_webhook(drop_pending_updates=True)
-        await asyncio.sleep(2)
+    def __init__(self, token: str, repository=None, ta_context_manager=None):
+        """
+        Args:
+            token: Telegram bot token
+            repository: MarketDataRepository для доступа к данным
+            ta_context_manager: TechnicalAnalysisContextManager для технического анализа
+        """
+        self.bot = Bot(token=token)
+        self.dp = Dispatcher()
+        self.router = Router()
         
-        logger.info("🔗 Устанавливаю новый webhook...")
-        await bot.set_webhook(
-            url=webhook_url,
-            secret_token=WEBHOOK_SECRET,
-            drop_pending_updates=True
-        )
+        self.openai_analyzer = OpenAIAnalyzer()
+        self.repository = repository
+        self.ta_context_manager = ta_context_manager
         
-        webhook_info = await bot.get_webhook_info()
-        logger.info(f"✅ Webhook установлен: {webhook_info.url}")
+        # ✅ Все пользователи в памяти (для быстрого доступа)
+        self.all_users: Set[int] = set()
         
-        if webhook_info.pending_update_count > 0:
-            logger.warning(f"⚠️ Ожидающих обновлений: {webhook_info.pending_update_count}")
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка установки webhook: {e}")
-        raise
-
-
-async def on_shutdown(bot) -> None:
-    """Действия при остановке"""
-    try:
-        logger.info("🔄 Остановка бота...")
+        self.user_analysis_state: Dict[int, Dict[str, Any]] = {}
         
+        self._register_handlers()
+        
+        self.dp.include_router(self.router)
+        
+        logger.info("🤖 TelegramBot v3.2.0 инициализирован (DB-backed users)")
+        logger.info(f"   • Repository: {'✅' if repository else '❌'}")
+        logger.info(f"   • TA Context Manager: {'✅' if ta_context_manager else '❌'}")
+        logger.info(f"   • OpenAI Analyzer: {'✅' if self.openai_analyzer else '❌'}")
+    
+    # ==================== DATABASE METHODS ====================
+    
+    async def load_users_from_db(self) -> int:
+        """
+        ✅ Загрузить всех активных пользователей из БД при старте
+        
+        Returns:
+            int: Количество загруженных пользователей
+        """
         try:
-            webhook_info = await bot.get_webhook_info()
-            if webhook_info.url:
-                logger.info(f"🗑️ Удаляю webhook: {webhook_info.url}")
-                await bot.delete_webhook()
-                await asyncio.sleep(1)
+            logger.info("📥 Загрузка пользователей из БД...")
+            
+            # Получаем database manager
+            db_manager = get_database_manager()
+            
+            # Проверяем существование таблицы
+            check_table_query = """
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'bot_users'
+                );
+            """
+            
+            table_exists = await db_manager.fetchval(check_table_query)
+            
+            if not table_exists:
+                logger.warning("⚠️ Таблица bot_users не существует, создаю...")
+                await self._create_bot_users_table()
+            
+            # Загружаем активных пользователей
+            query = """
+                SELECT user_id 
+                FROM bot_users 
+                WHERE is_active = TRUE AND is_blocked = FALSE
+                ORDER BY last_interaction_at DESC;
+            """
+            
+            rows = await db_manager.fetch(query)
+            
+            # Добавляем в память
+            for row in rows:
+                self.all_users.add(row['user_id'])
+            
+            logger.info(f"✅ Загружено {len(self.all_users)} активных пользователей")
+            
+            return len(self.all_users)
+            
         except Exception as e:
-            logger.warning(f"⚠️ Ошибка при удалении webhook: {e}")
-        
-        logger.info("✅ Бот остановлен")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка при остановке: {e}")
-
-
-async def cleanup_resources():
-    """Освобождение всех ресурсов"""
-    global bot_instance, signal_manager, strategy_orchestrator
-    global simple_candle_sync, simple_futures_sync, ta_context_manager, repository
-    global database_initialized, trading_system_ready
+            logger.error(f"❌ Ошибка загрузки пользователей из БД: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return 0
     
-    try:
-        trading_system_ready = False
-        
-        # Останавливаем StrategyOrchestrator
-        if strategy_orchestrator:
-            logger.info("🔄 Остановка StrategyOrchestrator...")
-            try:
-                await strategy_orchestrator.stop()
-                logger.info("✅ StrategyOrchestrator остановлен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка остановки StrategyOrchestrator: {e}")
-        
-        # Останавливаем TechnicalAnalysisContextManager
-        if ta_context_manager:
-            logger.info("🔄 Остановка TechnicalAnalysisContextManager...")
-            try:
-                await ta_context_manager.stop_background_updates()
-                logger.info("✅ TechnicalAnalysisContextManager остановлен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка остановки TechnicalAnalysisContextManager: {e}")
-        
-        # Останавливаем SimpleFuturesSync
-        if simple_futures_sync:
-            logger.info("🔄 Остановка SimpleFuturesSync...")
-            try:
-                await simple_futures_sync.stop()
-                logger.info("✅ SimpleFuturesSync остановлен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка остановки SimpleFuturesSync: {e}")
-        
-        # Останавливаем SimpleCandleSync
-        if simple_candle_sync:
-            logger.info("🔄 Остановка SimpleCandleSync...")
-            try:
-                await simple_candle_sync.stop()
-                logger.info("✅ SimpleCandleSync остановлен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка остановки SimpleCandleSync: {e}")
-        
-        # Останавливаем SignalManager
-        if signal_manager:
-            logger.info("🔄 Остановка SignalManager...")
-            try:
-                await signal_manager.stop()
-                logger.info("✅ SignalManager остановлен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка остановки SignalManager: {e}")
-        
-        # Repository очистка
-        if repository:
-            logger.info("✅ Repository очищен")
-            repository = None
-        
-        # Закрываем Telegram бот
-        if bot_instance:
-            try:
-                await bot_instance.close()
-                logger.info("✅ Telegram бот закрыт")
-            except Exception as e:
-                logger.error(f"❌ Ошибка закрытия Telegram бота: {e}")
-        
-        # Закрываем базу данных
-        if database_initialized:
-            logger.info("🔄 Закрытие базы данных...")
-            try:
-                await close_database()
-                database_initialized = False
-                logger.info("✅ База данных закрыта")
-            except Exception as e:
-                logger.error(f"❌ Ошибка закрытия базы данных: {e}")
-                database_initialized = False
+    async def _create_bot_users_table(self):
+        """Создать таблицу bot_users если её нет"""
+        try:
+            db_manager = get_database_manager()
             
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка освобождения ресурсов: {e}")
-
-
-async def initialize_database_system():
-    """Инициализация базы данных"""
-    global database_initialized
-    
-    try:
-        logger.info("🗄️ Инициализация базы данных...")
-        logger.info(f"   • Database URL: {'настроен' if Config.get_database_url() else 'НЕ НАСТРОЕН'}")
-        logger.info(f"   • SSL Mode: {Config.get_ssl_mode()}")
-        logger.info(f"   • Environment: {Config.ENVIRONMENT}")
-        logger.info(f"   • Auto-migrate: {Config.should_auto_migrate()}")
-        
-        database_initialized = await initialize_database()
-        
-        if database_initialized:
-            logger.info("✅ База данных инициализирована успешно")
-            
-            try:
-                db_health = await get_database_health()
-                if db_health.get("healthy", False):
-                    logger.info(f"✅ База данных работает: {db_health.get('status', 'unknown')}")
-                else:
-                    logger.warning(f"⚠️ Проблема с базой данных: {db_health}")
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось проверить статус БД: {e}")
+            create_table_query = """
+                CREATE TABLE IF NOT EXISTS bot_users (
+                    user_id BIGINT PRIMARY KEY,
+                    username VARCHAR(255),
+                    first_name VARCHAR(255),
+                    last_name VARCHAR(255),
+                    language_code VARCHAR(10),
+                    is_active BOOLEAN DEFAULT TRUE,
+                    is_blocked BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    last_interaction_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    signals_received_count INTEGER DEFAULT 0
+                );
                 
-            return True
-        else:
-            logger.error("❌ Не удалось инициализировать базу данных")
-            return False
+                CREATE INDEX IF NOT EXISTS idx_bot_users_active 
+                    ON bot_users(is_active) WHERE is_active = TRUE;
+                    
+                CREATE INDEX IF NOT EXISTS idx_bot_users_last_interaction 
+                    ON bot_users(last_interaction_at);
+            """
             
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка инициализации БД: {e}")
-        database_initialized = False
-        return False
-
-
-async def create_trading_components():
-    """
-    ✅ СОЗДАНИЕ компонентов БЕЗ запуска
-    Только инициализация объектов, фоновые задачи не запускаются
-    """
-    global signal_manager, strategy_orchestrator
-    global simple_candle_sync, simple_futures_sync, ta_context_manager
-    global repository
+            await db_manager.execute(create_table_query)
+            logger.info("✅ Таблица bot_users создана")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания таблицы bot_users: {e}")
     
-    try:
-        logger.info("📊 Создание торговых компонентов...")
+    async def save_user_to_db(
+        self, 
+        user_id: int, 
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+        language_code: Optional[str] = None
+    ) -> bool:
+        """
+        ✅ Сохранить пользователя в БД (INSERT or UPDATE)
         
-        # ==================== ШАГ 1: Repository ====================
-        logger.info("📊 Инициализация Repository...")
-        from database.repositories import get_market_data_repository
-        
-        repository = await get_market_data_repository()
-        logger.info("✅ Repository создан")
-        
-        # ==================== ШАГ 2: SimpleCandleSync (БЕЗ запуска) ====================
-        logger.info("🔄 Создание SimpleCandleSync...")
-        from bybit_client import BybitClient
-        
-        bybit_client = BybitClient()
-        
-        simple_candle_sync = SimpleCandleSync(
-            symbols=Config.get_bybit_symbols(),
-            bybit_client=bybit_client,
-            repository=repository,
-            check_gaps_on_start=False  # ❗ НЕ проверяем при создании
-        )
-        
-        logger.info("✅ SimpleCandleSync создан (не запущен)")
-        
-        # ==================== ШАГ 3: SimpleFuturesSync (БЕЗ запуска) ====================
-        futures_symbols = Config.get_yfinance_symbols()
-        
-        if futures_symbols:
-            logger.info("🔄 Создание SimpleFuturesSync...")
-            simple_futures_sync = SimpleFuturesSync(
-                symbols=futures_symbols,
-                repository=repository,
-                check_gaps_on_start=False  # ❗ НЕ проверяем при создании
+        Args:
+            user_id: ID пользователя Telegram
+            username: Username (@username)
+            first_name: Имя
+            last_name: Фамилия
+            language_code: Код языка
+            
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            db_manager = get_database_manager()
+            
+            query = """
+                INSERT INTO bot_users (
+                    user_id, username, first_name, last_name, language_code,
+                    is_active, is_blocked, created_at, last_interaction_at
+                )
+                VALUES ($1, $2, $3, $4, $5, TRUE, FALSE, NOW(), NOW())
+                ON CONFLICT (user_id) 
+                DO UPDATE SET
+                    username = EXCLUDED.username,
+                    first_name = EXCLUDED.first_name,
+                    last_name = EXCLUDED.last_name,
+                    language_code = EXCLUDED.language_code,
+                    last_interaction_at = NOW(),
+                    is_active = TRUE,
+                    is_blocked = FALSE;
+            """
+            
+            await db_manager.execute(
+                query,
+                user_id,
+                username,
+                first_name,
+                last_name,
+                language_code
             )
             
-            logger.info("✅ SimpleFuturesSync создан (не запущен)")
-        else:
-            logger.info("⏭️ SimpleFuturesSync пропущен (нет символов)")
-            simple_futures_sync = None
-        
-        # ==================== ШАГ 4: TechnicalAnalysis (БЕЗ запуска) ====================
-        logger.info("🧠 Создание TechnicalAnalysisContextManager...")
-        
-        ta_context_manager = TechnicalAnalysisContextManager(
-            repository=repository,
-            auto_start_background_updates=False  # ❗ НЕ запускаем фон
-        )
-        
-        logger.info("✅ TechnicalAnalysisContextManager создан (не запущен)")
-        
-        # ==================== ШАГ 5: SignalManager (БЕЗ запуска) ====================
-        logger.info("🎛️ Создание SignalManager v3.0...")
-        
-        # OpenAI анализатор (опционально)
-        openai_analyzer = None
-        try:
-            from openai_integration import OpenAIAnalyzer
-            openai_analyzer = OpenAIAnalyzer()
-            logger.info("🤖 OpenAI анализатор создан")
+            logger.debug(f"💾 Пользователь {user_id} сохранен в БД")
+            return True
+            
         except Exception as e:
-            logger.warning(f"⚠️ OpenAI недоступен: {e}")
+            logger.error(f"❌ Ошибка сохранения пользователя {user_id} в БД: {e}")
+            return False
+    
+    async def update_user_interaction(self, user_id: int) -> bool:
+        """
+        ✅ Обновить время последнего взаимодействия
         
-        signal_manager = SignalManager(
-            openai_analyzer=openai_analyzer,
-            cooldown_minutes=5,
-            max_signals_per_hour=12,
-            enable_ai_enrichment=True,
-            min_signal_strength=0.3
+        Args:
+            user_id: ID пользователя
+            
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            db_manager = get_database_manager()
+            
+            query = """
+                UPDATE bot_users 
+                SET last_interaction_at = NOW()
+                WHERE user_id = $1;
+            """
+            
+            await db_manager.execute(query, user_id)
+            return True
+            
+        except Exception as e:
+            logger.debug(f"⚠️ Ошибка обновления взаимодействия {user_id}: {e}")
+            return False
+    
+    async def mark_user_blocked(self, user_id: int) -> bool:
+        """
+        ✅ Пометить пользователя как заблокировавшего бота
+        
+        Args:
+            user_id: ID пользователя
+            
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            db_manager = get_database_manager()
+            
+            query = """
+                UPDATE bot_users 
+                SET is_blocked = TRUE, is_active = FALSE
+                WHERE user_id = $1;
+            """
+            
+            await db_manager.execute(query, user_id)
+            logger.info(f"🚫 Пользователь {user_id} помечен как заблокированный")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка пометки пользователя {user_id} заблокированным: {e}")
+            return False
+    
+    async def increment_signals_count(self, user_id: int) -> bool:
+        """
+        ✅ Увеличить счетчик полученных сигналов
+        
+        Args:
+            user_id: ID пользователя
+            
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            db_manager = get_database_manager()
+            
+            query = """
+                UPDATE bot_users 
+                SET signals_received_count = signals_received_count + 1,
+                    last_interaction_at = NOW()
+                WHERE user_id = $1;
+            """
+            
+            await db_manager.execute(query, user_id)
+            return True
+            
+        except Exception as e:
+            logger.debug(f"⚠️ Ошибка увеличения счетчика сигналов {user_id}: {e}")
+            return False
+    
+    async def get_user_stats(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """
+        ✅ Получить статистику пользователя
+        
+        Args:
+            user_id: ID пользователя
+            
+        Returns:
+            Optional[Dict]: Статистика или None
+        """
+        try:
+            db_manager = get_database_manager()
+            
+            query = """
+                SELECT 
+                    user_id,
+                    username,
+                    first_name,
+                    is_active,
+                    is_blocked,
+                    created_at,
+                    last_interaction_at,
+                    signals_received_count
+                FROM bot_users
+                WHERE user_id = $1;
+            """
+            
+            row = await db_manager.fetchrow(query, user_id)
+            
+            if row:
+                return dict(row)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения статистики пользователя {user_id}: {e}")
+            return None
+    
+    async def get_all_users_stats(self) -> Dict[str, Any]:
+        """
+        ✅ Получить общую статистику по всем пользователям
+        
+        Returns:
+            Dict: Статистика
+        """
+        try:
+            db_manager = get_database_manager()
+            
+            query = """
+                SELECT 
+                    COUNT(*) as total_users,
+                    COUNT(*) FILTER (WHERE is_active = TRUE AND is_blocked = FALSE) as active_users,
+                    COUNT(*) FILTER (WHERE is_blocked = TRUE) as blocked_users,
+                    SUM(signals_received_count) as total_signals_sent,
+                    MAX(last_interaction_at) as last_interaction
+                FROM bot_users;
+            """
+            
+            row = await db_manager.fetchrow(query)
+            
+            return {
+                "total_users": row['total_users'] or 0,
+                "active_users": row['active_users'] or 0,
+                "blocked_users": row['blocked_users'] or 0,
+                "total_signals_sent": row['total_signals_sent'] or 0,
+                "last_interaction": row['last_interaction']
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения общей статистики: {e}")
+            return {
+                "total_users": len(self.all_users),
+                "active_users": len(self.all_users),
+                "blocked_users": 0,
+                "total_signals_sent": 0
+            }
+    
+    # ==================== UTILITY METHODS ====================
+    
+    @staticmethod
+    def escape_html(text: str) -> str:
+        """
+        Экранирование HTML спецсимволов для безопасной отправки в Telegram
+        
+        Args:
+            text: Исходный текст (может содержать <, >, &)
+            
+        Returns:
+            str: Экранированный текст
+        """
+        if not text:
+            return ""
+        
+        return (str(text)
+            .replace('&', '&amp;')
+            .replace('<', '&lt;')
+            .replace('>', '&gt;'))
+    
+    # ==================== HANDLERS REGISTRATION ====================
+    
+    def _register_handlers(self):
+        """Регистрация всех обработчиков"""
+        self.router.message.register(self.start_command, Command("start"))
+        self.router.message.register(self.help_command, Command("help"))
+        
+        self.router.callback_query.register(
+            self.handle_market_analysis_start,
+            F.data == "market_analysis"
+        )
+        self.router.callback_query.register(
+            self.handle_select_crypto,
+            F.data == "select_crypto"
+        )
+        self.router.callback_query.register(
+            self.handle_select_futures,
+            F.data == "select_futures"
+        )
+        self.router.callback_query.register(
+            self.handle_symbol_selection,
+            F.data.startswith("analyze_")
+        )
+        self.router.callback_query.register(
+            self.handle_request_analysis,
+            F.data == "request_analysis"
+        )
+        self.router.callback_query.register(
+            self.handle_cancel_analysis,
+            F.data == "cancel_analysis"
+        )
+        self.router.callback_query.register(
+            self.handle_about, 
+            F.data == "about"
+        )
+        self.router.callback_query.register(
+            self.handle_back_to_menu,
+            F.data == "back_to_menu"
         )
         
-        logger.info("✅ SignalManager создан (не запущен)")
+        self.router.callback_query.register(self.handle_unknown_callback)
         
-        # ==================== ШАГ 6: StrategyOrchestrator (БЕЗ запуска) ====================
-        logger.info("🎭 Создание StrategyOrchestrator v3.0...")
+        self.router.message.register(self.handle_text_message, F.text)
         
-        # ✅ Собираем ВСЕ символы (крипта + фьючерсы)
-        all_symbols = Config.get_bybit_symbols()
-        if futures_symbols:
-            all_symbols.extend(futures_symbols)
-        
-        logger.info(f"   • Всего символов: {len(all_symbols)}")
-        logger.info(f"   • Крипта: {len(Config.get_bybit_symbols())}")
-        logger.info(f"   • Фьючерсы: {len(futures_symbols) if futures_symbols else 0}")
-        
-        strategy_orchestrator = StrategyOrchestrator(
-            repository=repository,
-            ta_context_manager=ta_context_manager,
-            signal_manager=signal_manager,
-            symbols=all_symbols,
-            analysis_interval_seconds=60,
-            enabled_strategies=["breakout", "bounce", "false_breakout"]
+        logger.info("✅ Все обработчики зарегистрированы")
+    
+    # ==================== COMMAND HANDLERS ====================
+    
+    async def start_command(self, message: Message):
+        """
+        ✅ Обработчик команды /start - добавляем пользователя в список И в БД
+        """
+        try:
+            user_name = message.from_user.first_name or "друг"
+            user_id = message.from_user.id
+            username = message.from_user.username
+            last_name = message.from_user.last_name
+            language_code = message.from_user.language_code
+            
+            # ✅ Добавляем в память
+            self.all_users.add(user_id)
+            
+            # ✅ Сохраняем в БД
+            await self.save_user_to_db(
+                user_id=user_id,
+                username=username,
+                first_name=user_name,
+                last_name=last_name,
+                language_code=language_code
+            )
+            
+            logger.info(
+                f"👤 Пользователь: {user_name} (@{username}) (ID: {user_id}) "
+                f"добавлен. Всего: {len(self.all_users)}"
+            )
+            
+            keyboard = self._create_main_menu()
+            
+            welcome_text = f"""🤖 <b>Bybit Trading Bot v3.2.0</b> 
+
+Привет, {self.escape_html(user_name)}! 
+
+📊 <b>Что я умею:</b>
+- Синхронизация данных криптовалют (Bybit)
+- 🆕 Синхронизация фьючерсов CME (YFinance)
+- Сохранение исторических данных в PostgreSQL
+- 🤖 AI анализ рынка через OpenAI GPT-4
+- 🎭 Анализ через 3 торговые стратегии одновременно
+- 🚨 Отправка торговых сигналов в реальном времени
+- 💾 Хранение пользователей в БД
+- Модульная архитектура для надежности
+
+🔥 <b>Активные компоненты v3.2:</b>
+- SimpleCandleSync - синхронизация криптовалют
+- SimpleFuturesSync - синхронизация фьючерсов
+- Repository - прямой доступ к БД
+- TechnicalAnalysisContextManager - технический анализ
+- SignalManager - обработка с AI обогащением
+- StrategyOrchestrator - управление стратегиями
+- 🆕 Multi-Strategy Analysis - 3 стратегии параллельно
+- 🆕 PostgreSQL User Storage - сохранение пользователей
+
+🎭 <b>Стратегии для анализа:</b>
+- BreakoutStrategy - пробои уровней
+- BounceStrategy - отбои от уровней
+- FalseBreakoutStrategy - ложные пробои
+
+🚀 <b>Символы в мониторинге:</b>
+- Crypto: BTC, ETH, BNB, SOL, XRP, DOGE и др.
+- Futures: MCL, MGC, MES, MNQ (CME micro)
+
+🔔 <b>Уведомления:</b>
+Вы будете получать все торговые сигналы с AI анализом автоматически!
+Ваши данные сохранены в базе - сигналы будут приходить даже после перезапуска бота.
+
+Нажми кнопку ниже, чтобы начать! 👇"""
+            
+            await message.answer(
+                welcome_text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в start_command: {e}")
+            await message.answer("❌ Произошла ошибка. Попробуйте позже.")
+    
+    async def help_command(self, message: Message):
+        """Обработчик команды /help"""
+        try:
+            # Обновляем взаимодействие
+            await self.update_user_interaction(message.from_user.id)
+            
+            help_text = """📖 <b>Справка по боту</b>
+
+🔧 <b>Доступные команды:</b>
+/start - Запуск бота
+/help - Эта справка
+
+📊 <b>Функции:</b>
+- 🔄 Автоматическая синхронизация свечей
+- 📈 Мониторинг криптовалют (15 пар)
+- 🆕 Мониторинг фьючерсов CME (4 контракта)
+- 💾 Сохранение в PostgreSQL
+- 🤖 AI анализ через OpenAI GPT-4
+- 🎭 Анализ через 3 торговые стратегии
+- 🚨 Торговые сигналы в реальном времени
+- 💾 Хранение пользователей в БД
+
+🆕 <b>Архитектура v3.2:</b>
+- SimpleCandleSync - REST API синхронизация (крипта)
+- SimpleFuturesSync - YFinance синхронизация (фьючерсы)
+- Repository - прямой доступ к базе данных
+- TechnicalAnalysisContextManager - технический анализ
+- SignalManager - фильтрация + AI обогащение
+- StrategyOrchestrator - управление стратегиями
+- 🆕 Multi-Strategy Analysis - параллельный запуск
+- 🆕 PostgreSQL User Storage - надежное хранение
+- OpenAI GPT-4 - AI анализ рынка
+
+🎭 <b>Торговые стратегии:</b>
+- BreakoutStrategy - торговля пробоев уровней
+- BounceStrategy - торговля отбоев (БСУ-БПУ)
+- FalseBreakoutStrategy - ловля ложных пробоев
+
+🚨 <b>Торговые сигналы:</b>
+- Мониторинг в реальном времени
+- Анализ импульсных движений цены
+- Детекция резких изменений (&gt;2% за минуту)
+- Анализ ордербука и объемов
+- Интеллектуальная фильтрация сигналов
+- 🤖 AI обогащение каждого сигнала
+- Кулдаун между сигналами (5 минут)
+
+🔔 <b>Уведомления:</b>
+Все пользователи бота автоматически получают торговые сигналы.
+Ваш профиль сохранен в БД - сигналы будут приходить всегда!
+
+⚠️ <b>Важно:</b>
+Бот предоставляет аналитическую информацию, но не является инвестиционным советом. Торговля криптовалютами связана с высокими рисками.
+
+🔄 Для начала работы используйте /start"""
+            
+            keyboard = self._create_main_menu()
+            
+            await message.answer(
+                help_text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в help_command: {e}")
+            await message.answer("❌ Произошла ошибка. Попробуйте /start")
+    
+    # ==================== CALLBACK HANDLERS ====================
+    
+    async def handle_market_analysis_start(self, callback: CallbackQuery):
+        """Обработка запроса анализа рынка - выбор типа актива"""
+        try:
+            await callback.answer()
+            
+            user_id = callback.from_user.id
+            user_name = callback.from_user.first_name or "пользователь"
+            
+            # Обновляем взаимодействие
+            await self.update_user_interaction(user_id)
+            
+            logger.info(f"📊 {user_name} ({user_id}) запросил анализ рынка")
+            
+            if not self.repository or not self.openai_analyzer:
+                await callback.message.edit_text(
+                    "❌ <b>Анализ рынка временно недоступен</b>\n\n"
+                    "Система анализа не инициализирована.\n"
+                    "Обратитесь к администратору.",
+                    reply_markup=self._create_back_button(),
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            self.user_analysis_state[user_id] = {}
+            
+            text = """📊 <b>АНАЛИЗ РЫНКА С ИИ</b>
+
+🤖 Выберите тип актива для анализа:
+
+<b>🪙 Криптовалюты</b> - Bybit spot pairs
+- BTC, ETH, BNB, SOL, XRP, DOGE, ADA и др.
+- Анализ текущей ситуации
+- Технический анализ
+- 🎭 Мнения 3 торговых стратегий
+- AI прогноз на 1-3 дня
+
+<b>📊 Фьючерсы</b> - CME micro futures
+- MCL (нефть), MGC (золото)
+- MES (S&amp;P 500), MNQ (Nasdaq)
+- Комплексный технический анализ
+- 🎭 Консенсус стратегий
+- AI оценка перспектив
+
+Нажмите кнопку ниже для выбора ⬇️"""
+            
+            keyboard = self._create_asset_type_menu()
+            
+            await callback.message.edit_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в handle_market_analysis_start: {e}")
+            await callback.answer("❌ Произошла ошибка")
+    
+    async def handle_select_crypto(self, callback: CallbackQuery):
+        """Обработка выбора криптовалют"""
+        try:
+            await callback.answer()
+            
+            user_id = callback.from_user.id
+            
+            self.user_analysis_state[user_id] = {"asset_type": "crypto"}
+            
+            from config import Config
+            crypto_symbols = Config.get_bybit_symbols()
+            
+            text = """🪙 <b>ВЫБЕРИТЕ КРИПТОВАЛЮТУ</b>
+
+Доступные пары для анализа:"""
+            
+            keyboard = self._create_symbol_selection_menu(crypto_symbols, "crypto")
+            
+            await callback.message.edit_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в handle_select_crypto: {e}")
+            await callback.answer("❌ Произошла ошибка")
+    
+    async def handle_select_futures(self, callback: CallbackQuery):
+        """Обработка выбора фьючерсов"""
+        try:
+            await callback.answer()
+            
+            user_id = callback.from_user.id
+            
+            self.user_analysis_state[user_id] = {"asset_type": "futures"}
+            
+            from config import Config
+            futures_symbols = Config.get_yfinance_symbols() if hasattr(Config, 'get_yfinance_symbols') else []
+            
+            if not futures_symbols:
+                await callback.message.edit_text(
+                    "⚠️ <b>Фьючерсы недоступны</b>\n\n"
+                    "Список фьючерсов не настроен в конфигурации.",
+                    reply_markup=self._create_back_button(),
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            text = """📊 <b>ВЫБЕРИТЕ ФЬЮЧЕРС</b>
+
+Доступные контракты для анализа:
+
+- <b>MCL</b> - Micro WTI Crude Oil
+- <b>MGC</b> - Micro Gold
+- <b>MES</b> - Micro E-mini S&amp;P 500
+- <b>MNQ</b> - Micro E-mini Nasdaq-100"""
+            
+            keyboard = self._create_symbol_selection_menu(futures_symbols, "futures")
+            
+            await callback.message.edit_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в handle_select_futures: {e}")
+            await callback.answer("❌ Произошла ошибка")
+    
+    async def handle_symbol_selection(self, callback: CallbackQuery):
+        """Обработка выбора конкретного символа"""
+        try:
+            await callback.answer()
+            
+            user_id = callback.from_user.id
+            
+            symbol = callback.data.replace("analyze_", "")
+            
+            if user_id not in self.user_analysis_state:
+                self.user_analysis_state[user_id] = {}
+            
+            self.user_analysis_state[user_id]["symbol"] = symbol
+            
+            asset_type = self.user_analysis_state[user_id].get("asset_type", "crypto")
+            emoji = "🪙" if asset_type == "crypto" else "📊"
+            
+            text = f"""{emoji} <b>АНАЛИЗ {symbol}</b>
+
+Вы выбрали: <b>{symbol}</b>
+
+📊 <b>Что будет проанализировано:</b>
+- Текущая цена и изменения
+- Технический анализ (уровни, ATR, тренд)
+- Данные из базы за последние 24 часа
+- 🎭 Запуск 3 торговых стратегий:
+  • BreakoutStrategy
+  • BounceStrategy
+  • FalseBreakoutStrategy
+- 🤖 AI прогноз от OpenAI GPT-4
+
+⏱️ Анализ займет 8-12 секунд (запуск стратегий).
+
+Нажмите кнопку для запуска анализа ⬇️"""
+            
+            keyboard = self._create_confirm_analysis_menu()
+            
+            await callback.message.edit_text(
+                text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в handle_symbol_selection: {e}")
+            await callback.answer("❌ Произошла ошибка")
+    
+    async def handle_request_analysis(self, callback: CallbackQuery):
+        """
+        🆕 v3.1: Обработка запроса анализа с запуском ВСЕХ стратегий
+        (Полный код анализа сохранен из оригинального файла)
+        """
+        try:
+            await callback.answer()
+            
+            user_id = callback.from_user.id
+            user_name = callback.from_user.first_name or "пользователь"
+            
+            # Обновляем взаимодействие
+            await self.update_user_interaction(user_id)
+            
+            if user_id not in self.user_analysis_state:
+                await callback.message.edit_text(
+                    "❌ Сессия истекла. Начните заново.",
+                    reply_markup=self._create_back_button(),
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            symbol = self.user_analysis_state[user_id].get("symbol")
+            asset_type = self.user_analysis_state[user_id].get("asset_type", "crypto")
+            
+            if not symbol:
+                await callback.message.edit_text(
+                    "❌ Символ не выбран. Начните заново.",
+                    reply_markup=self._create_back_button(),
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            emoji = "🪙" if asset_type == "crypto" else "📊"
+            await callback.message.edit_text(
+                f"{emoji} <b>АНАЛИЗ {symbol}</b>\n\n"
+                f"⏳ Собираю данные из БД...\n"
+                f"📊 Получаю технический анализ...\n"
+                f"🎭 Запускаю 3 торговые стратегии...\n"
+                f"🤖 Запрашиваю AI анализ...\n\n"
+                f"<i>Пожалуйста, подождите 8-12 секунд...</i>",
+                parse_mode=ParseMode.HTML
+            )
+            
+            logger.info(f"🔬 {user_name} ({user_id}) запустил Multi-Strategy анализ {symbol}")
+            
+            try:
+                # ========== ПОЛНЫЙ КОД АНАЛИЗА ИЗ ОРИГИНАЛА ==========
+                # (Весь код из handle_request_analysis сохранен)
+                
+                end_time = datetime.now()
+                start_time_24h = end_time - timedelta(hours=24)
+                start_time_1h = end_time - timedelta(hours=1)
+                start_time_5h = end_time - timedelta(hours=5)
+                start_time_180d = end_time - timedelta(days=180)
+                
+                logger.info(f"📥 Загрузка свечей для {symbol}...")
+                
+                candles_1m, candles_5m, candles_1h, candles_1d = await asyncio.gather(
+                    self.repository.get_candles(symbol.upper(), "1m", start_time=start_time_1h, limit=60),
+                    self.repository.get_candles(symbol.upper(), "5m", start_time=start_time_5h, limit=50),
+                    self.repository.get_candles(symbol.upper(), "1h", start_time=start_time_24h, limit=24),
+                    self.repository.get_candles(symbol.upper(), "1d", start_time=start_time_180d, limit=180)
+                )
+                
+                logger.info(f"✅ Загружено свечей: 1m={len(candles_1m)}, 5m={len(candles_5m)}, "
+                           f"1h={len(candles_1h)}, 1d={len(candles_1d)}")
+                
+                if not candles_1h or len(candles_1h) < 5:
+                    await callback.message.edit_text(
+                        f"❌ <b>Недостаточно данных для анализа {symbol}</b>\n\n"
+                        f"В базе данных найдено {len(candles_1h) if candles_1h else 0} свечей.\n"
+                        f"Для анализа требуется минимум 5 часовых свечей.\n\n"
+                        f"Попробуйте позже или выберите другой символ.",
+                        reply_markup=self._create_back_button(),
+                        parse_mode=ParseMode.HTML
+                    )
+                    return
+                
+                latest_candle = candles_1h[-1]
+                first_candle_24h = candles_1h[0]
+                
+                current_price = float(latest_candle['close_price'])
+                price_24h_ago = float(first_candle_24h['open_price'])
+                price_change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100
+                
+                high_24h = max(float(c['high_price']) for c in candles_1h)
+                low_24h = min(float(c['low_price']) for c in candles_1h)
+                volume_24h = sum(float(c['volume']) for c in candles_1h)
+                
+                price_change_1m = 0
+                price_change_5m = 0
+                
+                if candles_1m and len(candles_1m) >= 5:
+                    latest_1m = candles_1m[-1]
+                    candle_5m_ago = candles_1m[-6] if len(candles_1m) >= 6 else candles_1m[0]
+                    candle_1m_ago = candles_1m[-2] if len(candles_1m) >= 2 else candles_1m[0]
+                    
+                    price_now = float(latest_1m['close_price'])
+                    price_1m = float(candle_1m_ago['close_price'])
+                    price_5m = float(candle_5m_ago['close_price'])
+                    
+                    if price_1m > 0:
+                        price_change_1m = ((price_now - price_1m) / price_1m) * 100
+                    if price_5m > 0:
+                        price_change_5m = ((price_now - price_5m) / price_5m) * 100
+                
+                logger.info(f"💰 Цена: ${current_price:,.2f}, изменение 24ч: {price_change_24h:+.2f}%")
+                
+                context = None
+                trend = "NEUTRAL"
+                volatility = "MEDIUM"
+                atr = 0.0
+                key_levels = []
+                
+                if self.ta_context_manager:
+                    try:
+                        logger.info(f"🧠 Получение технического контекста для {symbol}...")
+                        context = await self.ta_context_manager.get_context(symbol.upper())
+                        
+                        if context:
+                            trend = context.dominant_trend_h1.value if context.dominant_trend_h1 else "NEUTRAL"
+                            volatility = context.volatility_level or "MEDIUM"
+                            
+                            if context.atr_data:
+                                atr = context.atr_data.calculated_atr
+                            
+                            if context.levels_d1:
+                                for level in context.levels_d1[:5]:
+                                    key_levels.append({
+                                        'type': level.level_type,
+                                        'price': level.price,
+                                        'strength': level.strength
+                                    })
+                            
+                            logger.info(f"✅ Технический контекст: trend={trend}, volatility={volatility}, "
+                                       f"atr={atr:.2f}, levels={len(key_levels)}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка получения технического контекста: {e}")
+                
+                logger.info(f"🎭 Запуск торговых стратегий для {symbol}...")
+                
+                strategies_opinions = []
+                
+                if len(candles_5m) >= 20 and len(candles_1d) >= 30:
+                    from strategies import (
+                        BreakoutStrategy,
+                        BounceStrategy,
+                        FalseBreakoutStrategy
+                    )
+                    
+                    strategies = [
+                        BreakoutStrategy(
+                            symbol=symbol.upper(),
+                            repository=self.repository,
+                            ta_context_manager=self.ta_context_manager
+                        ),
+                        BounceStrategy(
+                            symbol=symbol.upper(),
+                            repository=self.repository,
+                            ta_context_manager=self.ta_context_manager
+                        ),
+                        FalseBreakoutStrategy(
+                            symbol=symbol.upper(),
+                            repository=self.repository,
+                            ta_context_manager=self.ta_context_manager
+                        )
+                    ]
+                    
+                    for strategy in strategies:
+                        try:
+                            logger.info(f"   🔄 Запуск {strategy.name}...")
+                            
+                            signal = await strategy.analyze_with_data(
+                                symbol=symbol.upper(),
+                                candles_1m=candles_1m,
+                                candles_5m=candles_5m,
+                                candles_1h=candles_1h,
+                                candles_1d=candles_1d,
+                                ta_context=context
+                            )
+                            
+                            if signal:
+                                signal_type = signal.signal_type.value
+                                
+                                if 'BUY' in signal_type:
+                                    opinion = 'BULLISH'
+                                elif 'SELL' in signal_type:
+                                    opinion = 'BEARISH'
+                                else:
+                                    opinion = 'NEUTRAL'
+                                
+                                strategies_opinions.append({
+                                    'name': strategy.name,
+                                    'opinion': opinion,
+                                    'confidence': signal.confidence,
+                                    'reasoning': ', '.join(signal.reasons[:2])
+                                })
+                                
+                                logger.info(f"   ✅ {strategy.name}: {opinion} (confidence={signal.confidence:.2f})")
+                            else:
+                                strategies_opinions.append({
+                                    'name': strategy.name,
+                                    'opinion': 'NEUTRAL',
+                                    'confidence': 0.5,
+                                    'reasoning': 'Условия для сигнала не выполнены'
+                                })
+                                
+                                logger.info(f"   ℹ️  {strategy.name}: NEUTRAL (нет сигнала)")
+                        
+                        except Exception as e:
+                            logger.error(f"   ❌ Ошибка в {strategy.name}: {e}")
+                            strategies_opinions.append({
+                                'name': strategy.name,
+                                'opinion': 'NEUTRAL',
+                                'confidence': 0.3,
+                                'reasoning': f'Ошибка анализа: {str(e)[:50]}'
+                            })
+                    
+                    logger.info(f"🎭 Завершен анализ стратегий: {len(strategies_opinions)} мнений")
+                else:
+                    logger.warning(f"⚠️ Недостаточно данных для запуска стратегий "
+                                  f"(5m={len(candles_5m)}, 1d={len(candles_1d)})")
+                
+                analysis_data = {
+                    'symbol': symbol,
+                    'current_price': current_price,
+                    'price_change_24h': price_change_24h,
+                    'price_change_1m': price_change_1m,
+                    'price_change_5m': price_change_5m,
+                    'volume_24h': volume_24h,
+                    'high_24h': high_24h,
+                    'low_24h': low_24h,
+                    'trend': trend,
+                    'volatility': volatility,
+                    'atr': atr,
+                    'key_levels': key_levels,
+                    'strategies_opinions': strategies_opinions
+                }
+                
+                logger.info(f"🤖 Запрос комплексного AI анализа к OpenAI...")
+                ai_analysis = await self.openai_analyzer.comprehensive_market_analysis(analysis_data)
+                
+                if not ai_analysis or len(ai_analysis) < 50:
+                    logger.warning("⚠️ AI анализ пустой или слишком короткий, используем fallback")
+                    ai_analysis = "❌ Не удалось получить детальный AI анализ. Попробуйте позже."
+                else:
+                    logger.info(f"✅ AI анализ получен ({len(ai_analysis)} символов)")
+                
+                ai_analysis_safe = self.escape_html(ai_analysis)
+                
+                strategies_text = ""
+                if strategies_opinions:
+                    strategies_text = "\n🎭 <b>Мнения торговых стратегий:</b>\n"
+                    
+                    for opinion in strategies_opinions:
+                        emoji_opinion = {
+                            'BULLISH': '🟢',
+                            'BEARISH': '🔴',
+                            'NEUTRAL': '🔶'
+                        }.get(opinion['opinion'], '⚪')
+                        
+                        confidence_pct = opinion['confidence'] * 100
+                        
+                        strategy_name = self.escape_html(opinion['name'])
+                        reasoning = self.escape_html(opinion['reasoning'])
+                        
+                        strategies_text += (
+                            f"{emoji_opinion} <b>{strategy_name}</b>: {opinion['opinion']} "
+                            f"({confidence_pct:.0f}%)\n"
+                            f"   <i>{reasoning}</i>\n"
+                        )
+                
+                message_text = f"""{emoji} <b>АНАЛИЗ {symbol}</b>
+
+💰 <b>Текущая цена:</b> ${current_price:,.2f}
+
+📊 <b>Изменения:</b>
+- 1 минута: {price_change_1m:+.2f}%
+- 5 минут: {price_change_5m:+.2f}%
+- 24 часа: {price_change_24h:+.2f}%
+
+📈 <b>Диапазон 24ч:</b>
+- Максимум: ${high_24h:,.2f}
+- Минимум: ${low_24h:,.2f}
+- Объем: {volume_24h:,.0f}
+
+🔧 <b>Технический анализ:</b>
+- Тренд: {trend}
+- Волатильность: {volatility}
+- ATR: {atr:.2f}
+{strategies_text}
+🤖 <b>AI АНАЛИЗ:</b>
+
+{ai_analysis_safe}
+
+<i>Анализ основан на {len(candles_1h)} часовых свечах и мнениях {len(strategies_opinions)} стратегий</i>
+"""
+                
+                keyboard = self._create_analysis_result_menu()
+                
+                await callback.message.edit_text(
+                    message_text,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML
+                )
+                
+                logger.info(f"✅ Multi-Strategy анализ {symbol} отправлен пользователю {user_id}")
+                
+                if user_id in self.user_analysis_state:
+                    del self.user_analysis_state[user_id]
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка выполнения анализа {symbol}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                
+                await callback.message.edit_text(
+                    f"❌ <b>Произошла ошибка при анализе {symbol}</b>\n\n"
+                    f"Детали: {self.escape_html(str(e)[:100])}\n\n"
+                    f"Попробуйте еще раз или выберите другой символ.",
+                    reply_markup=self._create_back_button(),
+                    parse_mode=ParseMode.HTML
+                )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в handle_request_analysis: {e}")
+            await callback.answer("❌ Произошла ошибка")
+    
+    async def handle_cancel_analysis(self, callback: CallbackQuery):
+        """Отмена анализа"""
+        try:
+            await callback.answer()
+            
+            user_id = callback.from_user.id
+            
+            if user_id in self.user_analysis_state:
+                del self.user_analysis_state[user_id]
+            
+            await self.handle_back_to_menu(callback)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в handle_cancel_analysis: {e}")
+    
+    async def handle_about(self, callback: CallbackQuery):
+        """Обработка запроса информации о боте"""
+        try:
+            await callback.answer()
+            
+            # Обновляем взаимодействие
+            await self.update_user_interaction(callback.from_user.id)
+            
+            # Получаем статистику
+            stats = await self.get_all_users_stats()
+            
+            about_text = f"""ℹ️ <b>О боте</b>
+
+🤖 <b>Bybit Trading Bot v3.2.0</b>
+Multi-Strategy + AI + DB Storage Edition
+
+📊 <b>Статистика пользователей:</b>
+- Всего пользователей: {stats['total_users']}
+- Активных: {stats['active_users']}
+- Заблокированных: {stats['blocked_users']}
+- Отправлено сигналов: {stats['total_signals_sent']}
+
+<b>🏗️ Упрощенная архитектура:</b>
+- 🔄 SimpleCandleSync - REST API синхронизация криптовалют
+- 🔄 SimpleFuturesSync - YFinance синхронизация фьючерсов
+- 📊 Repository - прямой доступ к данным
+- 🧠 TechnicalAnalysisContextManager - технический анализ
+- 🎭 StrategyOrchestrator - управление стратегиями
+- 🎛️ SignalManager + AI - интеллектуальная фильтрация
+- 💾 PostgreSQL User Storage - надежное хранение
+
+<b>🆕 Multi-Strategy Analysis v3.2:</b>
+- При анализе запускаются ВСЕ 3 стратегии
+- OpenAI получает консенсус стратегий
+- Более точный и обоснованный анализ
+- Учет разных торговых подходов
+- Хранение пользователей в БД
+
+<b>Технологии:</b>
+- 📈 Bybit REST API v5 для криптовалют
+- 📊 Yahoo Finance для фьючерсов CME
+- 🤖 OpenAI GPT-4 для AI анализа
+- 🚀 Python aiogram для Telegram
+- 💾 PostgreSQL для хранения данных
+- ⚡ Асинхронная архитектура
+
+<b>Надежность:</b>
+- ✅ Отсутствие deadlock благодаря REST API
+- ✅ Автоматическое восстановление
+- ✅ Проверка и заполнение пропусков
+- ✅ Health monitoring
+- ✅ Graceful shutdown
+- ✅ Сохранение пользователей в БД
+
+⚠️ <b>Дисклеймер:</b>
+Все данные предоставляются исключительно в информационных целях и не являются инвестиционным советом."""
+            
+            keyboard = self._create_about_menu()
+            
+            await callback.message.edit_text(
+                about_text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в handle_about: {e}")
+            await callback.answer("❌ Произошла ошибка")
+    
+    # ==================== BROADCAST ====================
+    
+    async def broadcast_signal(self, message: str):
+        """
+        ✅ Отправляет сигнал ВСЕМ активным пользователям
+        + Обновляет статистику в БД
+        """
+        try:
+            if not self.all_users:
+                logger.info("📡 Нет пользователей для отправки сигнала")
+                return
+            
+            sent_count = 0
+            failed_count = 0
+            blocked_users = []
+            
+            logger.info(f"📤 Отправка сигнала {len(self.all_users)} пользователям...")
+            
+            for user_id in self.all_users.copy():
+                try:
+                    await self.bot.send_message(
+                        chat_id=user_id,
+                        text=message,
+                        parse_mode=ParseMode.HTML
+                    )
+                    sent_count += 1
+                    
+                    # ✅ Увеличиваем счетчик сигналов в БД
+                    await self.increment_signals_count(user_id)
+                    
+                    await asyncio.sleep(0.05)
+                    
+                except Exception as e:
+                    failed_count += 1
+                    error_msg = str(e).lower()
+                    
+                    if any(phrase in error_msg for phrase in [
+                        "bot was blocked by the user",
+                        "user is deactivated", 
+                        "chat not found"
+                    ]):
+                        blocked_users.append(user_id)
+                        logger.info(f"🚫 Пользователь {user_id} заблокировал бота")
+                        
+                        # ✅ Помечаем в БД как заблокированного
+                        await self.mark_user_blocked(user_id)
+                    else:
+                        logger.warning(f"⚠️ Не удалось отправить сигнал пользователю {user_id}: {e}")
+            
+            # Удаляем заблокированных из памяти
+            for user_id in blocked_users:
+                self.all_users.discard(user_id)
+            
+            if blocked_users:
+                logger.info(f"🧹 Удалено {len(blocked_users)} заблокированных пользователей")
+            
+            logger.info(f"📨 Сигнал отправлен: ✅{sent_count} успешно, ❌{failed_count} ошибок. "
+                       f"Осталось: {len(self.all_users)} активных")
+            
+        except Exception as e:
+            logger.error(f"💥 Ошибка рассылки сигнала: {e}")
+    
+    # ==================== OTHER HANDLERS ====================
+    
+    async def handle_back_to_menu(self, callback: CallbackQuery):
+        """Возврат в главное меню"""
+        try:
+            await callback.answer()
+            
+            keyboard = self._create_main_menu()
+            
+            welcome_text = """🤖 <b>Bybit Trading Bot v3.2.0</b>
+
+Главное меню. Выберите действие:"""
+            
+            await callback.message.edit_text(
+                welcome_text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в handle_back_to_menu: {e}")
+            await callback.answer("❌ Произошла ошибка")
+    
+    async def handle_unknown_callback(self, callback: CallbackQuery):
+        """Обработка неизвестных callback данных"""
+        try:
+            await callback.answer("❓ Неизвестная команда")
+            logger.warning(f"⚠️ Неизвестный callback: {callback.data} от пользователя {callback.from_user.id}")
+            
+            await self.handle_back_to_menu(callback)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в handle_unknown_callback: {e}")
+    
+    async def handle_text_message(self, message: Message):
+        """Обработка обычных текстовых сообщений"""
+        try:
+            # Обновляем взаимодействие
+            await self.update_user_interaction(message.from_user.id)
+            
+            user_text = message.text.lower()
+            
+            if any(word in user_text for word in ['привет', 'старт', 'начать', 'hello', 'hi']):
+                await self.start_command(message)
+            elif any(word in user_text for word in ['анализ', 'рынок', 'btc', 'биткоин', 'цена']):
+                builder = InlineKeyboardBuilder()
+                builder.add(InlineKeyboardButton(
+                    text="📊 Анализ рынка с AI",
+                    callback_data="market_analysis"
+                ))
+                
+                await message.answer(
+                    "📊 Хотите получить AI анализ рынка?\n"
+                    "<i>Данные берутся из БД + 3 стратегии + OpenAI GPT-4</i>",
+                    reply_markup=builder.as_markup(),
+                    parse_mode=ParseMode.HTML
+                )
+            elif any(word in user_text for word in ['помощь', 'справка', 'help']):
+                await self.help_command(message)
+            else:
+                response_text = """🤖 Я анализирую рынок криптовалют и фьючерсов, отправляю торговые сигналы с AI!
+
+🆕 <b>Версия 3.2.0 - DB Storage Edition</b>
+
+При /start вы автоматически сохраняетесь в БД и получаете все сигналы!
+
+Используйте кнопки меню или команды:
+/start - главное меню
+/help - справка
+
+Или просто напишите:
+- "анализ" для AI анализа рынка (+ 3 стратегии)
+- "помощь" для подробной информации"""
+                
+                keyboard = self._create_main_menu()
+                await message.answer(response_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка в handle_text_message: {e}")
+            await message.answer("❌ Произошла ошибка. Попробуйте /start")
+    
+    # ==================== KEYBOARD BUILDERS ====================
+    
+    def _create_main_menu(self):
+        """Создание главного меню"""
+        builder = InlineKeyboardBuilder()
+        builder.add(
+            InlineKeyboardButton(text="📊 Анализ рынка с ИИ", callback_data="market_analysis")
         )
+        builder.add(
+            InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")
+        )
+        builder.adjust(1)
+        return builder.as_markup()
+    
+    def _create_analysis_menu(self):
+        """Создание меню после анализа"""
+        builder = InlineKeyboardBuilder()
+        builder.add(
+            InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")
+        )
+        builder.add(
+            InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_menu")
+        )
+        builder.adjust(1)
+        return builder.as_markup()
+    
+    def _create_about_menu(self):
+        """Создание меню в разделе О боте"""
+        builder = InlineKeyboardBuilder()
+        builder.add(
+            InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_menu")
+        )
+        builder.adjust(1)
+        return builder.as_markup()
+    
+    def _create_asset_type_menu(self):
+        """Создание меню выбора типа актива"""
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="🪙 Криптовалюты", callback_data="select_crypto"))
+        builder.add(InlineKeyboardButton(text="📊 Фьючерсы", callback_data="select_futures"))
+        builder.add(InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_menu"))
+        builder.adjust(1)
+        return builder.as_markup()
+    
+    def _create_symbol_selection_menu(self, symbols: List[str], asset_type: str):
+        """Создание меню выбора символа"""
+        builder = InlineKeyboardBuilder()
         
-        logger.info("✅ StrategyOrchestrator создан (не запущен)")
+        for symbol in symbols:
+            display_name = symbol
+            if asset_type == "crypto":
+                display_name = symbol.replace("USDT", "/USDT")
+            
+            builder.add(InlineKeyboardButton(
+                text=display_name,
+                callback_data=f"analyze_{symbol}"
+            ))
         
-        logger.info("=" * 70)
-        logger.info("✅ ВСЕ КОМПОНЕНТЫ СОЗДАНЫ")
-        logger.info("=" * 70)
+        builder.add(InlineKeyboardButton(text="◀️ Назад", callback_data="market_analysis"))
         
-        return True
+        builder.adjust(2, 2, 2, 2, 2, 1)
         
-    except Exception as e:
-        logger.error(f"❌ Ошибка создания компонентов: {e}")
-        logger.error(traceback.format_exc())
-        return False
-
-
-async def start_trading_system_background():
-    """
-    🚀 ФОНОВЫЙ запуск торговой системы
-    Вызывается ПОСЛЕ того как веб-сервер уже работает
-    """
-    global trading_system_ready
+        return builder.as_markup()
     
-    try:
-        # Даем время веб-серверу полностью запуститься
-        logger.info("⏳ Ожидание 10 секунд перед запуском торговой системы...")
-        await asyncio.sleep(10)
-        
-        logger.info("=" * 70)
-        logger.info("🚀 ФОНОВЫЙ ЗАПУСК ТОРГОВОЙ СИСТЕМЫ")
-        logger.info("=" * 70)
-        
-        # ==================== SimpleCandleSync ====================
-        if simple_candle_sync:
-            logger.info("🔄 Запуск SimpleCandleSync...")
-            try:
-                await simple_candle_sync.start()
-                logger.info("✅ SimpleCandleSync запущен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка запуска SimpleCandleSync: {e}")
-        
-        # ==================== SimpleFuturesSync ====================
-        if simple_futures_sync:
-            logger.info("🔄 Запуск SimpleFuturesSync...")
-            try:
-                await simple_futures_sync.start()
-                logger.info("✅ SimpleFuturesSync запущен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка запуска SimpleFuturesSync: {e}")
-        
-        # ==================== TechnicalAnalysisContextManager ====================
-        if ta_context_manager:
-            logger.info("🧠 Запуск TechnicalAnalysisContextManager...")
-            try:
-                await ta_context_manager.start_background_updates()
-                logger.info("✅ TechnicalAnalysisContextManager запущен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка запуска TechnicalAnalysisContextManager: {e}")
-        
-        # ==================== SignalManager ====================
-        if signal_manager:
-            logger.info("🎛️ Запуск SignalManager...")
-            try:
-                await signal_manager.start()
-                logger.info("✅ SignalManager запущен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка запуска SignalManager: {e}")
-        
-        # ==================== StrategyOrchestrator ====================
-        if strategy_orchestrator:
-            logger.info("🎭 Запуск StrategyOrchestrator...")
-            try:
-                await strategy_orchestrator.start()
-                logger.info("✅ StrategyOrchestrator запущен")
-            except Exception as e:
-                logger.error(f"❌ Ошибка запуска StrategyOrchestrator: {e}")
-        
-        trading_system_ready = True
-        
-        logger.info("=" * 70)
-        logger.info("🎉 ТОРГОВАЯ СИСТЕМА ПОЛНОСТЬЮ АКТИВНА")
-        logger.info("=" * 70)
-        logger.info(f"🔄 SimpleCandleSync: {'✅' if simple_candle_sync and simple_candle_sync.is_running else '❌'}")
-        logger.info(f"🔄 SimpleFuturesSync: {'✅' if simple_futures_sync and simple_futures_sync.is_running else '❌'}")
-        logger.info(f"🧠 TechnicalAnalysis: {'✅' if ta_context_manager and ta_context_manager.is_running else '❌'}")
-        logger.info(f"🎛️ SignalManager: {'✅' if signal_manager and signal_manager.is_running else '❌'}")
-        logger.info(f"🎭 StrategyOrchestrator: {'✅' if strategy_orchestrator and strategy_orchestrator.is_running else '❌'}")
-        logger.info("=" * 70)
-        
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка фонового запуска торговой системы: {e}")
-        logger.error(traceback.format_exc())
-        trading_system_ready = False
-
-
-async def create_app():
-    """
-    ✅ ПРАВИЛЬНОЕ создание приложения
+    def _create_confirm_analysis_menu(self):
+        """Создание меню подтверждения анализа"""
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="🤖 Получить анализ", callback_data="request_analysis"))
+        builder.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_analysis"))
+        builder.adjust(1)
+        return builder.as_markup()
     
-    Последовательность:
-    1. Инициализация БД
-    2. СОЗДАНИЕ компонентов (без запуска)
-    3. Создание Telegram бота
-    4. Установка webhook
-    5. Создание веб-приложения
-    6. ВОЗВРАТ app (веб-сервер запустится в main())
-    7. Торговая система запустится В ФОНЕ после старта веб-сервера
-    """
-    global bot_instance
+    def _create_analysis_result_menu(self):
+        """Создание меню после получения анализа"""
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="🔄 Другой символ", callback_data="market_analysis"))
+        builder.add(InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_menu"))
+        builder.adjust(1)
+        return builder.as_markup()
     
-    logger.info("=" * 70)
-    logger.info("🚀 СОЗДАНИЕ ПРИЛОЖЕНИЯ v3.0")
-    logger.info("=" * 70)
+    def _create_back_button(self):
+        """Простая кнопка назад"""
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_to_menu"))
+        return builder.as_markup()
     
-    # ========== ШАГ 1: Инициализация базы данных ==========
-    db_success = await initialize_database_system()
-    if not db_success:
-        logger.error("💥 Критическая ошибка: не удалось инициализировать БД")
-        if Config.is_production():
-            raise Exception("Database initialization failed in production")
-        else:
-            logger.warning("⚠️ Продолжаем без базы данных (только для разработки)")
+    # ==================== CLEANUP ====================
     
-    # ========== ШАГ 2: СОЗДАЕМ торговые компоненты (БЕЗ запуска) ==========
-    components_created = await create_trading_components()
-    if components_created:
-        logger.info("✅ Торговые компоненты созданы (фон не запущен)")
-    else:
-        logger.warning("⚠️ Не удалось создать торговые компоненты")
-    
-    # ========== ШАГ 3: Создаем Telegram бота ==========
-    logger.info("🤖 Инициализация Telegram бота...")
-    
-    bot_instance = TelegramBot(
-        token=Config.TELEGRAM_BOT_TOKEN,
-        repository=repository,
-        ta_context_manager=ta_context_manager
-    )
-    
-    logger.info("✅ Telegram бот инициализирован")
-    
-    # ✅ Загружаем пользователей из БД
-    try:
-        users_loaded = await bot_instance.load_users_from_db()
-        logger.info(f"📥 Загружено {users_loaded} пользователей из БД")
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось загрузить пользователей из БД: {e}")
-        logger.warning("⚠️ Продолжаем работу, пользователи будут добавляться при /start")
-    
-    # Подписываем бота на сигналы
-    if signal_manager and bot_instance:
-        signal_manager.add_subscriber(bot_instance.broadcast_signal)
-        logger.info("📡 Telegram бот подписан на торговые сигналы")
-    
-    # ========== ШАГ 4: Устанавливаем webhook ==========
-    await on_startup(bot_instance.bot)
-    
-    # ========== ШАГ 5: Создаем веб-приложение ==========
-    logger.info("🌐 Создание веб-приложения...")
-    app = web.Application()
-    
-    # Основные endpoints
-    app.router.add_get("/health", health_check)
-    app.router.add_get("/database/status", database_status)
-    app.router.add_get("/trading/status", trading_system_status_handler)
-    app.router.add_get("/", root_handler)
-    
-    # Sync status endpoints
-    app.router.add_get("/admin/sync-status", simple_sync_status_handler)
-    app.router.add_get("/admin/futures-sync-status", futures_sync_status_handler)
-    app.router.add_get("/admin/ta-context-status", ta_context_status_handler)
-    
-    # Webhook handler
-    webhook_requests_handler = SimpleRequestHandler(
-        dispatcher=bot_instance.dp,
-        bot=bot_instance.bot,
-        secret_token=WEBHOOK_SECRET
-    )
-    
-    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
-    setup_application(app, bot_instance.dp, bot=bot_instance.bot)
-    
-    logger.info("✅ Веб-приложение создано")
-    
-    # Graceful shutdown
-    async def cleanup_handler(app):
-        await cleanup_resources()
-    
-    app.on_cleanup.append(cleanup_handler)
-    
-    logger.info("=" * 70)
-    logger.info("✅ ПРИЛОЖЕНИЕ ГОТОВО К ЗАПУСКУ")
-    logger.info("=" * 70)
-    
-    return app
-
-
-async def main():
-    """
-    ✅ ПРАВИЛЬНАЯ главная функция
-    
-    Последовательность:
-    1. Создать app (БЕЗ запуска торговой системы)
-    2. Запустить веб-сервер (открыть порт!)
-    3. Запустить торговую систему В ФОНЕ
-    4. Мониторинг компонентов
-    """
-    
-    try:
-        logger.info("🌟 Запуск Bybit Trading Bot v3.0")
-        logger.info(f"🔧 Порт: {WEB_SERVER_PORT}")
-        logger.info(f"🔧 Webhook URL: {BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
-        logger.info(f"🔧 Environment: {Config.ENVIRONMENT}")
-        
-        # ========== ШАГ 1: Создаем приложение ==========
-        app = await create_app()
-        
-        # ========== ШАГ 2: Запускаем веб-сервер (ОТКРЫВАЕМ ПОРТ!) ==========
-        runner = web.AppRunner(app)
-        await runner.setup()
-        
-        site = web.TCPSite(runner, WEB_SERVER_HOST, WEB_SERVER_PORT)
-        await site.start()
-        
-        logger.info("=" * 70)
-        logger.info("✅ ВЕБ-СЕРВЕР ЗАПУЩЕН (ПОРТ ОТКРЫТ)")
-        logger.info("=" * 70)
-        logger.info(f"🌐 Веб-сервер: {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
-        logger.info(f"🤖 Telegram бот: активен")
-        logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
-        logger.info("=" * 70)
-        
-        # ========== ШАГ 3: Запускаем торговую систему В ФОНЕ ==========
-        asyncio.create_task(start_trading_system_background())
-        logger.info("🔄 Торговая система запускается в фоновом режиме...")
-        
-        # ========== ШАГ 4: Основной цикл мониторинга ==========
+    async def close(self):
+        """Корректное закрытие всех ресурсов бота"""
         try:
-            while True:
-                await asyncio.sleep(3600)
+            logger.info("🔄 Закрытие Telegram бота...")
+            
+            if self.bot and self.bot.session:
+                await self.bot.session.close()
+                logger.info("✅ Telegram bot сессия закрыта")
                 
-                # Мониторинг компонентов (перезапуск при необходимости)
-                if simple_candle_sync and not simple_candle_sync.is_running:
-                    logger.warning("⚠️ SimpleCandleSync остановился, перезапуск...")
-                    try:
-                        await simple_candle_sync.start()
-                        logger.info("✅ SimpleCandleSync перезапущен")
-                    except Exception as e:
-                        logger.error(f"❌ Не удалось перезапустить SimpleCandleSync: {e}")
-                
-                if simple_futures_sync and not simple_futures_sync.is_running:
-                    logger.warning("⚠️ SimpleFuturesSync остановился, перезапуск...")
-                    try:
-                        await simple_futures_sync.start()
-                        logger.info("✅ SimpleFuturesSync перезапущен")
-                    except Exception as e:
-                        logger.error(f"❌ Не удалось перезапустить SimpleFuturesSync: {e}")
-                
-                if ta_context_manager and not ta_context_manager.is_running:
-                    logger.warning("⚠️ TechnicalAnalysisContextManager остановился, перезапуск...")
-                    try:
-                        await ta_context_manager.start_background_updates()
-                        logger.info("✅ TechnicalAnalysisContextManager перезапущен")
-                    except Exception as e:
-                        logger.error(f"❌ Не удалось перезапустить TechnicalAnalysisContextManager: {e}")
-                
-                if strategy_orchestrator and not strategy_orchestrator.is_running:
-                    logger.warning("⚠️ StrategyOrchestrator остановился, перезапуск...")
-                    try:
-                        await strategy_orchestrator.start()
-                        logger.info("✅ StrategyOrchestrator перезапущен")
-                    except Exception as e:
-                        logger.error(f"❌ Не удалось перезапустить StrategyOrchestrator: {e}")
-                
-        except asyncio.CancelledError:
-            logger.info("📡 Получен сигнал отмены")
-        except KeyboardInterrupt:
-            logger.info("📡 Получен сигнал прерывания")
-        finally:
-            logger.info("🔄 Начинаю процедуру остановки...")
+            logger.info("🔴 Telegram бот корректно остановлен")
             
-            if bot_instance:
-                await on_shutdown(bot_instance.bot)
-            
-            await runner.cleanup()
-            await cleanup_resources()
-            
-            logger.info("🏁 Приложение полностью остановлено")
-            
-    except Exception as e:
-        logger.error(f"💥 Критическая ошибка в main(): {e}")
-        logger.error(traceback.format_exc())
-        
-        try:
-            await cleanup_resources()
-        except Exception as cleanup_error:
-            logger.error(f"❌ Ошибка аварийной очистки: {cleanup_error}")
-            
-        raise
-
-
-def run_app():
-    """Запуск приложения с корректной обработкой исключений"""
-    try:
-        if not Config.TELEGRAM_BOT_TOKEN or Config.TELEGRAM_BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
-            logger.error("💥 ОШИБКА: Telegram Bot Token не настроен!")
-            sys.exit(1)
-        
-        if not Config.get_database_url():
-            logger.warning("⚠️ Database URL не настроен - БД будет отключена")
-        
-        # Запускаем приложение
-        if hasattr(asyncio, 'run'):
-            asyncio.run(main())
-        else:
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(main())
-            
-    except KeyboardInterrupt:
-        logger.info("🔴 Приложение остановлено пользователем")
-    except Exception as e:
-        logger.error(f"💥 Критическая ошибка приложения: {e}")
-        logger.error(traceback.format_exc())
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    run_app()
+        except Exception as e:
+            logger.error(f"❌ Ошибка при закрытии бота: {e}")
