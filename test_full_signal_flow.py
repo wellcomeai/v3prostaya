@@ -9,6 +9,8 @@
 4. ✅ Telegram получает уведомление
 
 Если все работает - увидишь сообщение в Telegram!
+
+FIXED v2: Увеличено количество свечей до 40 (было 20)
 """
 
 import asyncio
@@ -35,13 +37,15 @@ async def create_mock_candles_for_breakout(base_price: float = 50000.0):
     - Консолидацию у уровня 50000
     - Поджатие (маленькие свечи)
     - Резкий пробой вверх
+    
+    FIXED v2: Создаём 40 свечей вместо 20 (требование стратегии: min 30 для D1)
     """
     now = datetime.now(timezone.utc)
     candles = []
     
-    # 1. Консолидация (20 свечей у уровня)
-    for i in range(20):
-        time = now - timedelta(minutes=100-i*5)
+    # 1. Консолидация (40 свечей - достаточно для D1!) ✅
+    for i in range(40):  # ✅ ИСПРАВЛЕНО: было 20
+        time = now - timedelta(minutes=200-i*5)  # ✅ ИСПРАВЛЕНО: было 100
         candles.append({
             'symbol': 'BTCUSDT',
             'interval': '5m',
@@ -122,7 +126,7 @@ async def test_full_chain():
     """Полный тест цепочки сигналов"""
     
     print("\n" + "="*70)
-    print("🔥 ТЕСТ ПОЛНОЙ ЦЕПОЧКИ СИГНАЛОВ")
+    print("🔥 ТЕСТ ПОЛНОЙ ЦЕПОЧКИ СИГНАЛОВ v2 (FIXED)")
     print("="*70)
     
     try:
@@ -167,13 +171,17 @@ async def test_full_chain():
         
         print("\n2️⃣ Создание идеальных данных для пробоя...")
         
-        # Идеальные свечи
+        # Идеальные свечи (теперь 41 штука!)
         candles_5m = await create_mock_candles_for_breakout(base_price=50000.0)
         candles_1m = candles_5m  # Используем те же для простоты
-        candles_1h = candles_5m[:10]
-        candles_1d = candles_5m[:5]
+        candles_1h = candles_5m[:24]  # Первые 24 для H1
+        candles_1d = candles_5m  # ✅ ИСПРАВЛЕНО: все свечи (41 штука > 30!)
         
-        print(f"   ✅ Создано свечей: 5m={len(candles_5m)}, 1h={len(candles_1h)}, 1d={len(candles_1d)}")
+        print(f"   ✅ Создано свечей:")
+        print(f"      • 1m: {len(candles_1m)}")
+        print(f"      • 5m: {len(candles_5m)}")
+        print(f"      • 1h: {len(candles_1h)}")
+        print(f"      • 1d: {len(candles_1d)} (требуется min 30) ✅")
         
         # Идеальный технический контекст
         ta_context = await create_perfect_ta_context("BTCUSDT")
@@ -196,7 +204,9 @@ async def test_full_chain():
             ta_context_manager=ta_mgr,
             min_signal_strength=0.3,  # Низкий порог
             signal_cooldown_minutes=0,  # БЕЗ cooldown
-            max_signals_per_hour=100
+            max_signals_per_hour=100,
+            require_compression=False,  # НЕ требуем для теста
+            require_consolidation=False  # НЕ требуем для теста
         )
         
         signal = await strategy.analyze_with_data(
