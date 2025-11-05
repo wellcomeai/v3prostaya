@@ -29,7 +29,7 @@ Version: 3.0.2 - FIXED: Level detection logic
 
 import logging
 from typing import Optional, Dict, Any, List, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .base_strategy import BaseStrategy, TradingSignal, SignalType, SignalStrength
 
