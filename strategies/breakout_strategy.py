@@ -1,7 +1,12 @@
 """
-Breakout Strategy v3.0 - Стратегия торговли пробоя с analyze_with_data()
+Breakout Strategy v3.0.2 - FIXED: Правильный поиск уровней для пробоя
 
 Торгует импульсные движения после преодоления ключевых уровней.
+
+КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ v3.0.2:
+- ✅ FIXED: Поиск уровней РЯДОМ с ценой (±0.5%), а не строго выше/ниже
+- ✅ Теперь ловит пробои которые УЖЕ произошли
+- ✅ Правильно определяет направление пробоя
 
 Условия входа (из документа):
 1. ✅ Уровень с D1 идентифицирован
@@ -19,7 +24,7 @@ Breakout Strategy v3.0 - Стратегия торговли пробоя с ana
 - Отмена ордера если цена отошла на 1 ATR от заявки
 
 Author: Trading Bot Team
-Version: 3.0.1 - FIXED: KeyError 'close' -> 'close_price'
+Version: 3.0.2 - FIXED: Level detection logic
 """
 
 import logging
@@ -33,16 +38,15 @@ logger = logging.getLogger(__name__)
 
 class BreakoutStrategy(BaseStrategy):
     """
-    💥 Стратегия торговли пробоя уровней v3.0
+    💥 Стратегия торговли пробоя уровней v3.0.2
     
     Ставка на импульсное движение после преодоления ключевого уровня.
     Требует накопления энергии (консолидации) перед пробоем.
     
-    Изменения v3.0.1:
-    - ✅ ИСПРАВЛЕНО: KeyError 'close' -> используем 'close_price'
-    - ✅ ИСПРАВЛЕНО: KeyError 'high' -> используем 'high_price'
-    - ✅ ИСПРАВЛЕНО: KeyError 'low' -> используем 'low_price'
-    - ✅ ИСПРАВЛЕНО: KeyError 'open' -> используем 'open_price'
+    Изменения v3.0.2:
+    - ✅ ИСПРАВЛЕНО: Логика поиска уровней - теперь ищет РЯДОМ с ценой
+    - ✅ ИСПРАВЛЕНО: Ловит пробои которые УЖЕ произошли
+    - ✅ Используем 'close_price', 'high_price', 'low_price', 'open_price'
     
     Сильные стороны:
     - Ловит крупные импульсные движения
@@ -53,22 +57,6 @@ class BreakoutStrategy(BaseStrategy):
     - Требует терпения (ждем все условия)
     - Ложные пробои могут срабатывать стоп
     - Не работает при исчерпанном ATR
-    
-    Usage:
-        strategy = BreakoutStrategy(
-            symbol="BTCUSDT",
-            repository=repository,
-            ta_context_manager=ta_manager
-        )
-        
-        signal = await strategy.analyze_with_data(
-            symbol="BTCUSDT",
-            candles_1m=candles_1m,
-            candles_5m=candles_5m,
-            candles_1h=candles_1h,
-            candles_1d=candles_1d,
-            ta_context=context
-        )
     """
     
     def __init__(
@@ -111,15 +99,7 @@ class BreakoutStrategy(BaseStrategy):
         signal_cooldown_minutes: int = 30,
         max_signals_per_hour: int = 2,
     ):
-        """
-        Инициализация стратегии пробоя
-        
-        Args:
-            symbol: Торговый символ
-            repository: MarketDataRepository
-            ta_context_manager: Менеджер технического анализа
-            [остальные параметры см. выше]
-        """
+        """Инициализация стратегии пробоя"""
         super().__init__(
             name="BreakoutStrategy",
             symbol=symbol,
@@ -172,7 +152,7 @@ class BreakoutStrategy(BaseStrategy):
             "setups_filtered_by_compression": 0
         }
         
-        logger.info("💥 BreakoutStrategy v3.0.1 инициализирована (FIXED)")
+        logger.info("💥 BreakoutStrategy v3.0.2 инициализирована (FIXED)")
         logger.info(f"   • Symbol: {symbol}")
         logger.info(f"   • Require compression: {require_compression}")
         logger.info(f"   • Require consolidation: {require_consolidation}")
@@ -200,17 +180,6 @@ class BreakoutStrategy(BaseStrategy):
         4. Проверка всех условий входа
         5. Расчет параметров ордера
         6. Генерация сигнала
-        
-        Args:
-            symbol: Торговый символ
-            candles_1m: Минутные свечи (последние 100)
-            candles_5m: 5-минутные свечи (последние 50)
-            candles_1h: Часовые свечи (последние 24)
-            candles_1d: Дневные свечи (последние 180)
-            ta_context: Технический контекст (уровни, ATR)
-            
-        Returns:
-            TradingSignal или None
         """
         try:
             # Обновляем symbol (если был PLACEHOLDER)
@@ -227,7 +196,6 @@ class BreakoutStrategy(BaseStrategy):
                     logger.debug(f"⚠️ {symbol}: недостаточно D1 свечей")
                 return None
             
-            # ✅ ИСПРАВЛЕНО: используем 'close_price' вместо 'close'
             current_price = float(candles_5m[-1]['close_price'])
             
             # Шаг 1: Проверка технического контекста
@@ -313,7 +281,7 @@ class BreakoutStrategy(BaseStrategy):
             logger.error(traceback.format_exc())
             return None
     
-    # ==================== ПОИСК УРОВНЕЙ ====================
+    # ==================== ПОИСК УРОВНЕЙ (FIXED!) ====================
     
     def _find_nearest_level_for_breakout(
         self,
@@ -321,7 +289,12 @@ class BreakoutStrategy(BaseStrategy):
         current_price: float
     ) -> Tuple[Optional[Any], str]:
         """
-        Поиск ближайшего уровня для потенциального пробоя
+        ✅ ИСПРАВЛЕНО v3.0.2: Поиск ближайшего уровня для потенциального пробоя
+        
+        КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ:
+        - Ищем уровни РЯДОМ с ценой (±0.5%), а не строго выше/ниже
+        - Ловим пробои которые УЖЕ произошли
+        - Правильно определяем направление
         
         Args:
             ta_context: Технический контекст
@@ -340,42 +313,46 @@ class BreakoutStrategy(BaseStrategy):
             if not strong_levels:
                 return None, None
             
-            # Ищем ближайшее сопротивление (для пробоя вверх)
-            resistances = [
-                level for level in strong_levels
-                if level.level_type == "resistance" and level.price > current_price
-            ]
-            
-            # Ищем ближайшую поддержку (для пробоя вниз)
-            supports = [
-                level for level in strong_levels
-                if level.level_type == "support" and level.price < current_price
-            ]
-            
-            # Выбираем ближайший уровень
             candidates = []
             
-            if resistances:
-                nearest_resistance = min(resistances, key=lambda l: abs(l.price - current_price))
-                distance = abs(nearest_resistance.price - current_price) / current_price
-                if distance <= self.max_distance_to_level:
-                    candidates.append((nearest_resistance, "up", distance))
-            
-            if supports:
-                nearest_support = min(supports, key=lambda l: abs(l.price - current_price))
-                distance = abs(nearest_support.price - current_price) / current_price
-                if distance <= self.max_distance_to_level:
-                    candidates.append((nearest_support, "down", distance))
+            # ✅ ИСПРАВЛЕНО: Ищем уровни РЯДОМ с ценой, а не строго выше/ниже
+            for level in strong_levels:
+                distance_percent = abs(level.price - current_price) / current_price
+                
+                # Уровень должен быть в пределах max_distance
+                if distance_percent > self.max_distance_to_level:
+                    continue
+                
+                # Определяем направление пробоя
+                if level.level_type == "resistance":
+                    # Для сопротивления:
+                    # - Если цена ВЫШЕ или ОЧЕНЬ БЛИЗКО = пробой вверх
+                    # - Допускаем если цена в пределах 0.5% от уровня
+                    if current_price >= level.price * 0.995:  # ✅ В пределах 0.5% от уровня
+                        candidates.append((level, "up", distance_percent))
+                        logger.debug(f"🎯 Кандидат для пробоя ВВЕРХ: resistance @ {level.price:.2f}, "
+                                   f"цена={current_price:.2f} (+{(current_price/level.price-1)*100:.2f}%)")
+                
+                elif level.level_type == "support":
+                    # Для поддержки:
+                    # - Если цена НИЖЕ или ОЧЕНЬ БЛИЗКО = пробой вниз
+                    # - Допускаем если цена в пределах 0.5% от уровня
+                    if current_price <= level.price * 1.005:  # ✅ В пределах 0.5% от уровня
+                        candidates.append((level, "down", distance_percent))
+                        logger.debug(f"🎯 Кандидат для пробоя ВНИЗ: support @ {level.price:.2f}, "
+                                   f"цена={current_price:.2f} ({(current_price/level.price-1)*100:.2f}%)")
             
             if not candidates:
+                logger.debug(f"⚠️ Нет подходящих уровней рядом с ценой {current_price:.2f}")
                 return None, None
             
-            # Выбираем ближайший
+            # Выбираем БЛИЖАЙШИЙ уровень
             best_candidate = min(candidates, key=lambda x: x[2])
             level, direction, distance = best_candidate
             
-            logger.debug(f"🎯 Найден уровень: {level.level_type} @ {level.price:.2f}, "
-                        f"distance={distance*100:.2f}%, strength={level.strength:.2f}")
+            logger.info(f"✅ Найден уровень: {level.level_type} @ {level.price:.2f}, "
+                       f"current={current_price:.2f}, distance={distance*100:.2f}%, "
+                       f"direction={direction.upper()}, strength={level.strength:.2f}")
             
             return level, direction
             
@@ -405,18 +382,6 @@ class BreakoutStrategy(BaseStrategy):
         4. ✅ Консолидация (энергия)
         5. ✅ Закрытие под Hi/Low без отката
         6. ✅ ATR не исчерпан (проверено выше)
-        
-        Args:
-            level: Уровень для пробоя
-            direction: Направление пробоя
-            ta_context: Технический контекст
-            candles_5m: 5-минутные свечи
-            candles_1h: Часовые свечи
-            candles_1d: Дневные свечи
-            current_price: Текущая цена
-            
-        Returns:
-            Tuple[валидный setup?, детали]
         """
         try:
             details = {
@@ -434,7 +399,6 @@ class BreakoutStrategy(BaseStrategy):
             if self.require_compression and len(candles_5m) >= 20:
                 recent_m5 = candles_5m[-20:]
                 
-                # ✅ ИСПРАВЛЕНО: используем 'high_price' и 'low_price'
                 avg_size = sum(abs(float(c['high_price']) - float(c['low_price'])) for c in recent_m5) / len(recent_m5)
                 
                 # Последние 3 свечи должны быть меньше среднего
@@ -471,7 +435,6 @@ class BreakoutStrategy(BaseStrategy):
             # УСЛОВИЕ 3: Закрытие вблизи уровня
             close_near_level = False
             if candles_5m:
-                # ✅ ИСПРАВЛЕНО: используем 'close_price'
                 last_close = float(candles_5m[-1]['close_price'])
                 distance = abs(last_close - level.price) / level.price * 100
                 
@@ -488,10 +451,8 @@ class BreakoutStrategy(BaseStrategy):
             # УСЛОВИЕ 4: Консолидация (по H1)
             has_consolidation = False
             if self.require_consolidation and len(candles_1h) >= 10:
-                # Простая проверка: последние 10 часов цена в узком диапазоне
                 recent_h1 = candles_1h[-10:]
                 
-                # ✅ ИСПРАВЛЕНО: используем 'high_price' и 'low_price'
                 highs = [float(c['high_price']) for c in recent_h1]
                 lows = [float(c['low_price']) for c in recent_h1]
                 
@@ -520,7 +481,6 @@ class BreakoutStrategy(BaseStrategy):
             if candles_5m:
                 last_candle = candles_5m[-1]
                 
-                # ✅ ИСПРАВЛЕНО: используем 'high_price', 'low_price', 'close_price'
                 high = float(last_candle['high_price'])
                 low = float(last_candle['low_price'])
                 close = float(last_candle['close_price'])
@@ -552,7 +512,7 @@ class BreakoutStrategy(BaseStrategy):
             details["setup_quality"] = score / max_score
             
             # Минимальный score для входа
-            min_score = 1  # Минимум 3 из 5 условий
+            min_score = 1  # Минимум 1 из 5 условий
             
             is_valid = score >= min_score
             
@@ -576,23 +536,7 @@ class BreakoutStrategy(BaseStrategy):
         ta_context: Any,
         current_price: float
     ) -> Dict[str, float]:
-        """
-        Расчет параметров ордера (ТВХ, Stop Loss, Take Profit)
-        
-        Механика из документа:
-        - Entry: уровень ± offset (1-2 пункта)
-        - Stop Loss: технический (за уровень)
-        - Take Profit: минимум 3:1
-        
-        Args:
-            level: Уровень пробоя
-            direction: Направление
-            ta_context: Технический контекст
-            current_price: Текущая цена
-            
-        Returns:
-            Словарь с параметрами ордера
-        """
+        """Расчет параметров ордера (ТВХ, Stop Loss, Take Profit)"""
         try:
             level_price = level.price
             
@@ -652,19 +596,7 @@ class BreakoutStrategy(BaseStrategy):
         current_price: float,
         ta_context: Any
     ) -> bool:
-        """
-        Проверка валидности ордера
-        
-        Отменяем если цена ушла слишком далеко (> 1 ATR от entry)
-        
-        Args:
-            order_params: Параметры ордера
-            current_price: Текущая цена
-            ta_context: Технический контекст
-            
-        Returns:
-            True если ордер валиден
-        """
+        """Проверка валидности ордера"""
         try:
             entry_price = order_params.get("entry_price")
             if not entry_price:
@@ -701,19 +633,7 @@ class BreakoutStrategy(BaseStrategy):
         setup_details: Dict[str, Any],
         current_price: float
     ) -> TradingSignal:
-        """
-        Создание торгового сигнала пробоя
-        
-        Args:
-            level: Уровень пробоя
-            direction: Направление
-            order_params: Параметры ордера
-            setup_details: Детали setup
-            current_price: Текущая цена
-            
-        Returns:
-            TradingSignal
-        """
+        """Создание торгового сигнала пробоя"""
         try:
             # Определяем тип сигнала
             signal_type = SignalType.BUY if direction == "up" else SignalType.SELL
@@ -902,4 +822,4 @@ class BreakoutStrategy(BaseStrategy):
 # Export
 __all__ = ["BreakoutStrategy"]
 
-logger.info("✅ Breakout Strategy v3.0.1 loaded (FIXED: KeyError resolved)")
+logger.info("✅ Breakout Strategy v3.0.2 loaded (FIXED: Level detection logic)")
