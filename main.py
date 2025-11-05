@@ -933,13 +933,12 @@ async def create_app():
     logger.info("✅ Telegram бот инициализирован")
     
     # ✅ Загружаем пользователей из БД
-    if repository:
-        try:
-            users_loaded = await bot_instance.load_users_from_db()
-            logger.info(f"📥 Загружено {users_loaded} пользователей из БД")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось загрузить пользователей из БД: {e}")
-            logger.warning("⚠️ Продолжаем работу, пользователи будут добавляться при /start")
+    try:
+        users_loaded = await bot_instance.load_users_from_db()
+        logger.info(f"📥 Загружено {users_loaded} пользователей из БД")
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось загрузить пользователей из БД: {e}")
+        logger.warning("⚠️ Продолжаем работу, пользователи будут добавляться при /start")
     
     # Подписываем бота на сигналы
     if signal_manager and bot_instance:
