@@ -24,7 +24,6 @@ from strategies.technical_analysis.context_manager import TechnicalAnalysisConte
 from core.signal_manager import SignalManager
 
 # Для прямой отправки в Telegram
-from telegram_bot import TelegramBot
 from config import Config
 
 
@@ -135,6 +134,17 @@ async def test_full_chain():
         repo = await get_market_data_repository()
         ta_mgr = TechnicalAnalysisContextManager(repo, auto_start_background_updates=False)
         
+        # ✅ ИСПРАВЛЕНО: Создаем тестовую функцию подписчика
+        messages_received = []
+        
+        async def test_subscriber(message: str):
+            """Тестовый подписчик вместо реального Telegram бота"""
+            print(f"\n📨 ТЕСТОВЫЙ ПОДПИСЧИК ПОЛУЧИЛ СООБЩЕНИЕ:")
+            print(f"{'='*70}")
+            print(message)
+            print(f"{'='*70}")
+            messages_received.append(message)
+        
         # Создаем SignalManager
         signal_manager = SignalManager(
             openai_analyzer=None,
@@ -145,16 +155,13 @@ async def test_full_chain():
         await signal_manager.start()
         
         print("   ✅ SignalManager запущен")
-        print(f"   • Подписчиков: {len(signal_manager.subscribers)}")
+        print(f"   • Подписчиков ДО: {len(signal_manager.subscribers)}")
         
-        # Создаем Telegram бота
-        bot = TelegramBot()
+        # ПОДПИСЫВАЕМ тестовую функцию
+        signal_manager.add_subscriber(test_subscriber)
         
-        # ПОДПИСЫВАЕМ бота на сигналы
-        signal_manager.add_subscriber(bot.broadcast_signal)
-        
-        print(f"   ✅ Telegram бот подписан")
-        print(f"   • Подписчиков теперь: {len(signal_manager.subscribers)}")
+        print(f"   ✅ Тестовый подписчик добавлен")
+        print(f"   • Подписчиков ПОСЛЕ: {len(signal_manager.subscribers)}")
         
         # ==================== СОЗДАЕМ ИДЕАЛЬНЫЕ ДАННЫЕ ====================
         
@@ -214,6 +221,12 @@ async def test_full_chain():
             print(f"   ❌ Стратегия НЕ сгенерировала сигнал")
             print(f"      Даже с идеальными данными!")
             print(f"      Это означает проблему в логике стратегии!")
+            
+            print(f"\n🔍 ДИАГНОСТИКА: Почему нет сигнала?")
+            print(f"      Проверяем условия входа стратегии...")
+            
+            # Останавливаем SignalManager
+            await signal_manager.stop()
             return
         
         # ==================== ОТПРАВЛЯЕМ В SIGNALMANAGER ====================
@@ -233,6 +246,9 @@ async def test_full_chain():
             print(f"      • Cooldown активен")
             print(f"      • Превышен лимит в час")
         
+        # Даем время на обработку
+        await asyncio.sleep(1)
+        
         # ==================== ПРОВЕРЯЕМ СТАТИСТИКУ ====================
         
         print("\n5️⃣ Проверка статистики SignalManager...")
@@ -247,37 +263,7 @@ async def test_full_chain():
         print(f"      • Отфильтровано лимит: {stats['signals_filtered_rate_limit']}")
         print(f"      • Ошибки рассылки: {stats['broadcast_errors']}")
         
-        # ==================== ПРЯМАЯ ОТПРАВКА В TELEGRAM ====================
-        
-        print("\n6️⃣ АЛЬТЕРНАТИВА: Прямая отправка в Telegram (если SignalManager отклонил)...")
-        
-        if stats['signals_sent'] == 0:
-            print(f"   ⚠️ SignalManager не отправил - пробуем напрямую...")
-            
-            # Форматируем сообщение
-            message = f"""
-🔔 ТЕСТОВЫЙ СИГНАЛ
-
-Symbol: {signal.symbol}
-Type: {signal.signal_type.value}
-Strength: {signal.strength:.2f}
-Confidence: {signal.confidence:.2f}
-Price: ${signal.price:,.2f}
-
-Reasons:
-{chr(10).join(f"• {r}" for r in signal.reasons)}
-
-⚠️ ЭТО ТЕСТ! Не торговый сигнал!
-"""
-            
-            try:
-                await bot.broadcast_signal(message)
-                print(f"   ✅ Сообщение отправлено НАПРЯМУЮ в Telegram!")
-                print(f"      • Всем подписчикам бота")
-            except Exception as e:
-                print(f"   ❌ Ошибка отправки в Telegram: {e}")
-        else:
-            print(f"   ✅ SignalManager отправил сам!")
+        print(f"\n   📬 Сообщений получено тестовым подписчиком: {len(messages_received)}")
         
         # ==================== ИТОГ ====================
         
@@ -287,11 +273,14 @@ Reasons:
         
         print(f"\n✅ Стратегия: {'Работает' if signal else 'НЕ работает'}")
         print(f"✅ SignalManager: {'Пропустил' if result else 'Отклонил'}")
-        print(f"✅ Telegram: {'Отправлено' if stats['signals_sent'] > 0 else 'Проверь бот вручную'}")
+        print(f"✅ Подписчик: {'Получил сообщение' if messages_received else 'НЕ получил'}")
         
-        if signal and result and stats['signals_sent'] > 0:
+        if signal and result and messages_received:
             print(f"\n🎉 ВСЯ ЦЕПОЧКА РАБОТАЕТ!")
-            print(f"   Проверь Telegram - должно прийти уведомление!")
+            print(f"   Тестовый подписчик получил {len(messages_received)} сообщений")
+        elif signal and result and not messages_received:
+            print(f"\n⚠️ ПРОБЛЕМА В РАССЫЛКЕ!")
+            print(f"   SignalManager принял, но подписчик не получил")
         elif signal and not result:
             print(f"\n⚠️ ПРОБЛЕМА В SIGNALMANAGER!")
             print(f"   Стратегия работает, но SignalManager фильтрует")
