@@ -46,7 +46,7 @@ BASE_WEBHOOK_URL = "https://bybitmybot.onrender.com"
 
 # ✅ Глобальные переменные (упрощенная версия v3.0)
 bot_instance = None
-market_data_manager = None  # Опционально (WebSocket ticker)
+market_data_manager = None
 signal_manager = None
 strategy_orchestrator = None
 simple_candle_sync = None
@@ -54,6 +54,7 @@ simple_futures_sync = None
 ta_context_manager = None
 repository = None
 database_initialized = False
+trading_system_ready = False
 
 
 def serialize_datetime_objects(obj):
@@ -99,7 +100,8 @@ async def health_check(request):
             "repository": "inactive",
             "signal_manager": "inactive", 
             "strategy_orchestrator": "inactive",
-            "strategies_active": 0
+            "strategies_active": 0,
+            "system_ready": trading_system_ready
         }
         
         # SimpleCandleSync статус
@@ -412,6 +414,7 @@ async def trading_system_status_handler(request):
         
         response_data["timestamp"] = datetime.now().isoformat()
         response_data["status"] = "active"
+        response_data["system_ready"] = trading_system_ready
         
         response_data = serialize_datetime_objects(response_data)
         
@@ -453,6 +456,7 @@ async def root_handler(request):
             "repository_active": bool(repository),
             "signal_manager_active": bool(signal_manager and signal_manager.is_running),
             "orchestrator_active": bool(strategy_orchestrator and strategy_orchestrator.is_running),
+            "trading_system_ready": trading_system_ready,
             "environment": Config.ENVIRONMENT,
             "webhook_path": WEBHOOK_PATH,
             "api_endpoints": {
@@ -503,7 +507,7 @@ async def root_handler(request):
                 system_info["active_users"] = len(bot_instance.all_users)
             except Exception as e:
                 logger.warning(f"Failed to get active users count: {e}")
-                system_info["signal_subscribers"] = 0
+                system_info["active_users"] = 0
         
         system_info = serialize_datetime_objects(system_info)
         
@@ -572,9 +576,11 @@ async def cleanup_resources():
     """Освобождение всех ресурсов"""
     global bot_instance, signal_manager, strategy_orchestrator
     global simple_candle_sync, simple_futures_sync, ta_context_manager, repository
-    global database_initialized
+    global database_initialized, trading_system_ready
     
     try:
+        trading_system_ready = False
+        
         # Останавливаем StrategyOrchestrator
         if strategy_orchestrator:
             logger.info("🔄 Остановка StrategyOrchestrator...")
@@ -684,34 +690,27 @@ async def initialize_database_system():
         return False
 
 
-async def initialize_trading_system():
+async def create_trading_components():
     """
-    ✅ ОБНОВЛЕННАЯ инициализация торговой системы v3.0
-    
-    Архитектура:
-    1. Repository - прямой доступ к БД
-    2. SimpleCandleSync - синхронизация криптовалют
-    3. SimpleFuturesSync - синхронизация фьючерсов  
-    4. TechnicalAnalysisContextManager - технический анализ
-    5. SignalManager - фильтрация и рассылка
-    6. StrategyOrchestrator - координация стратегий
+    ✅ СОЗДАНИЕ компонентов БЕЗ запуска
+    Только инициализация объектов, фоновые задачи не запускаются
     """
     global signal_manager, strategy_orchestrator
     global simple_candle_sync, simple_futures_sync, ta_context_manager
     global repository
     
     try:
-        logger.info("🚀 Инициализация торговой системы v3.0...")
+        logger.info("📊 Создание торговых компонентов...")
         
         # ==================== ШАГ 1: Repository ====================
         logger.info("📊 Инициализация Repository...")
         from database.repositories import get_market_data_repository
         
         repository = await get_market_data_repository()
-        logger.info("✅ Repository инициализирован")
+        logger.info("✅ Repository создан")
         
-        # ==================== ШАГ 2: SimpleCandleSync ====================
-        logger.info("🔄 Инициализация SimpleCandleSync...")
+        # ==================== ШАГ 2: SimpleCandleSync (БЕЗ запуска) ====================
+        logger.info("🔄 Создание SimpleCandleSync...")
         from bybit_client import BybitClient
         
         bybit_client = BybitClient()
@@ -720,42 +719,39 @@ async def initialize_trading_system():
             symbols=Config.get_bybit_symbols(),
             bybit_client=bybit_client,
             repository=repository,
-            check_gaps_on_start=True
+            check_gaps_on_start=False  # ❗ НЕ проверяем при создании
         )
         
-        await simple_candle_sync.start()
-        logger.info("✅ SimpleCandleSync запущен")
+        logger.info("✅ SimpleCandleSync создан (не запущен)")
         
-        # ==================== ШАГ 3: SimpleFuturesSync ====================
+        # ==================== ШАГ 3: SimpleFuturesSync (БЕЗ запуска) ====================
         futures_symbols = Config.get_yfinance_symbols()
         
         if futures_symbols:
-            logger.info("🔄 Инициализация SimpleFuturesSync...")
+            logger.info("🔄 Создание SimpleFuturesSync...")
             simple_futures_sync = SimpleFuturesSync(
                 symbols=futures_symbols,
                 repository=repository,
-                check_gaps_on_start=True
+                check_gaps_on_start=False  # ❗ НЕ проверяем при создании
             )
             
-            await simple_futures_sync.start()
-            logger.info("✅ SimpleFuturesSync запущен")
+            logger.info("✅ SimpleFuturesSync создан (не запущен)")
         else:
             logger.info("⏭️ SimpleFuturesSync пропущен (нет символов)")
             simple_futures_sync = None
         
-        # ==================== ШАГ 4: TechnicalAnalysis ====================
-        logger.info("🧠 Инициализация TechnicalAnalysisContextManager...")
+        # ==================== ШАГ 4: TechnicalAnalysis (БЕЗ запуска) ====================
+        logger.info("🧠 Создание TechnicalAnalysisContextManager...")
         
         ta_context_manager = TechnicalAnalysisContextManager(
             repository=repository,
-            auto_start_background_updates=True
+            auto_start_background_updates=False  # ❗ НЕ запускаем фон
         )
         
-        await ta_context_manager.start_background_updates()
-        logger.info("✅ TechnicalAnalysisContextManager запущен")
+        logger.info("✅ TechnicalAnalysisContextManager создан (не запущен)")
         
-        # ==================== ШАГ 5: SignalManager ====================
-        logger.info("🎛️ Инициализация SignalManager v3.0...")
+        # ==================== ШАГ 5: SignalManager (БЕЗ запуска) ====================
+        logger.info("🎛️ Создание SignalManager v3.0...")
         
         # OpenAI анализатор (опционально)
         openai_analyzer = None
@@ -774,11 +770,10 @@ async def initialize_trading_system():
             min_signal_strength=0.3
         )
         
-        await signal_manager.start()
-        logger.info("✅ SignalManager запущен")
+        logger.info("✅ SignalManager создан (не запущен)")
         
-        # ==================== ШАГ 6: StrategyOrchestrator v3.0 ====================
-        logger.info("🎭 Инициализация StrategyOrchestrator v3.0...")
+        # ==================== ШАГ 6: StrategyOrchestrator (БЕЗ запуска) ====================
+        logger.info("🎭 Создание StrategyOrchestrator v3.0...")
         
         # ✅ Собираем ВСЕ символы (крипта + фьючерсы)
         all_symbols = Config.get_bybit_symbols()
@@ -789,50 +784,126 @@ async def initialize_trading_system():
         logger.info(f"   • Крипта: {len(Config.get_bybit_symbols())}")
         logger.info(f"   • Фьючерсы: {len(futures_symbols) if futures_symbols else 0}")
         
-        # ✅ ПРАВИЛЬНАЯ ИНИЦИАЛИЗАЦИЯ v3.0
         strategy_orchestrator = StrategyOrchestrator(
             repository=repository,
             ta_context_manager=ta_context_manager,
             signal_manager=signal_manager,
-            symbols=all_symbols,  # ✅ Список всех символов
-            analysis_interval_seconds=60,  # ✅ Анализ каждую минуту
-            enabled_strategies=["breakout", "bounce", "false_breakout"]  # ✅ v3.0 стратегии
+            symbols=all_symbols,
+            analysis_interval_seconds=60,
+            enabled_strategies=["breakout", "bounce", "false_breakout"]
         )
         
-        await strategy_orchestrator.start()
-        logger.info("✅ StrategyOrchestrator активен")
+        logger.info("✅ StrategyOrchestrator создан (не запущен)")
         
-        # ==================== ФИНАЛЬНАЯ СТАТИСТИКА ====================
         logger.info("=" * 70)
-        logger.info("✅ ТОРГОВАЯ СИСТЕМА ЗАПУЩЕНА v3.0")
-        logger.info("=" * 70)
-        logger.info(f"📊 Repository: ✅ АКТИВЕН")
-        logger.info(f"🔄 SimpleCandleSync: ✅ АКТИВЕН ({len(Config.get_bybit_symbols())} символов)")
-        logger.info(f"🔄 SimpleFuturesSync: {'✅ АКТИВЕН' if simple_futures_sync else '❌ ОТКЛЮЧЕН'}")
-        logger.info(f"🧠 TechnicalAnalysis: ✅ АКТИВЕН")
-        logger.info(f"🎛️ SignalManager: ✅ АКТИВЕН")
-        logger.info(f"🎭 StrategyOrchestrator: ✅ АКТИВЕН")
-        logger.info(f"   • Символов: {len(all_symbols)}")
-        logger.info(f"   • Стратегий: {len(strategy_orchestrator.strategies)}")
-        logger.info(f"   • Интервал анализа: 60s")
+        logger.info("✅ ВСЕ КОМПОНЕНТЫ СОЗДАНЫ")
         logger.info("=" * 70)
         
         return True
         
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка инициализации: {e}")
+        logger.error(f"❌ Ошибка создания компонентов: {e}")
         logger.error(traceback.format_exc())
         return False
 
 
+async def start_trading_system_background():
+    """
+    🚀 ФОНОВЫЙ запуск торговой системы
+    Вызывается ПОСЛЕ того как веб-сервер уже работает
+    """
+    global trading_system_ready
+    
+    try:
+        # Даем время веб-серверу полностью запуститься
+        logger.info("⏳ Ожидание 10 секунд перед запуском торговой системы...")
+        await asyncio.sleep(10)
+        
+        logger.info("=" * 70)
+        logger.info("🚀 ФОНОВЫЙ ЗАПУСК ТОРГОВОЙ СИСТЕМЫ")
+        logger.info("=" * 70)
+        
+        # ==================== SimpleCandleSync ====================
+        if simple_candle_sync:
+            logger.info("🔄 Запуск SimpleCandleSync...")
+            try:
+                await simple_candle_sync.start()
+                logger.info("✅ SimpleCandleSync запущен")
+            except Exception as e:
+                logger.error(f"❌ Ошибка запуска SimpleCandleSync: {e}")
+        
+        # ==================== SimpleFuturesSync ====================
+        if simple_futures_sync:
+            logger.info("🔄 Запуск SimpleFuturesSync...")
+            try:
+                await simple_futures_sync.start()
+                logger.info("✅ SimpleFuturesSync запущен")
+            except Exception as e:
+                logger.error(f"❌ Ошибка запуска SimpleFuturesSync: {e}")
+        
+        # ==================== TechnicalAnalysisContextManager ====================
+        if ta_context_manager:
+            logger.info("🧠 Запуск TechnicalAnalysisContextManager...")
+            try:
+                await ta_context_manager.start_background_updates()
+                logger.info("✅ TechnicalAnalysisContextManager запущен")
+            except Exception as e:
+                logger.error(f"❌ Ошибка запуска TechnicalAnalysisContextManager: {e}")
+        
+        # ==================== SignalManager ====================
+        if signal_manager:
+            logger.info("🎛️ Запуск SignalManager...")
+            try:
+                await signal_manager.start()
+                logger.info("✅ SignalManager запущен")
+            except Exception as e:
+                logger.error(f"❌ Ошибка запуска SignalManager: {e}")
+        
+        # ==================== StrategyOrchestrator ====================
+        if strategy_orchestrator:
+            logger.info("🎭 Запуск StrategyOrchestrator...")
+            try:
+                await strategy_orchestrator.start()
+                logger.info("✅ StrategyOrchestrator запущен")
+            except Exception as e:
+                logger.error(f"❌ Ошибка запуска StrategyOrchestrator: {e}")
+        
+        trading_system_ready = True
+        
+        logger.info("=" * 70)
+        logger.info("🎉 ТОРГОВАЯ СИСТЕМА ПОЛНОСТЬЮ АКТИВНА")
+        logger.info("=" * 70)
+        logger.info(f"🔄 SimpleCandleSync: {'✅' if simple_candle_sync and simple_candle_sync.is_running else '❌'}")
+        logger.info(f"🔄 SimpleFuturesSync: {'✅' if simple_futures_sync and simple_futures_sync.is_running else '❌'}")
+        logger.info(f"🧠 TechnicalAnalysis: {'✅' if ta_context_manager and ta_context_manager.is_running else '❌'}")
+        logger.info(f"🎛️ SignalManager: {'✅' if signal_manager and signal_manager.is_running else '❌'}")
+        logger.info(f"🎭 StrategyOrchestrator: {'✅' if strategy_orchestrator and strategy_orchestrator.is_running else '❌'}")
+        logger.info("=" * 70)
+        
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка фонового запуска торговой системы: {e}")
+        logger.error(traceback.format_exc())
+        trading_system_ready = False
+
+
 async def create_app():
-    """Создание веб-приложения"""
+    """
+    ✅ ПРАВИЛЬНОЕ создание приложения
+    
+    Последовательность:
+    1. Инициализация БД
+    2. СОЗДАНИЕ компонентов (без запуска)
+    3. Создание Telegram бота
+    4. Установка webhook
+    5. Создание веб-приложения
+    6. ВОЗВРАТ app (веб-сервер запустится в main())
+    7. Торговая система запустится В ФОНЕ после старта веб-сервера
+    """
     global bot_instance
     
-    logger.info("=" * 60)
-    logger.info("🚀 ЗАПУСК BYBIT TRADING BOT v3.0")
-    logger.info("   Simplified Architecture Edition")
-    logger.info("=" * 60)
+    logger.info("=" * 70)
+    logger.info("🚀 СОЗДАНИЕ ПРИЛОЖЕНИЯ v3.0")
+    logger.info("=" * 70)
     
     # ========== ШАГ 1: Инициализация базы данных ==========
     db_success = await initialize_database_system()
@@ -843,14 +914,14 @@ async def create_app():
         else:
             logger.warning("⚠️ Продолжаем без базы данных (только для разработки)")
     
-    # ========== ШАГ 2: Инициализируем торговую систему ====================
-    trading_system_started = await initialize_trading_system()
-    if trading_system_started:
-        logger.info("✅ Торговая система активна")
+    # ========== ШАГ 2: СОЗДАЕМ торговые компоненты (БЕЗ запуска) ==========
+    components_created = await create_trading_components()
+    if components_created:
+        logger.info("✅ Торговые компоненты созданы (фон не запущен)")
     else:
-        logger.warning("⚠️ Торговая система не активна, только Telegram бот")
+        logger.warning("⚠️ Не удалось создать торговые компоненты")
     
-    # ========== ШАГ 3: Создаем экземпляр бота ====================
+    # ========== ШАГ 3: Создаем Telegram бота ==========
     logger.info("🤖 Инициализация Telegram бота...")
     
     bot_instance = TelegramBot(
@@ -859,7 +930,16 @@ async def create_app():
         ta_context_manager=ta_context_manager
     )
     
-    logger.info(f"✅ Telegram бот инициализирован")
+    logger.info("✅ Telegram бот инициализирован")
+    
+    # ✅ Загружаем пользователей из БД
+    if repository:
+        try:
+            users_loaded = await bot_instance.load_users_from_db()
+            logger.info(f"📥 Загружено {users_loaded} пользователей из БД")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось загрузить пользователей из БД: {e}")
+            logger.warning("⚠️ Продолжаем работу, пользователи будут добавляться при /start")
     
     # Подписываем бота на сигналы
     if signal_manager and bot_instance:
@@ -870,6 +950,7 @@ async def create_app():
     await on_startup(bot_instance.bot)
     
     # ========== ШАГ 5: Создаем веб-приложение ==========
+    logger.info("🌐 Создание веб-приложения...")
     app = web.Application()
     
     # Основные endpoints
@@ -893,17 +974,31 @@ async def create_app():
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
     setup_application(app, bot_instance.dp, bot=bot_instance.bot)
     
+    logger.info("✅ Веб-приложение создано")
+    
     # Graceful shutdown
     async def cleanup_handler(app):
         await cleanup_resources()
     
     app.on_cleanup.append(cleanup_handler)
     
+    logger.info("=" * 70)
+    logger.info("✅ ПРИЛОЖЕНИЕ ГОТОВО К ЗАПУСКУ")
+    logger.info("=" * 70)
+    
     return app
 
 
 async def main():
-    """Главная функция приложения"""
+    """
+    ✅ ПРАВИЛЬНАЯ главная функция
+    
+    Последовательность:
+    1. Создать app (БЕЗ запуска торговой системы)
+    2. Запустить веб-сервер (открыть порт!)
+    3. Запустить торговую систему В ФОНЕ
+    4. Мониторинг компонентов
+    """
     
     try:
         logger.info("🌟 Запуск Bybit Trading Bot v3.0")
@@ -911,31 +1006,34 @@ async def main():
         logger.info(f"🔧 Webhook URL: {BASE_WEBHOOK_URL}{WEBHOOK_PATH}")
         logger.info(f"🔧 Environment: {Config.ENVIRONMENT}")
         
-        # Создаем приложение
+        # ========== ШАГ 1: Создаем приложение ==========
         app = await create_app()
         
-        # Запускаем веб-сервер
+        # ========== ШАГ 2: Запускаем веб-сервер (ОТКРЫВАЕМ ПОРТ!) ==========
         runner = web.AppRunner(app)
         await runner.setup()
         
         site = web.TCPSite(runner, WEB_SERVER_HOST, WEB_SERVER_PORT)
         await site.start()
         
-        logger.info("=" * 60)
-        logger.info("✅ ПРИЛОЖЕНИЕ УСПЕШНО ЗАПУЩЕНО")
-        logger.info("=" * 60)
+        logger.info("=" * 70)
+        logger.info("✅ ВЕБ-СЕРВЕР ЗАПУЩЕН (ПОРТ ОТКРЫТ)")
+        logger.info("=" * 70)
         logger.info(f"🌐 Веб-сервер: {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
         logger.info(f"🤖 Telegram бот: активен")
         logger.info(f"🗄️ База данных: {'подключена' if database_initialized else 'отключена'}")
-        logger.info(f"🚀 Торговая система: {'активна' if strategy_orchestrator else 'неактивна'}")
-        logger.info("=" * 60)
+        logger.info("=" * 70)
         
-        # Основной цикл приложения
+        # ========== ШАГ 3: Запускаем торговую систему В ФОНЕ ==========
+        asyncio.create_task(start_trading_system_background())
+        logger.info("🔄 Торговая система запускается в фоновом режиме...")
+        
+        # ========== ШАГ 4: Основной цикл мониторинга ==========
         try:
             while True:
                 await asyncio.sleep(3600)
                 
-                # Мониторинг компонентов
+                # Мониторинг компонентов (перезапуск при необходимости)
                 if simple_candle_sync and not simple_candle_sync.is_running:
                     logger.warning("⚠️ SimpleCandleSync остановился, перезапуск...")
                     try:
